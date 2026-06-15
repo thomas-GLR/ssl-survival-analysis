@@ -1,18 +1,25 @@
 import pandas as pd
 import numpy as np
+from mistune.directives import include
 from torch.utils.data import Dataset, DataLoader
 import os
 import torch
 from sklearn.cluster import KMeans
 
+ID = 'id'
+TIME = 'time'
 
 class CMAPSSDataset(Dataset):
+    """
+    Most of the code come from the paper "Building of transformer-based RUL predictors supported by explainability
+    techniques: Application on real industrial datasets" where the repository can be fined at this address : https://github.com/DintenR/Transformer-based-RUL-predictors
+    """
     # [op1, op2, op3]
     OPERATION_COLS = ['op%d' % i for i in range(1, 3 + 1)]
     # [s1, s2, ..., s21]
     SENSOR_COLS = ['s%d' % i for i in range(1, 21 + 1)]
     # [id, time, op1, op2, op3, s1, s2, ..., s21]
-    DATASET_COLS = ['id', 'time'] + OPERATION_COLS + SENSOR_COLS
+    DATASET_COLS = [ID, TIME] + OPERATION_COLS + SENSOR_COLS
 
     @staticmethod
     def z_score_normalization(df, cols, norm_params):
@@ -141,11 +148,23 @@ class CMAPSSDataset(Dataset):
         return norm_params.squeeze()
 
     @staticmethod
-    def get_datasets(dataset_root, sub_dataset='FD001', sequence_len=1, max_rul=None,
-                     return_sequence_label=False, norm_type=None, cluster_operations=False,
-                     norm_by_operations=False, include_cols=None, exclude_cols=None, return_id=False,
-                     validation_rate=0.2, use_only_final_on_test=True, use_max_rul_on_test=False,
-                     use_max_rul_on_valid=True):
+    def get_datasets(
+            dataset_root,
+            sub_dataset='FD001',
+            sequence_len=1,
+            max_rul=None,
+            return_sequence_label=False,
+            norm_type=None,
+            cluster_operations=False,
+            norm_by_operations=False,
+            include_cols=None,
+            exclude_cols=None,
+            return_id=False,
+            validation_rate=0.2,
+            use_only_final_on_test=True,
+            use_max_rul_on_test=False,
+            use_max_rul_on_valid=True
+    ):
         """
             Get train, valid, test dataset from dataset file.
             The parameter with the same name as in __init__ has the same effect, they are:
@@ -310,8 +329,43 @@ class CMAPSSDataset(Dataset):
         return train_loader, test_loader, valid_loader
 
     @staticmethod
-    def get_data_for_ssl_pct():
+    def get_data_for_ssl_pct(
+            dataset_root: str,
+            sub_dataset: str='FD001',
+            max_rul=None,
+            validation_rate=0.2,
+            use_max_rul_on_test=False,
+            use_max_rul_on_valid=True
+    ) -> tuple['CMAPSSDataset', 'CMAPSSDataset', 'CMAPSSDataset']:
+        train_dataset, test_dataset, valid_dataset = CMAPSSDataset.get_datasets(
+            dataset_root=dataset_root,
+            sub_dataset=sub_dataset,
+            sequence_len=1,
+            max_rul=max_rul,
+            return_sequence_label=True,
+            norm_type=None,
+            cluster_operations=False,
+            norm_by_operations=False,
+            include_cols=None,
+            exclude_cols=None,
+            return_id=True,
+            validation_rate=validation_rate,
+            use_only_final_on_test=False,
+            use_max_rul_on_test=use_max_rul_on_test,
+            use_max_rul_on_valid=use_max_rul_on_valid
+        )
 
+        train_dataset._group_line_of_each_id_with_summary_features()
+        test_dataset._group_line_of_each_id_with_summary_features(test=True)
+        valid_dataset._group_line_of_each_id_with_summary_features()
+
+        time_grid = np.sort(train_dataset.df['time_to_event'].unique())
+
+        train_dataset._to_pyclus_data(time_grid)
+        valid_dataset._to_pyclus_data(time_grid)
+        test_dataset._to_pyclus_data(time_grid)
+
+        return train_dataset, test_dataset, valid_dataset
 
     def __init__(self, data_df, sequence_len=1, final_rul=None, norm_params=None, norm_type=None,
                  max_rul=None, only_final=False, init=True, return_sequence_label=False,
@@ -465,6 +519,13 @@ class CMAPSSDataset(Dataset):
         self.has_normalization = False
         self.has_gen_sequence = False
 
+        # Attribute for pyclus
+        self.X = None
+        self.Y = None
+        self.ids = None
+        self.time_grid = None
+        self.feature_names_pyclus = None
+
         if self.init:
             if self.cluster_operations:
                 CMAPSSDataset.clustering_operations([self])
@@ -508,6 +569,16 @@ class CMAPSSDataset(Dataset):
         df['rul'] = df.apply(lambda x: max_rul if max_rul < x['real_rul'] else x['real_rul'], axis=1)
         self.df = df
 
+    def _group_line_of_each_id_with_summary_features(self, test: bool=True) -> None:
+        df = self.df
+
+        summary_features_by_id_df = df.groupby('id').apply(
+            lambda grp: self._summary_features_per_id(grp, test=True),
+            include_groups=False
+        )
+
+        self.df = summary_features_by_id_df
+
     def _set_norm_params(self, norm_type, norm_params, norm_by_operations):
         # norm_params
         self.norm_params = norm_params
@@ -518,6 +589,100 @@ class CMAPSSDataset(Dataset):
 
         # norm by operations
         self.norm_by_operations = norm_by_operations
+
+    def _summary_features_per_id(self, grp, test: bool=True) -> pd.Series:
+        grp = grp.sort_values(TIME)
+        row = {}
+
+        for col in self.feature_cols:
+            vals = grp[col].dropna()
+            times = grp.loc[grp[col].notna(), TIME]
+
+            if len(vals) == 0:
+                row[f"{col}_mean"] = np.nan
+                row[f"{col}_last"] = np.nan
+                row[f"{col}_slope"] = np.nan
+                row[f"{col}_max"] = np.nan
+            else:
+                row[f"{col}_mean"] = vals.mean()
+                row[f"{col}_last"] = vals.iloc[-1]
+                row[f"{col}_max"] = vals.max()
+                # Slope in linear regression if ≥ 2 values
+                if len(vals) >= 2:
+                    slope = np.polyfit(times, vals, 1)[0]
+                else:
+                    slope = 0.0
+                row[f"{col}_slope"] = slope
+
+        last_idx = grp[TIME].idxmax()
+        last_real_rul = grp.loc[last_idx, 'real_rul']
+
+        # We use 'rul' column because we may wan't to use the max_rul if it is set.
+        row["time_to_event"] = grp['rul'].max()
+        if test:
+            # The event test is never censored
+            row["event"] = 1
+        else:
+            row["event"] = 1 if last_real_rul <= 0 else 0
+
+        return pd.Series(row)
+
+    def _build_survival_targets(self, time_grid, time_col='time_to_event', event_col='event'):
+        """
+        Builds the multi-target labels for a survival SSL-PCT
+        (see "Survival analysis with semi-supervised predictive clustering trees").
+
+        For each individual and for each time t_j in time_grid:
+            - 1   if the individual is known to be "alive" at t_j      (t_j <= time_to_event)
+            - 0   if the event is known to have occurred before t_j   (t_j > time_to_event and event == 1)
+            - '?' if the status is unknown at t_j (censoring)         (t_j > time_to_event and event == 0)
+
+        :return: List[List[Any]] of shape (n_samples, len(time_grid)), values 0/1/'?'
+        """
+        df = self.df
+
+        times = df[time_col].to_numpy().reshape(-1, 1)
+        events = df[event_col].to_numpy().reshape(-1, 1)
+        grid = np.asarray(time_grid).reshape(1, -1)
+
+        alive = grid <= times  # (n_samples, n_times) -- connu "vivant" à t_j
+        unknown_or_dead = np.where(events == 1, 0, np.nan)  # (n_samples, 1)
+
+        targets = np.where(alive, 1, unknown_or_dead).astype(object)
+        targets[pd.isna(targets)] = '?'
+
+        return targets.tolist()
+
+    def _to_pyclus_data(self, time_grid, feature_cols=None,
+                        time_col='time_to_event', event_col='event'):
+        """
+        Converts self.df (already aggregated by id via _group_line_of_each_id_with_summary_features)
+        to the format expected by pyclus:
+            - X: List[List[Any]], missing values marked as '?'
+            - Y: List[List[Any]], survival encoding 0/1/'?' (see build_survival_targets)
+
+        Also stores self.X, self.Y, self.ids, self.time_grid, and self.feature_names_pyclus
+        so they can be easily reused.
+        """
+        df = self.df
+
+        if feature_cols is None:
+            exclude = {time_col, event_col}
+            feature_cols = [c for c in df.columns if c not in exclude]
+
+        X = df[feature_cols].to_numpy(dtype=object)
+        X[pd.isna(X)] = '?'
+        X = X.tolist()
+
+        Y = self._build_survival_targets(time_grid, time_col, event_col)
+
+        self.X = X
+        self.Y = Y
+        self.ids = df.index.to_numpy()
+        self.time_grid = np.asarray(time_grid)
+        self.feature_names_pyclus = feature_cols
+
+        return X, Y
 
     def normalization(self):
         if self.norm_type is None:
