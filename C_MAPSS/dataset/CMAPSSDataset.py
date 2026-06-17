@@ -166,9 +166,14 @@ class CMAPSSDataset(Dataset):
         # only final
         self.only_final = only_final
 
+        self.percent_of_censored_data = percent_of_censored_data
+        self.percent_of_broken_data = percent_of_broken_data
+
         # We need to create the censored data before count_rul(), normalization() and clustering()
         if percent_of_censored_data > 0:
             self._generate_censored_data()
+        else:
+            self.df['is_censored'] = 0
 
         # compute RUL
         self.count_rul()
@@ -187,15 +192,13 @@ class CMAPSSDataset(Dataset):
         self.label_array = None
         self.id_array = None
 
+        self.kmeans_model = None
+
         if self.cluster_operations:
             self._clustering_operations(kmeans_model)
 
         if self.norm_type:
             self._normalization()
-
-
-        self.percent_of_censored_data = percent_of_censored_data
-        self.percent_of_broken_data = percent_of_broken_data
 
         self._gen_sequence()
 
@@ -237,6 +240,10 @@ class CMAPSSDataset(Dataset):
         df = pd.merge(df, rul_df)
         df['real_rul'] = df.apply(lambda x: x['rul'] - x['time'], axis=1)
         df['rul'] = df.apply(lambda x: max_rul if max_rul < x['real_rul'] else x['real_rul'], axis=1)
+
+        # For the censored data we can't calculate the RUL as we don't know when the event occurs
+        df.loc[df['is_censored'] == 1, ['rul', 'real_rul']] = np.nan
+
         self.df = df
         self.has_count_rul = True
 
@@ -430,7 +437,7 @@ class CMAPSSDataset(Dataset):
             raise RuntimeError('The censored data need to be generated before clustering operations, normalization, sequence generation and counting RUL')
 
         unique_ids = self.df['id'].unique()
-        number_units = len(self.id_array)
+        number_units = len(unique_ids)
 
         number_censored_units = int(number_units * self.percent_of_censored_data)
         censored_ids = np.random.choice(unique_ids, size=number_censored_units, replace=False)
@@ -438,17 +445,24 @@ class CMAPSSDataset(Dataset):
         self.df['is_censored'] = 0
         self.df.loc[self.df['id'].isin(censored_ids), 'is_censored'] = 1
 
-        def delete_last_rows(group, percent_of_broken_data: float | None):
-            if group['is_censored'].iloc[0] == 0:
-                return group
+        # Sort by id/time first so "the first x% of rows" really means "the earliest x%
+        # of cycles", regardless of the row order found in the raw txt file.
+        self.df = self.df.sort_values(['id', 'time']).reset_index(drop=True)
+
+        # For each censored unit, keep only the first percent_of_broken_data fraction of its
+        # cycles (in time order), simulating a unit that has not (yet) reached failure.
+        # Built as a boolean mask instead of groupby().apply() because pandas >= 2.2 strips
+        # the 'id' grouping column out of the group passed to apply() by default, and pandas
+        # 3.x removed the include_groups=True escape hatch entirely.
+        keep_mask = np.ones(len(self.df), dtype=bool)
+        for unit_id in censored_ids:
+            unit_row_positions = np.flatnonzero(self.df['id'].to_numpy() == unit_id)
 
             pct_to_keep = self.percent_of_broken_data
             if pct_to_keep is None:
                 pct_to_keep = np.random.default_rng().random()
 
-            n = len(group)
-            x = max(1, int(pct_to_keep * n))
+            num_rows_to_keep = max(1, int(pct_to_keep * len(unit_row_positions)))
+            keep_mask[unit_row_positions[num_rows_to_keep:]] = False
 
-            return group.iloc[:x]
-
-        self.df.groupby('id').apply(lambda x: delete_last_rows(x, self.percent_of_broken_data)).reset_index(drop=True)
+        self.df = self.df.loc[keep_mask].reset_index(drop=True)

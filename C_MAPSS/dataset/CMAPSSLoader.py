@@ -27,7 +27,7 @@ class CMAPSSLoader:
             use_max_rul_on_valid=True,
             percent_of_censored_data: float = 0.0,
             percent_of_broken_data: float | None = None
-    ):
+    ) -> tuple[CMAPSSDataset, CMAPSSDataset, CMAPSSDataset]:
         """
             Get train, valid, test dataset from dataset file.
             The parameter with the same name as in __init__ has the same effect, they are:
@@ -138,6 +138,8 @@ class CMAPSSLoader:
 
         test_dataset = CMAPSSDataset(
             test_df,
+            kmeans_model=train_dataset.kmeans_model,
+            norm_params=train_dataset.norm_params,
             **common_dataset_kwargs
         )
 
@@ -152,6 +154,8 @@ class CMAPSSLoader:
                 train_val_dataset_kwargs.pop('only_final')
             valid_dataset = CMAPSSDataset(
                 valid_df,
+                kmeans_model=train_dataset.kmeans_model,
+                norm_params=train_dataset.norm_params,
                 **train_val_dataset_kwargs
             )
 

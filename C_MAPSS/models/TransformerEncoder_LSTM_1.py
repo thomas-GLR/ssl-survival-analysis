@@ -11,10 +11,11 @@ class TransformerEncoder_LSTM_1(nn.Module):
         techniques: Application on real industrial datasets"
 
     The orginal code can be found here : https://github.com/DintenR/Transformer-based-RUL-predictors/tree/main
+    See : CMAPSS > models > TransformerEncoder_LSTM_1.py
     """
 
     def __init__(self, feature_num, sequence_len, transformer_encoder_head_num, hidden_dim, lstm_num_layers,
-                 lstm_dropout, fc_layer_dim, fc_dropout, device):
+                 lstm_dropout, fc_layer_dim, fc_dropout):
         super(TransformerEncoder_LSTM_1, self).__init__()
 
         self.feature_num = feature_num

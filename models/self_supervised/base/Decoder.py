@@ -1,6 +1,9 @@
 import torch.nn as nn
 import torch
 
+from models.self_supervised.base import layers
+
+
 class Decoder(nn.Module):
     def __init__(
         self,
