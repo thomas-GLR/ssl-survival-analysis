@@ -1,13 +1,12 @@
-import pandas as pd
 import numpy as np
-from mistune.directives import include
-from torch.utils.data import Dataset, DataLoader
-import os
+import pandas as pd
 import torch
 from sklearn.cluster import KMeans
+from torch.utils.data import Dataset, DataLoader
 
 ID = 'id'
 TIME = 'time'
+
 
 class CMAPSSDataset(Dataset):
     """
@@ -21,356 +20,24 @@ class CMAPSSDataset(Dataset):
     # [id, time, op1, op2, op3, s1, s2, ..., s21]
     DATASET_COLS = [ID, TIME] + OPERATION_COLS + SENSOR_COLS
 
-    @staticmethod
-    def z_score_normalization(df, cols, norm_params):
-        if len(norm_params.shape) == 2:
-            for col_i, col in enumerate(cols):
-                mean, standard = norm_params[col_i]
-                values = df[col].values
-                values = values - mean
-                if standard != 0:
-                    values = values / standard
-                df[col] = values
-        elif len(norm_params.shape) == 3:
-            op_list = df['op_type'].unique()
-            op_list.sort()
-            for op_i, op in enumerate(op_list):
-                for col_i, col in enumerate(cols):
-                    mean, standard = norm_params[op_i, col_i]
-                    values = df[df['op_type'] == op][col].values
-                    values = (values - mean)
-                    if standard != 0:
-                        values = values / standard
-                    df.loc[df['op_type'] == op, col] = values
-        else:
-            raise ValueError('norm_params shape error')
-        return df
-
-    @staticmethod
-    def min_max_normalization(df, cols, norm_params, min_norm, max_norm):
-        if len(norm_params.shape) == 2:
-            for col_i, col in enumerate(cols):
-                min_v, max_v = norm_params[col_i]
-                if max_v == min_v:
-                    df[col] = (min_norm + max_norm) / 2  # median
-                else:
-                    df[col] = (((max_norm - min_norm) * (df[col].values - min_v)) / (max_v - min_v)) + min_norm
-        elif len(norm_params.shape) == 3:
-            op_list = df['op_type'].unique()
-            op_list.sort()
-            for op_i, op in enumerate(op_list):
-                for col_i, col in enumerate(cols):
-                    min_v, max_v = norm_params[op_i, col_i]
-                    if max_v == min_v:
-                        df.loc[df['op_type'] == op, col] = (min_norm + max_norm) / 2  # median
-                    else:
-                        values = df[df['op_type'] == op][col].values
-                        df.loc[df['op_type'] == op, col] = (((max_norm - min_norm) * (values - min_v)) / (
-                                max_v - min_v)) + min_norm
-
-        else:
-            raise ValueError('norm_params shape error')
-        return df
-
-    @staticmethod
-    def clustering_operations(dataset_list):
-        df_list = []
-        for dataset in dataset_list:
-            df_list.append(dataset.df)
-
-        full_df = pd.concat(df_list)
-        op_types = KMeans(n_clusters=6, random_state=1).fit_predict(full_df[['op1', 'op2', 'op3']].values)
-        full_df.insert(2, 'op_type', op_types)
-        start = 0
-        for i, df in enumerate(df_list):
-            dataset = dataset_list[i]
-            df_len = len(dataset.df)
-            # print('loc', start, df_len)
-            dataset.df = full_df.iloc[start: start + df_len]
-            dataset.has_cluster_operations = True
-            start += df_len
-
-    @staticmethod
-    def gen_norm_params(dataset_list, norm_type, norm_by_operations=False):
-        """
-            Get normalization parameters from multiple dataset.
-            if normalization by conditions, need cluster operations first.
-
-        :param dataset_list: list of CMPASSDataset instances
-        :param norm_type: 0-1, -1-1 or z-score
-        :param norm_by_operations:
-        :return: normalize by each op_type
-        """
-        assert norm_type in ['0-1', '-1-1', 'z-score']
-        df_list = []
-        feature_cols = None
-        for dataset in dataset_list:
-            # must have save feature_cols
-            if feature_cols is not None:
-                assert feature_cols == dataset.feature_cols, \
-                    'multiple dataset normalization must have same feature_cols'
-            # must have same norm_by_operations setting
-            assert norm_by_operations == bool(dataset.norm_by_operations), \
-                'multiple dataset normalization must have same norm_by_operations setting'
-            if norm_by_operations:
-                assert dataset.has_cluster_operations, \
-                    'need cluster operations before normalization when norm_by_operations is True'
-
-            feature_cols = dataset.feature_cols
-            df_list.append(dataset.df)
-
-        norm_cols = feature_cols
-
-        full_df = pd.concat(df_list)
-
-        if norm_by_operations:
-            df_list = []
-            op_list = full_df['op_type'].unique()
-            op_list.sort()
-            for op in op_list:
-                df_list.append(full_df[full_df['op_type'] == op])
-        else:
-            df_list = [full_df]
-
-        params_list = []
-        for df in df_list:
-            if norm_type == '0-1' or norm_type == '-1-1':
-                col_max = np.max(df[norm_cols].values, axis=0)
-                col_min = np.min(df[norm_cols].values, axis=0)
-                params_list.append(np.stack((col_min, col_max), axis=1))
-            if norm_type == 'z-score':
-                mean = np.mean(df[norm_cols].values, axis=0)
-                standard = np.std(df[norm_cols].values, axis=0)
-                params_list.append(np.stack((mean, standard), axis=1))
-
-        norm_params = np.stack(params_list, axis=0)
-
-        return norm_params.squeeze()
-
-    @staticmethod
-    def get_datasets(
-            dataset_root,
-            sub_dataset='FD001',
+    def __init__(
+            self,
+            data_df,
             sequence_len=1,
-            max_rul=None,
-            return_sequence_label=False,
+            final_rul=None,
+            norm_params=None,
             norm_type=None,
+            max_rul=None,
+            only_final=False,
+            return_sequence_label=False,
             cluster_operations=False,
             norm_by_operations=False,
             include_cols=None,
             exclude_cols=None,
             return_id=False,
-            validation_rate=0.2,
-            use_only_final_on_test=True,
-            use_max_rul_on_test=False,
-            use_max_rul_on_valid=True
-    ):
-        """
-            Get train, valid, test dataset from dataset file.
-            The parameter with the same name as in __init__ has the same effect, they are:
-            sequence_len, max_rul, return_sequence_label, include_cols, exclude_cols, return id
-
-        :param dataset_root:
-            root directory of raw txt files
-
-        :param sub_dataset:
-            A string denote the dataset name, FD001/FD002/FD003/FD004
-
-        :param sequence_len:
-        :param max_rul:
-        :param return_sequence_label:
-        :param norm_type:
-        :param cluster_operations:
-        :param norm_by_operations:
-        :param include_cols:
-        :param exclude_cols:
-        :param return_id:
-
-        :param validation_rate:
-            Number of units used in the validation set as a percentage of the total training set, default is 0.2
-            validation_rate = len(validation_dataset.df['id'].unique()) / len(full_train_dataset.df['id'].unique())
-
-        :param use_only_final_on_test:
-            set only_final on test dataset, default is True
-
-        :param use_max_rul_on_test:
-            use max_rul on test dataset
-
-        :param use_max_rul_on_valid:
-            use max_rul on validation dataset
-
-        """
-        if sub_dataset == 'PHM08':
-            train_df = pd.read_csv(os.path.join(dataset_root, 'train.txt'), sep=' ', header=None)
-            test_df = pd.read_csv(os.path.join(dataset_root, 'test.txt'.format(sub_dataset)), sep=' ', header=None)
-            # PHM08 test dataset has 218 unit
-            rul = np.empty(218)
-            rul[:] = np.nan
-        else:
-            train_df = pd.read_csv(os.path.join(dataset_root, 'train_{:s}.txt'.format(sub_dataset)), sep=' ',
-                                   header=None)
-            test_df = pd.read_csv(os.path.join(dataset_root, 'test_{:s}.txt'.format(sub_dataset)), sep=' ', header=None)
-            rul_df = pd.read_csv(os.path.join(dataset_root, 'RUL_{:s}.txt'.format(sub_dataset)), header=None)
-            rul = rul_df.values.squeeze()
-
-        # split valid set
-        # train_df[0] is unit id column
-        valid_df = None
-        valid_dataset = None
-        assert 0 <= validation_rate <= 0.99
-        if validation_rate:
-            ids = train_df[0].unique()
-            max_id = np.max(ids)
-            valid_len = int(validation_rate * max_id)
-            if valid_len:
-                # random chose valid engine id
-                valid_ids = np.random.choice(np.arange(1, max_id + 1), valid_len, replace=False)
-
-                isin_df = np.isin(train_df[0].to_numpy(), valid_ids)
-                valid_df = train_df.iloc[np.where(isin_df == True)]
-                train_df = train_df.iloc[np.where(isin_df == False)]
-
-        if sub_dataset in ['FD001', 'FD003']:
-            norm_by_operations = False
-            cluster_operations = False
-
-        dataset_kwargs = {
-            'sequence_len': sequence_len,
-            'max_rul': max_rul,
-            'norm_type': norm_type,
-            'include_cols': include_cols,
-            'exclude_cols': exclude_cols,
-            'cluster_operations': cluster_operations,
-            'norm_by_operations': norm_by_operations,
-            'return_sequence_label': return_sequence_label,
-            'return_id': return_id
-        }
-
-        # print
-        train_dataset = CMAPSSDataset(
-            train_df,
-            init=False,
-            **dataset_kwargs
-        )
-        dataset_kwargs['final_rul'] = rul
-        if not use_max_rul_on_test and 'max_rul' in dataset_kwargs:
-            dataset_kwargs.pop('max_rul')
-        if use_only_final_on_test:
-            dataset_kwargs['only_final'] = True
-
-        test_dataset = CMAPSSDataset(
-            test_df,
-            init=False,
-            **dataset_kwargs
-        )
-
-        if valid_df is not None:
-            if 'final_rul' in dataset_kwargs:
-                dataset_kwargs.pop('final_rul')
-            if not use_max_rul_on_valid and 'max_rul' in dataset_kwargs:
-                dataset_kwargs.pop('max_rul')
-            if use_max_rul_on_valid and max_rul is not None:
-                dataset_kwargs['max_rul'] = max_rul
-            if 'only_final' in dataset_kwargs:
-                dataset_kwargs.pop('only_final')
-            valid_dataset = CMAPSSDataset(
-                valid_df,
-                init=False,
-                **dataset_kwargs
-            )
-
-        dataset_list = [train_dataset, test_dataset]
-        if valid_df is not None:
-            dataset_list.append(valid_dataset)
-
-        if cluster_operations:
-            CMAPSSDataset.clustering_operations(dataset_list)
-
-        if norm_type:
-            norm_params = CMAPSSDataset.gen_norm_params(dataset_list, norm_type, norm_by_operations)
-            for dataset in dataset_list:
-                dataset._set_norm_params(norm_type, norm_params, norm_by_operations)
-                dataset.normalization()
-
-        for dataset in dataset_list:
-            dataset.gen_sequence()
-
-        return train_dataset, test_dataset, valid_dataset
-
-    @staticmethod
-    def get_data_loaders(loader_kwargs, train_kwargs=None, test_kwargs=None, valid_kwargs=None, **dataset_kwargs):
-        """
-        :param loader_kwargs:
-            kwargs pass to all DataLoader
-        :param train_kwargs:
-            kwargs only pass to train DataLoader, will cover loader_kwargs's same key
-        :param test_kwargs:
-            kwargs only pass to test DataLoader, will cover loader_kwargs's same key
-        :param valid_kwargs:
-            kwargs only pass to valid DataLoader, will cover loader_kwargs's same key
-        :param dataset_kwargs:
-            dataset arguments which describe above
-        """
-        train_kwargs = train_kwargs or dict()
-        test_kwargs = test_kwargs or dict()
-        valid_kwargs = valid_kwargs or dict()
-        train_kwargs.update(loader_kwargs)
-        test_kwargs.update(loader_kwargs)
-        valid_kwargs.update(loader_kwargs)
-
-        train_kwargs['shuffle'] = True
-        train_dataset, test_dataset, valid_dataset = CMAPSSDataset.get_datasets(**dataset_kwargs)
-        print('tran/valid/test', len(train_dataset), len(valid_dataset) if valid_dataset else 0, len(test_dataset))
-        # print('train_kwargs', train_kwargs)
-        train_loader = DataLoader(train_dataset, **train_kwargs)
-        test_loader = DataLoader(test_dataset, **test_kwargs)
-        valid_loader = DataLoader(valid_dataset, **valid_kwargs) if valid_dataset else None
-
-        return train_loader, test_loader, valid_loader
-
-    @staticmethod
-    def get_data_for_ssl_pct(
-            dataset_root: str,
-            sub_dataset: str='FD001',
-            max_rul=None,
-            validation_rate=0.2,
-            use_max_rul_on_test=False,
-            use_max_rul_on_valid=True
-    ) -> tuple['CMAPSSDataset', 'CMAPSSDataset', 'CMAPSSDataset']:
-        train_dataset, test_dataset, valid_dataset = CMAPSSDataset.get_datasets(
-            dataset_root=dataset_root,
-            sub_dataset=sub_dataset,
-            sequence_len=1,
-            max_rul=max_rul,
-            return_sequence_label=True,
-            norm_type=None,
-            cluster_operations=False,
-            norm_by_operations=False,
-            include_cols=None,
-            exclude_cols=None,
-            return_id=True,
-            validation_rate=validation_rate,
-            use_only_final_on_test=False,
-            use_max_rul_on_test=use_max_rul_on_test,
-            use_max_rul_on_valid=use_max_rul_on_valid
-        )
-
-        train_dataset._group_line_of_each_id_with_summary_features()
-        test_dataset._group_line_of_each_id_with_summary_features(test=True)
-        valid_dataset._group_line_of_each_id_with_summary_features()
-
-        time_grid = np.sort(train_dataset.df['time_to_event'].unique())
-
-        train_dataset._to_pyclus_data(time_grid)
-        valid_dataset._to_pyclus_data(time_grid)
-        test_dataset._to_pyclus_data(time_grid)
-
-        return train_dataset, test_dataset, valid_dataset
-
-    def __init__(self, data_df, sequence_len=1, final_rul=None, norm_params=None, norm_type=None,
-                 max_rul=None, only_final=False, init=True, return_sequence_label=False,
-                 cluster_operations=False, norm_by_operations=False, include_cols=None,
-                 exclude_cols=None, no_rul=False, return_id=False):
+            kmeans_model=None,
+            percent_of_censored_data: float=0.0,
+            percent_of_broken_data: float | None=None):
         """
 
             C-MAPSS Dataset, create pytorch Dataset by pd.Dataframe use original txt file,
@@ -414,12 +81,6 @@ class CMAPSSDataset(Dataset):
         :param only_final:
             only use the last time window's data and label, use in test sets, default False
 
-        :param init:
-            A Boolean denote whether generate the sequence in __init__, default is True
-            if False, only set self.df and calculate max_rul on __init__ ,
-            you need to call function manually, like normalization() to normalize data, clustering_operation() to
-            cluster operational settings and get_sequence() to generate the sequence.
-
         :param return_sequence_label:
             return all RUL instead of only last RUL, default is False.
 
@@ -438,8 +99,16 @@ class CMAPSSDataset(Dataset):
         :param exclude_cols:
             exclude features, e.g. ['op3', 's2', 's3'], default is None
 
-        :params no_rul:
-            Do not count RUL, use in PHM08's test dataset
+        :param kmeans_model:
+            A KMeans model already fit to have the same cluster than the train dataset for valid and test
+
+        :param percent_of_censored_data:
+            percentage of censored data, default is 0.0, which means no censored data.
+            The percentage of censored data dosen't apply to test dataset
+
+        :param percent_of_broken_data:
+            This is the percent of damage until the data is censored.
+            Default is None which means the broken percent is random
 
         :param return_id:
             return unit id, default is False
@@ -449,12 +118,16 @@ class CMAPSSDataset(Dataset):
         assert isinstance(data_df, pd.DataFrame), 'data_df need pd.DataFrame'
         assert len(data_df.columns) >= 26, 'Invalid Dataframe input (columns < 26)'
 
+        self.has_cluster_operations = False
+        self.has_normalization = False
+        self.has_gen_sequence = False
+        self.has_count_rul = False
+
         # set self.df
         self.df = data_df
         if len(self.df.columns) >= 26:
             self.df = self.df.drop([26, 27], axis=1)
         self.df.columns = CMAPSSDataset.DATASET_COLS
-        # print('init', self.df)
         # sequence_len
         assert sequence_len > 0, 'Need sequence_len > 0, got:' + str(sequence_len)
         self.sequence_len = sequence_len
@@ -469,9 +142,6 @@ class CMAPSSDataset(Dataset):
             for v in exclude_cols:
                 if v in self.feature_cols:
                     self.feature_cols.remove(v)
-
-        # init
-        self.init = init
 
         # final rul
         if final_rul is None:
@@ -496,8 +166,11 @@ class CMAPSSDataset(Dataset):
         # only final
         self.only_final = only_final
 
+        # We need to create the censored data before count_rul(), normalization() and clustering()
+        if percent_of_censored_data > 0:
+            self._generate_censored_data()
+
         # compute RUL
-        self.no_rul = no_rul
         self.count_rul()
 
         # cluster on operations
@@ -514,28 +187,17 @@ class CMAPSSDataset(Dataset):
         self.label_array = None
         self.id_array = None
 
-        # has clustering conditions
-        self.has_cluster_operations = False
-        self.has_normalization = False
-        self.has_gen_sequence = False
+        if self.cluster_operations:
+            self._clustering_operations(kmeans_model)
 
-        # Attribute for pyclus
-        self.X = None
-        self.Y = None
-        self.ids = None
-        self.time_grid = None
-        self.feature_names_pyclus = None
+        if self.norm_type:
+            self._normalization()
 
-        if self.init:
-            if self.cluster_operations:
-                CMAPSSDataset.clustering_operations([self])
 
-            if self.norm_type:
-                self.normalization()
+        self.percent_of_censored_data = percent_of_censored_data
+        self.percent_of_broken_data = percent_of_broken_data
 
-            self.gen_sequence()
-
-        # print('normalizaiont setting', self.norm_by_operations, self.cluster_operations)
+        self._gen_sequence()
 
     def __len__(self):
         return len(self.sequence_array)
@@ -551,6 +213,14 @@ class CMAPSSDataset(Dataset):
         if self.return_id:
             l.append(torch.LongTensor([self.id_array[i]]))
         return tuple(l)
+
+    def get_data_loader(self, loader_kwargs: dict) -> DataLoader:
+        """
+        :param loader_kwargs:
+            kwargs pass to all DataLoader
+        """
+
+        return DataLoader(self, **loader_kwargs)
 
     def count_rul(self):
         df = self.df
@@ -568,16 +238,7 @@ class CMAPSSDataset(Dataset):
         df['real_rul'] = df.apply(lambda x: x['rul'] - x['time'], axis=1)
         df['rul'] = df.apply(lambda x: max_rul if max_rul < x['real_rul'] else x['real_rul'], axis=1)
         self.df = df
-
-    def _group_line_of_each_id_with_summary_features(self, test: bool=True) -> None:
-        df = self.df
-
-        summary_features_by_id_df = df.groupby('id').apply(
-            lambda grp: self._summary_features_per_id(grp, test=True),
-            include_groups=False
-        )
-
-        self.df = summary_features_by_id_df
+        self.has_count_rul = True
 
     def _set_norm_params(self, norm_type, norm_params, norm_by_operations):
         # norm_params
@@ -590,101 +251,22 @@ class CMAPSSDataset(Dataset):
         # norm by operations
         self.norm_by_operations = norm_by_operations
 
-    def _summary_features_per_id(self, grp, test: bool=True) -> pd.Series:
-        grp = grp.sort_values(TIME)
-        row = {}
+    def _clustering_operations(self, kmeans_model=None):
+        df = self.df
+        features = df[['op1', 'op2', 'op3']].values
 
-        for col in self.feature_cols:
-            vals = grp[col].dropna()
-            times = grp.loc[grp[col].notna(), TIME]
-
-            if len(vals) == 0:
-                row[f"{col}_mean"] = np.nan
-                row[f"{col}_last"] = np.nan
-                row[f"{col}_slope"] = np.nan
-                row[f"{col}_max"] = np.nan
-            else:
-                row[f"{col}_mean"] = vals.mean()
-                row[f"{col}_last"] = vals.iloc[-1]
-                row[f"{col}_max"] = vals.max()
-                # Slope in linear regression if ≥ 2 values
-                if len(vals) >= 2:
-                    slope = np.polyfit(times, vals, 1)[0]
-                else:
-                    slope = 0.0
-                row[f"{col}_slope"] = slope
-
-        last_idx = grp[TIME].idxmax()
-        last_real_rul = grp.loc[last_idx, 'real_rul']
-
-        # We use 'rul' column because we may wan't to use the max_rul if it is set.
-        row["time_to_event"] = grp['rul'].max()
-        if test:
-            # The event test is never censored
-            row["event"] = 1
+        if kmeans_model is None:
+            self.kmeans_model = KMeans(n_clusters=6, random_state=1).fit(features)
         else:
-            row["event"] = 1 if last_real_rul <= 0 else 0
+            self.kmeans_model = kmeans_model
 
-        return pd.Series(row)
+        op_types = self.kmeans_model = kmeans_model.predict(features)
+        df.insert(2, 'op_type', op_types)
 
-    def _build_survival_targets(self, time_grid, time_col='time_to_event', event_col='event'):
-        """
-        Builds the multi-target labels for a survival SSL-PCT
-        (see "Survival analysis with semi-supervised predictive clustering trees").
+        self.df = df
+        self.has_cluster_operations = True
 
-        For each individual and for each time t_j in time_grid:
-            - 1   if the individual is known to be "alive" at t_j      (t_j <= time_to_event)
-            - 0   if the event is known to have occurred before t_j   (t_j > time_to_event and event == 1)
-            - '?' if the status is unknown at t_j (censoring)         (t_j > time_to_event and event == 0)
-
-        :return: List[List[Any]] of shape (n_samples, len(time_grid)), values 0/1/'?'
-        """
-        df = self.df
-
-        times = df[time_col].to_numpy().reshape(-1, 1)
-        events = df[event_col].to_numpy().reshape(-1, 1)
-        grid = np.asarray(time_grid).reshape(1, -1)
-
-        alive = grid <= times  # (n_samples, n_times) -- connu "vivant" à t_j
-        unknown_or_dead = np.where(events == 1, 0, np.nan)  # (n_samples, 1)
-
-        targets = np.where(alive, 1, unknown_or_dead).astype(object)
-        targets[pd.isna(targets)] = '?'
-
-        return targets.tolist()
-
-    def _to_pyclus_data(self, time_grid, feature_cols=None,
-                        time_col='time_to_event', event_col='event'):
-        """
-        Converts self.df (already aggregated by id via _group_line_of_each_id_with_summary_features)
-        to the format expected by pyclus:
-            - X: List[List[Any]], missing values marked as '?'
-            - Y: List[List[Any]], survival encoding 0/1/'?' (see build_survival_targets)
-
-        Also stores self.X, self.Y, self.ids, self.time_grid, and self.feature_names_pyclus
-        so they can be easily reused.
-        """
-        df = self.df
-
-        if feature_cols is None:
-            exclude = {time_col, event_col}
-            feature_cols = [c for c in df.columns if c not in exclude]
-
-        X = df[feature_cols].to_numpy(dtype=object)
-        X[pd.isna(X)] = '?'
-        X = X.tolist()
-
-        Y = self._build_survival_targets(time_grid, time_col, event_col)
-
-        self.X = X
-        self.Y = Y
-        self.ids = df.index.to_numpy()
-        self.time_grid = np.asarray(time_grid)
-        self.feature_names_pyclus = feature_cols
-
-        return X, Y
-
-    def normalization(self):
+    def _normalization(self):
         if self.norm_type is None:
             return
 
@@ -697,19 +279,119 @@ class CMAPSSDataset(Dataset):
         norm_type = self.norm_type
         norm_by_operations = self.norm_by_operations
         if self.norm_params is None:
-            self.norm_params = CMAPSSDataset.gen_norm_params([self], norm_type, norm_by_operations)
+            self.norm_params = self._gen_norm_params(norm_type, norm_by_operations)
         norm_params = self.norm_params
         if norm_type == '0-1':
             min_norm, max_norm = 0, 1
-            self.df = CMAPSSDataset.min_max_normalization(df, norm_cols, norm_params, min_norm, max_norm)
+            self.df = self._min_max_normalization(norm_cols, norm_params, min_norm, max_norm)
         if norm_type == '-1-1':
             min_norm, max_norm = -1, 1
-            self.df = CMAPSSDataset.min_max_normalization(df, norm_cols, norm_params, min_norm, max_norm)
+            self.df = self._min_max_normalization(norm_cols, norm_params, min_norm, max_norm)
         if norm_type == 'z-score':
-            self.df = CMAPSSDataset.z_score_normalization(df, norm_cols, norm_params)
+            self.df = self._z_score_normalization(norm_cols, norm_params)
         self.has_normalization = True
 
-    def gen_sequence(self):
+    def _min_max_normalization(self, cols, norm_params, min_norm, max_norm):
+        df = self.df
+
+        if len(norm_params.shape) == 2:
+            for col_i, col in enumerate(cols):
+                min_v, max_v = norm_params[col_i]
+                if max_v == min_v:
+                    df[col] = (min_norm + max_norm) / 2  # median
+                else:
+                    df[col] = (((max_norm - min_norm) * (df[col].values - min_v)) / (max_v - min_v)) + min_norm
+        elif len(norm_params.shape) == 3:
+            op_list = df['op_type'].unique()
+            op_list.sort()
+            for op_i, op in enumerate(op_list):
+                for col_i, col in enumerate(cols):
+                    min_v, max_v = norm_params[op_i, col_i]
+                    if max_v == min_v:
+                        df.loc[df['op_type'] == op, col] = (min_norm + max_norm) / 2  # median
+                    else:
+                        values = df[df['op_type'] == op][col].values
+                        df.loc[df['op_type'] == op, col] = (((max_norm - min_norm) * (values - min_v)) / (
+                                max_v - min_v)) + min_norm
+
+        else:
+            raise ValueError('norm_params shape error')
+        return df
+
+    def _z_score_normalization(self, cols, norm_params):
+        df = self.df
+
+        if len(norm_params.shape) == 2:
+            for col_i, col in enumerate(cols):
+                mean, standard = norm_params[col_i]
+                values = df[col].values
+                values = values - mean
+                if standard != 0:
+                    values = values / standard
+                df[col] = values
+        elif len(norm_params.shape) == 3:
+            op_list = df['op_type'].unique()
+            op_list.sort()
+            for op_i, op in enumerate(op_list):
+                for col_i, col in enumerate(cols):
+                    mean, standard = norm_params[op_i, col_i]
+                    values = df[df['op_type'] == op][col].values
+                    values = (values - mean)
+                    if standard != 0:
+                        values = values / standard
+                    df.loc[df['op_type'] == op, col] = values
+        else:
+            raise ValueError('norm_params shape error')
+        return df
+
+    def _gen_norm_params(self, norm_type, norm_by_operations=False):
+        """
+            Get normalization parameters.
+            if normalization by conditions, need cluster operations first.
+
+        :param norm_type: 0-1, -1-1 or z-score
+        :param norm_by_operations:
+        :return: normalize by each op_type
+        """
+        assert norm_type in ['0-1', '-1-1', 'z-score']
+
+        if norm_by_operations:
+            assert self.has_cluster_operations, \
+                'need cluster operations before normalization when norm_by_operations is True'
+
+
+        norm_cols = self.feature_cols
+
+        if norm_by_operations:
+            op_list = self.df['op_type'].unique()
+            op_list.sort()
+            params_list = []
+            for op in op_list:
+                sub_df = self.df[self.df['op_type'] == op]
+                if norm_type == '0-1' or norm_type == '-1-1':
+                    col_max = np.max(sub_df[norm_cols].values, axis=0)
+                    col_min = np.min(sub_df[norm_cols].values, axis=0)
+                    params_list.append(np.stack((col_min, col_max), axis=1))
+                if norm_type == 'z-score':
+                    mean = np.mean(sub_df[norm_cols].values, axis=0)
+                    standard = np.std(sub_df[norm_cols].values, axis=0)
+                    params_list.append(np.stack((mean, standard), axis=1))
+
+            return np.stack(params_list, axis=0)
+        else:
+            df = self.df
+            if norm_type in ['0-1', '-1-1']:
+                col_max = np.max(df[norm_cols].values, axis=0)
+                col_min = np.min(df[norm_cols].values, axis=0)
+
+                return np.stack((col_min, col_max), axis=1)
+            elif norm_type == 'z-score':
+                mean = np.mean(df[norm_cols].values, axis=0)
+                standard = np.std(df[norm_cols].values, axis=0)
+
+                return np.stack((mean, standard), axis=1)
+
+    def _gen_sequence(self):
         seq_cols = ['id'] + self.feature_cols + ['rul']
         seq_len = self.sequence_len
         all_array = []
@@ -742,3 +424,31 @@ class CMAPSSDataset(Dataset):
         self.id_array = all_array[:, 0, 0]
 
         self.has_gen_sequence = True
+
+    def _generate_censored_data(self):
+        if self.has_cluster_operations or self.has_normalization or self.has_gen_sequence or self.has_count_rul:
+            raise RuntimeError('The censored data need to be generated before clustering operations, normalization, sequence generation and counting RUL')
+
+        unique_ids = self.df['id'].unique()
+        number_units = len(self.id_array)
+
+        number_censored_units = int(number_units * self.percent_of_censored_data)
+        censored_ids = np.random.choice(unique_ids, size=number_censored_units, replace=False)
+
+        self.df['is_censored'] = 0
+        self.df.loc[self.df['id'].isin(censored_ids), 'is_censored'] = 1
+
+        def delete_last_rows(group, percent_of_broken_data: float | None):
+            if group['is_censored'].iloc[0] == 0:
+                return group
+
+            pct_to_keep = self.percent_of_broken_data
+            if pct_to_keep is None:
+                pct_to_keep = np.random.default_rng().random()
+
+            n = len(group)
+            x = max(1, int(pct_to_keep * n))
+
+            return group.iloc[:x]
+
+        self.df.groupby('id').apply(lambda x: delete_last_rows(x, self.percent_of_broken_data)).reset_index(drop=True)

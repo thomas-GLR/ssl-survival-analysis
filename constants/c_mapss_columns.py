@@ -1,4 +1,5 @@
 UNIT_NUMBER = "unit_number"
+ID = "id"
 TIME = "time"
 OPERATIONAL_SETTINGS_1 = "operational_settings_1"
 OPERATIONAL_SETTINGS_2 = "operational_settings_2"

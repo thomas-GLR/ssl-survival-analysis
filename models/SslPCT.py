@@ -7,20 +7,20 @@ from pyclus.models import ClusModelEnsemble, ClusModelRegression
 
 class SslPCT(ClusModelRegression, ClusModelEnsemble):
 	"""
-	Wrapper Python de SSL-PCT (Semi-Supervised Learning Predictive Clustering Trees).
+	Python wrapper for SSL-PCT (Semi-Supervised Learning Predictive Clustering Trees).
 
-	L'objectif est de reproduire l'équivalent de :
+	The objective is to reproduce the equivalent of:
 
 	`java -jar ... -forest -ssl settings_FD001.s`
 
-	mais avec une API proche de scikit-learn :
+	but with a scikit-learn-like API:
 
 		model = SslPCT(...)
 		model.fit(X_train, y_train)
 		y_pred = model.predict(X_test)
 
-	Les paramètres sont exposés via le constructeur et peuvent être modifiés.
-	Les options additionnelles CLUS peuvent aussi être passées via `**kwargs`.
+	The parameters are exposed through the constructor and can be modified.
+	Additional CLUS options can also be passed via `**kwargs`.
 	"""
 
 	def __init__(

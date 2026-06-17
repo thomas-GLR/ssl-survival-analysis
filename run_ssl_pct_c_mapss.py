@@ -1,15 +1,7 @@
-import os
-import pandas as pd
-import numpy as np
-from pathlib import Path
-
-from C_MAPSS.dataset import CMAPSSDataset
+from C_MAPSS.dataset import CMAPSSDataset_old
 from models.SslPCT import SslPCT
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
-SCANIA_COMPONENT_X_DIR = DATA_DIR / "scania_components_x"
-C_MAPSS_DIR = DATA_DIR / "C_MAPSS"
+C_MAPSS_DIR = "data\\C_MAPSS"
 
 
 if __name__ == "__main__":
@@ -20,7 +12,7 @@ if __name__ == "__main__":
     use_max_rul_on_valid = True
 
     train_dataset, test_dataset, valid_dataset = CMAPSSDataset.get_data_for_ssl_pct(
-        dataset_root="data\\C_MAPSS",
+        dataset_root=C_MAPSS_DIR,
         sub_dataset=sub_dataset,
         max_rul=max_rul,
         validation_rate=validation_rate,
