@@ -1,5 +1,6 @@
 from dataset.PyclusDataset import PyclusDataset
 from models.SslPCT import SslPCT
+import numpy as np
 
 C_MAPSS_DIR = "data/C_MAPSS"
 
@@ -35,12 +36,20 @@ if __name__ == "__main__":
 
     sslPCT.fit(X_train, y_train)
 
-    y_hat_valid = sslPCT.predict(X_test)
+    y_true_rul = test_dataset.to_rul()  # exact, vient directement de true_rul
 
-    print(y_test)
-    print(y_hat_valid["true values"])
+    y_hat = sslPCT.predict(test_dataset.X)
+    y_pred_rul = PyclusDataset.survival_targets_to_rul(
+        y_hat["true values"], test_dataset.time_grid, method='threshold', enforce_monotonic=True
+    )
 
-    y_hat = sslPCT.predict(X_test)
+    rmse = np.sqrt(np.mean((y_true_rul - y_pred_rul) ** 2))
 
-    print(y_test)
-    print(y_hat["true values"])
+
+    def score(y_pred, y_true):
+        d = y_pred - y_true
+        return np.sum(np.where(d < 0, np.exp(-d / 13) - 1, np.exp(d / 10) - 1))
+
+
+    print(f"Test RMSE: {rmse}")
+    print(f"Score: {score(y_pred_rul, y_true_rul)}")

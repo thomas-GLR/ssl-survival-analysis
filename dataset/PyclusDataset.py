@@ -10,12 +10,17 @@ class PyclusDataset:
     TIME_TO_EVENT_COLUMN = 'time_to_event'
     EVENT_COLUMN = 'event'
 
-    def __init__(self, X, Y, ids, time_grid, feature_names_pyclus):
+    def __init__(self, X, Y, ids, time_grid, feature_names_pyclus, true_rul=None):
         self.X = X
         self.Y = Y
         self.ids = ids
         self.time_grid = time_grid
         self.feature_names_pyclus = feature_names_pyclus
+        # Exact scalar RUL (time_to_event) per sample, kept aside from the binarized
+        # Y targets so that the ground truth never has to be reconstructed (lossily)
+        # from the survival vectors. None for datasets built outside of
+        # _to_pyclus_format (e.g. constructed manually without this info).
+        self.true_rul = true_rul
 
     # ============================================================================
     # FACTORY METHODS
@@ -94,26 +99,28 @@ class PyclusDataset:
         time_grid = np.sort(train_dataset.df[PyclusDataset.TIME_TO_EVENT_COLUMN].unique())
 
         # Convert each dataset to pyclus format
-        train_X, train_Y, train_ids, train_features = PyclusDataset._to_pyclus_format(
+        train_X, train_Y, train_ids, train_features, train_true_rul = PyclusDataset._to_pyclus_format(
             train_dataset, time_grid, time_col, feature_cols
         )
-        test_X, test_Y, test_ids, test_features = PyclusDataset._to_pyclus_format(
+        test_X, test_Y, test_ids, test_features, test_true_rul = PyclusDataset._to_pyclus_format(
             test_dataset, time_grid, time_col, feature_cols
         )
 
         val_pyclus_dataset = None
 
         if valid_dataset is not None:
-            valid_X, valid_Y, valid_ids, valid_features = PyclusDataset._to_pyclus_format(
+            valid_X, valid_Y, valid_ids, valid_features, valid_true_rul = PyclusDataset._to_pyclus_format(
                 valid_dataset, time_grid, time_col, feature_cols
             )
 
-            val_pyclus_dataset = PyclusDataset(valid_X, valid_Y, valid_ids, time_grid, valid_features)
+            val_pyclus_dataset = PyclusDataset(
+                valid_X, valid_Y, valid_ids, time_grid, valid_features, true_rul=valid_true_rul
+            )
 
         # Create the PyclusDataset instances
         return (
-            PyclusDataset(train_X, train_Y, train_ids, time_grid, train_features),
-            PyclusDataset(test_X, test_Y, test_ids, time_grid, test_features),
+            PyclusDataset(train_X, train_Y, train_ids, time_grid, train_features, true_rul=train_true_rul),
+            PyclusDataset(test_X, test_Y, test_ids, time_grid, test_features, true_rul=test_true_rul),
             val_pyclus_dataset
         )
 
@@ -241,7 +248,7 @@ class PyclusDataset:
         :param time_grid: Time grid
         :param feature_cols: Columns to include (optional)
         :param time_col: Name of the time column
-        :return: (X, Y, ids, feature_names) ready for pyclus
+        :return: (X, Y, ids, feature_names, true_rul) ready for pyclus
         """
         df = dataset.df
 
@@ -259,7 +266,113 @@ class PyclusDataset:
             df, time_grid
         )
 
+        # Exact ground-truth RUL (time_to_event), kept un-discretized so it does not
+        # have to be reconstructed from the binarized Y vector later on.
+        true_rul = df[PyclusDataset.TIME_TO_EVENT_COLUMN].to_numpy(dtype=float)
+
         # Ids and feature names
         ids = df.index.to_numpy()
 
-        return X, Y, ids, feature_cols
+        return X, Y, ids, feature_cols, true_rul
+
+    # ============================================================================
+    # CONVERTING SURVIVAL TARGETS / PREDICTIONS BACK TO A SCALAR RUL
+    # ============================================================================
+
+    @staticmethod
+    def _clean_survival_vector(y_vec, time_grid) -> tuple:
+        """
+        Remove unknown ('?') entries from a survival vector and sort it by time.
+
+        :param y_vec: 1D array-like of values in {0, 1, '?'} (ground truth) or floats in [0, 1] (prediction)
+        :param time_grid: 1D array-like, same length as y_vec
+        :return: (t_valid, y_valid) sorted by time, with the unknown entries removed
+        """
+        y_arr = np.asarray(y_vec, dtype=object)
+        y_arr = np.where(y_arr == '?', np.nan, y_arr).astype(float)
+        t_arr = np.asarray(time_grid, dtype=float)
+
+        valid = ~np.isnan(y_arr)
+        t_valid = t_arr[valid]
+        y_valid = y_arr[valid]
+
+        order = np.argsort(t_valid)
+        return t_valid[order], y_valid[order]
+
+    @staticmethod
+    def survival_vector_to_rul(
+            y_vec,
+            time_grid,
+            method: str = 'threshold',
+            threshold: float = 0.5,
+            enforce_monotonic: bool = True
+    ) -> float:
+        """
+        Convert ONE survival vector (ground truth or model prediction) into a scalar RUL estimate.
+
+        Two extraction methods are available:
+          - 'threshold': RUL = last time point of the (non-increasing) survival curve where
+                         P(alive) >= threshold. This is EXACT for ground-truth vectors
+                         (pure step functions of 1s then 0s) and behaves like a
+                         "median survival time" estimator for continuous predictions.
+          - 'auc': RUL = area under the survival curve (expected lifetime), via the trapezoidal
+                   rule. Uses all the information in the curve but is more sensitive to noise.
+
+        :param y_vec: 1D array-like of values in {0, 1, '?'} (target) or floats in [0, 1] (prediction)
+        :param time_grid: 1D array-like, same length as y_vec
+        :param method: 'threshold' or 'auc'
+        :param threshold: probability threshold used by the 'threshold' method
+        :param enforce_monotonic: if True, force the curve to be non-increasing (cumulative min)
+                                   before extracting the RUL. Recommended for raw model predictions,
+                                   which are not guaranteed to be monotonic.
+        :return: scalar RUL estimate (np.nan if nothing is known about the sample)
+        """
+        t_valid, y_valid = PyclusDataset._clean_survival_vector(y_vec, time_grid)
+
+        if len(t_valid) == 0:
+            return np.nan
+
+        if enforce_monotonic:
+            y_valid = np.minimum.accumulate(y_valid)
+
+        if method == 'threshold':
+            alive_idx = np.where(y_valid >= threshold)[0]
+            if len(alive_idx) == 0:
+                return float(t_valid[0])
+            return float(t_valid[alive_idx[-1]])
+        elif method == 'auc':
+            if len(t_valid) < 2:
+                return float(t_valid[0] * y_valid[0])
+            return float(np.trapz(y_valid, t_valid))
+        else:
+            raise ValueError(f"Unknown method '{method}', expected 'threshold' or 'auc'")
+
+    @staticmethod
+    def survival_targets_to_rul(Y, time_grid, **kwargs) -> np.ndarray:
+        """
+        Convert a full batch of survival vectors (targets Y or model predictions Y_hat)
+        into an array of scalar RUL estimates.
+
+        :param Y: array-like of shape (n_samples, n_times), values in {0, 1, '?'} or in [0, 1]
+        :param time_grid: 1D array-like of shape (n_times,)
+        :param kwargs: forwarded to survival_vector_to_rul (method, threshold, enforce_monotonic)
+        :return: np.ndarray of shape (n_samples,)
+        """
+        return np.array([
+            PyclusDataset.survival_vector_to_rul(row, time_grid, **kwargs)
+            for row in Y
+        ])
+
+    def to_rul(self, **kwargs) -> np.ndarray:
+        """
+        Convenience instance method returning the ground-truth RUL values.
+
+        If the dataset was built via _to_pyclus_format (the normal path), self.true_rul
+        holds the EXACT scalar time_to_event for each sample and is returned directly
+        (no information loss). Otherwise, it falls back to reconstructing an estimate
+        from the binarized self.Y survival targets (see survival_targets_to_rul),
+        which is only accurate up to the resolution of self.time_grid.
+        """
+        if self.true_rul is not None:
+            return np.asarray(self.true_rul, dtype=float)
+        return PyclusDataset.survival_targets_to_rul(self.Y, self.time_grid, **kwargs)
