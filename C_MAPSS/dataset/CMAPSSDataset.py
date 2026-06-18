@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.cluster import KMeans
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 
 ID = 'id'
 TIME = 'time'
@@ -206,12 +206,12 @@ class CMAPSSDataset(Dataset):
         return len(self.sequence_array)
 
     def __getitem__(self, i):
-        '''
+        """
         :param i: get i_th data
         :return: sequence, target
             sequence: tensor([time, setting1, ... , sensor21])
             target: tensor([rul])
-        '''
+        """
         l = [torch.FloatTensor(self.sequence_array[i]), torch.FloatTensor([self.label_array[i]])]
         if self.return_id:
             l.append(torch.LongTensor([self.id_array[i]]))
@@ -224,6 +224,83 @@ class CMAPSSDataset(Dataset):
         """
 
         return DataLoader(self, **loader_kwargs)
+
+    def get_censored_split_tensors(self):
+        """
+        Retrieves the features and targets separately for censored data (is_censored=1)
+        and uncensored data (is_censored=0).
+
+        Returns:
+            - features_uncensored (torch.Tensor): Features for is_censored = 0
+            - targets_uncensored (torch.Tensor): Target (RUL) for is_censored = 0
+            - features_censored (torch.Tensor): Features for is_censored = 1
+        """
+        # Identify ids marked as censored in the DataFrame
+        censored_ids = self.df[self.df['is_censored'] == 1]['id'].unique()
+
+        # Create a mask to filter sequences/windows generated
+        # self.id_array contain the ID that correspond to each input of self.sequence_array
+        mask_censored = np.isin(self.id_array, censored_ids)
+        mask_uncensored = ~mask_censored
+
+        feat_uncensored = self.sequence_array[mask_uncensored]
+        target_uncensored = self.label_array[mask_uncensored]
+        feat_censored = self.sequence_array[mask_censored]
+
+        features_uncensored = torch.from_numpy(feat_uncensored).float()
+        features_censored = torch.from_numpy(feat_censored).float()
+
+        # Adjust the shape of the target to correspond to (N, 1)
+        # if return_sequence_label is False
+        if not self.return_sequence_label:
+            target_uncensored = target_uncensored[:, np.newaxis]
+
+        targets_uncensored = torch.from_numpy(target_uncensored).float()
+
+        return features_uncensored, targets_uncensored, features_censored
+
+    def get_features_targets(self):
+        features_tensor = torch.from_numpy(self.sequence_array).float()
+
+        if not self.return_sequence_label:
+            targets = self.label_array[:, np.newaxis]
+        else:
+            targets = self.label_array
+
+        targets_tensor = torch.from_numpy(targets).float()
+
+        return features_tensor, targets_tensor
+
+    def get_data_loader_without_censored_data_for_cnn_model(
+            self,
+            batch_size: int,
+            shuffle: bool=False
+    ) -> DataLoader:
+        # Identify ids marked as censored in the DataFrame
+        censored_ids = self.df[self.df['is_censored'] == 1]['id'].unique()
+
+        # Create a mask to filter sequences/windows generated
+        # self.id_array contain the ID that correspond to each input of self.sequence_array
+        mask_censored = np.isin(self.id_array, censored_ids)
+        mask_uncensored = ~mask_censored
+
+        feat_uncensored = self.sequence_array[mask_uncensored]
+        target_uncensored = self.label_array[mask_uncensored]
+
+        features_uncensored = torch.from_numpy(feat_uncensored).float()
+
+        # For conv1d the features (channels) should be in second place
+        features_uncensored = features_uncensored.permute(0, 2, 1)
+
+        if not self.return_sequence_label:
+            target_uncensored = target_uncensored[:, np.newaxis]
+
+        targets_uncensored = torch.from_numpy(target_uncensored).float()
+
+        dataset = TensorDataset(features_uncensored, targets_uncensored)
+
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
 
     def count_rul(self):
         df = self.df

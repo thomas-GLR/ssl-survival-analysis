@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
-from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 
 import constants.c_mapss_columns as cmapss_col
+from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
+
 
 class PyclusDataset:
 
@@ -30,7 +31,7 @@ class PyclusDataset:
             use_max_rul_on_valid=True,
             percent_of_censored_data: float = 0.0,
             percent_of_broken_data: float | None = None
-    ) -> tuple['PyclusDataset', 'PyclusDataset', 'PyclusDataset']:
+    ):
         train_cmapss, test_cmapss, valid_cmapss = CMAPSSLoader.get_datasets(
             dataset_root=dataset_root,
             sub_dataset=sub_dataset,
@@ -67,7 +68,7 @@ class PyclusDataset:
             id_col: str,
             time_col: str,
             feature_cols=None
-    ) -> tuple['PyclusDataset', 'PyclusDataset', 'PyclusDataset']:
+    ):
         """
         Transform 3 datasets (train, test, valid) into the pyclus format.
 
@@ -83,29 +84,37 @@ class PyclusDataset:
         PyclusDataset._group_by_id_with_summary_features(
             test_dataset, id_col, time_col, is_test_dataset=True, feature_cols=feature_cols
         )
-        PyclusDataset._group_by_id_with_summary_features(
-            valid_dataset, id_col, time_col, is_test_dataset=False, feature_cols=feature_cols
-        )
+
+        if valid_dataset is not None:
+            PyclusDataset._group_by_id_with_summary_features(
+                valid_dataset, id_col, time_col, is_test_dataset=False, feature_cols=feature_cols
+            )
 
         # Build the time grid from the train dataset
         time_grid = np.sort(train_dataset.df[PyclusDataset.TIME_TO_EVENT_COLUMN].unique())
 
         # Convert each dataset to pyclus format
         train_X, train_Y, train_ids, train_features = PyclusDataset._to_pyclus_format(
-            train_dataset, time_grid, feature_cols, time_col
+            train_dataset, time_grid, time_col, feature_cols
         )
         test_X, test_Y, test_ids, test_features = PyclusDataset._to_pyclus_format(
-            test_dataset, time_grid, feature_cols, time_col
+            test_dataset, time_grid, time_col, feature_cols
         )
-        valid_X, valid_Y, valid_ids, valid_features = PyclusDataset._to_pyclus_format(
-            valid_dataset, time_grid, feature_cols, time_col
-        )
+
+        val_pyclus_dataset = None
+
+        if valid_dataset is not None:
+            valid_X, valid_Y, valid_ids, valid_features = PyclusDataset._to_pyclus_format(
+                valid_dataset, time_grid, time_col, feature_cols
+            )
+
+            val_pyclus_dataset = PyclusDataset(valid_X, valid_Y, valid_ids, time_grid, valid_features)
 
         # Create the PyclusDataset instances
         return (
             PyclusDataset(train_X, train_Y, train_ids, time_grid, train_features),
             PyclusDataset(test_X, test_Y, test_ids, time_grid, test_features),
-            PyclusDataset(valid_X, valid_Y, valid_ids, time_grid, valid_features)
+            val_pyclus_dataset
         )
 
     @staticmethod

@@ -192,3 +192,10 @@ def get_train_survival_dataset(print_information: bool = False) -> pd.DataFrame:
 
     return survival_dataset.drop(columns=[scania_cols.LENGTH_OF_STUDY_TIME_STEP, scania_cols.VEHICLE_ID], axis=1)
 
+def score(predict, label):
+    a1 = 13
+    a2 = 10
+    error = predict - label
+    pos_e = np.exp(-error[error < 0] / a1) - 1
+    neg_e = np.exp(error[error >= 0] / a2) - 1
+    return sum(pos_e) + sum(neg_e)

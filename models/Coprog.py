@@ -10,7 +10,7 @@ class Coprog:
     Co-training-based PROGnostics (COPROG) algorithm.
 
     Reference: "A co-training-based approach for prediction of remaining useful
-    life utilizing both failure and suspension data."
+    life utilizing both failure and suspension data." Chao Hu, Byeng D. Youn, Taejin Kim, Pingfeng Wang.
 
     Two models are trained on complementary views of the failure data. At each
     iteration, each model attempts to self-label the most informative suspension
@@ -26,19 +26,24 @@ class Coprog:
     :param batch_size: Mini-batch size for TrainFun (default 32).
     :param device: torch.device to run on (default: cuda if available, else cpu).
     :param shuffle_dataloader: if set to True it will shuffle the data during the training otherwise no. Default = False
+    :param verbose: the print level :
+        - 0 mean no print
+        - 1 mean print information on the training process
+        - 2 mean debugging the training process
     """
 
     def __init__(
-        self,
-        first_model: nn.Module,
-        second_model: nn.Module,
-        w1: float = 0.5,
-        w2: float = 0.5,
-        lr: float = 1e-3,
-        epochs: int = 20,
-        batch_size: int = 32,
-        device: torch.device | None = None,
-        shuffle_dataloader: bool = False
+            self,
+            first_model: nn.Module,
+            second_model: nn.Module,
+            w1: float = 0.5,
+            w2: float = 0.5,
+            lr: float = 1e-3,
+            epochs: int = 20,
+            batch_size: int = 32,
+            device: torch.device | None = None,
+            shuffle_dataloader: bool = False,
+            verbose: int = 0
     ):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -52,18 +57,19 @@ class Coprog:
         self.epochs = epochs
         self.batch_size = batch_size
         self.shuffle_dataloader = shuffle_dataloader
+        self.verbose = verbose
 
         # Trained models (set after calling .train())
         self._h1: nn.Module | None = None
         self._h2: nn.Module | None = None
 
     def train(
-        self,
-        failure_data: torch.Tensor,
-        failure_label: torch.Tensor,
-        suspension_data: torch.Tensor,
-        iterations: int,
-        suspension_pool_size: int,
+            self,
+            failure_data: torch.Tensor,
+            failure_label: torch.Tensor,
+            suspension_data: torch.Tensor,
+            iterations: int,
+            suspension_pool_size: int
     ) -> None:
         """
         Full COPROG training procedure (Algorithm 1 in the paper).
@@ -78,12 +84,16 @@ class Coprog:
         failure_label = failure_label.to(self.device).float()
         suspension_data = suspension_data.to(self.device)
 
-        # Line 1 – L1 = L2 = L  (we split L into two views for diversity)
-        x1, y1, x2, y2 = self._split_into_two_views(failure_data, failure_label)
+        # Line 1 – L1 = L2 = L  (we split L into two views)
+        x1, y1 = failure_data, failure_label
+        x2, y2 = failure_data, failure_label
+
+        if self.verbose > 0:
+            print("Training first and second model with labeled data...")
 
         # Line 2 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
-        h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1)
-        h2 = self._train_fun(copy.deepcopy(self.second_model), x2, y2)
+        h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1, "h1")
+        h2 = self._train_fun(copy.deepcopy(self.second_model), x2, y2, "h2")
 
         remaining_suspension = suspension_data.clone()
 
@@ -92,10 +102,12 @@ class Coprog:
 
             # Line 4 – Create pool U' of u suspension units
             if len(remaining_suspension) == 0:
+                if self.verbose > 0:
+                    print("No more remaining suspension, stopping the iterations...")
                 break
             pool_size = min(suspension_pool_size, len(remaining_suspension))
             pool_indices = torch.randperm(len(remaining_suspension))[:pool_size]
-            suspension_pool = remaining_suspension[pool_indices]   # U'
+            suspension_pool = remaining_suspension[pool_indices]  # U'
 
             pi = [None, None]  # π1, π2
 
@@ -107,17 +119,26 @@ class Coprog:
                 best_xu: torch.Tensor | None = None
                 best_label: torch.Tensor | None = None
 
+                if self.verbose > 0:
+                    print("Iterating over the suspension pool...")
+
                 for xu in suspension_pool:
-                    xu = xu.unsqueeze(0)                         # (1, *dims)
+                    xu = xu.unsqueeze(0)  # (1, *dims)
 
                     # Line 7 – pseudo-label from current model j
-                    lu_p = self._predict(hj, xu)                 # L^P_u
+                    lu_p = self._predict(hj, xu)  # L^P_u
+
+                    if self.verbose > 1:
+                        print(f"The prediction for the current xu is lu_p with the shape : {lu_p.size()}")
 
                     # Line 8 – train a temporary model h'j
                     model_j = copy.deepcopy(self.first_model if j == 0 else self.second_model)
                     x_aug = torch.cat([xj, xu], dim=0)
-                    y_aug = torch.cat([yj, lu_p], dim=0)
-                    hj_prime = self._train_fun(model_j, x_aug, y_aug)
+
+                    if self.verbose > 1:
+                        print(f"Concatenate yj with lu_p with the respective shape of {yj.size()} {lu_p.size()}")
+                    y_aug = torch.cat([yj, lu_p.view(1, -1)], dim=0)
+                    hj_prime = self._train_fun(model_j, x_aug, y_aug, f"h{j + 1}_prime")
 
                     # Line 9 – Δ_{j, X_u} = MSE(hj, L) – MSE(h'j, L)
                     delta = self._confidence_measure(xj, yj, hj, hj_prime)
@@ -136,23 +157,29 @@ class Coprog:
                     mask = ~(suspension_pool == best_xu).all(dim=tuple(range(1, suspension_pool.dim())))
                     suspension_pool = suspension_pool[mask]
                 else:
-                    pi[j] = None   # Line 15
+                    pi[j] = None  # Line 15
 
             # Line 17 – end for j
 
             # Line 18 – if π1 == ∅ && π2 == ∅  exit
             if pi[0] is None and pi[1] is None:
+                if self.verbose > 0:
+                    print("No beneficial samples found by either model, stopping the iterations...")
                 break
 
             # Line 19 – L1 = L1 ∪ π2;  L2 = L2 ∪ π1   (cross-labelling)
             if pi[1] is not None:
+                if self.verbose > 0:
+                    print("Model h1 found a beneficial sample, adding it to the training set of h2...")
                 xu2, lu2 = pi[1]
                 x1 = torch.cat([x1, xu2], dim=0)
-                y1 = torch.cat([y1, lu2], dim=0)
+                y1 = torch.cat([y1, lu2.view(1, -1)], dim=0)
             if pi[0] is not None:
+                if self.verbose > 0:
+                    print("Model h2 found a beneficial sample, adding it to the training set of h1...")
                 xu1, lu1 = pi[0]
                 x2 = torch.cat([x2, xu1], dim=0)
-                y2 = torch.cat([y2, lu1], dim=0)
+                y2 = torch.cat([y2, lu1.view(1, -1)], dim=0)
 
             # Remove newly labelled samples from U (global pool)
             for item in [p[0] for p in pi if p is not None]:
@@ -161,9 +188,12 @@ class Coprog:
                 )
                 remaining_suspension = remaining_suspension[mask]
 
+            if self.verbose > 0:
+                print("Training first and second model with new dataset augmented by unlabeled data...")
+
             # Line 20 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
-            h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1)
-            h2 = self._train_fun(copy.deepcopy(self.second_model), x2, y2)
+            h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1, "h1")
+            h2 = self._train_fun(copy.deepcopy(self.second_model), x2, y2, "h2")
 
         # Save final trained models
         self._h1 = h1
@@ -187,10 +217,11 @@ class Coprog:
         return self.w1 * p1 + self.w2 * p2
 
     def _train_fun(
-        self,
-        model: nn.Module,
-        x: torch.Tensor,
-        y: torch.Tensor,
+            self,
+            model: nn.Module,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            model_name: str = ""
     ) -> nn.Module:
         """
         TrainFun: fit `model` on (x, y) with MSE loss and return it.
@@ -205,12 +236,22 @@ class Coprog:
         dataset = TensorDataset(x, y)
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=self.shuffle_dataloader)
 
-        for _ in range(self.epochs):
+        if self.verbose > 0:
+            print(f"Training the model {model_name} for {self.epochs} epochs...")
+
+        for epoch in range(self.epochs):
+            avg_loss = 0.
+
             for x_batch, y_batch in loader:
                 optimizer.zero_grad()
                 loss = criterion(model(x_batch), y_batch)
                 loss.backward()
                 optimizer.step()
+
+                avg_loss += loss.item()
+
+            if self.verbose > 0:
+                print(f"Epoch {epoch + 1}/{self.epochs} - Loss : {avg_loss / len(loader)}")
 
         return model
 
@@ -223,11 +264,11 @@ class Coprog:
         return model(x).view(-1)
 
     def _confidence_measure(
-        self,
-        x: torch.Tensor,
-        y: torch.Tensor,
-        original_model: nn.Module,
-        augmented_model: nn.Module,
+            self,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            original_model: nn.Module,
+            augmented_model: nn.Module,
     ) -> float:
         """
         Δ_{j, X_u} from line 9:
@@ -246,39 +287,9 @@ class Coprog:
         y_flat = y.view(-1)
 
         pred_orig = self._predict(original_model, x).view(-1)
-        pred_aug  = self._predict(augmented_model, x).view(-1)
+        pred_aug = self._predict(augmented_model, x).view(-1)
 
         mse_orig = ((y_flat - pred_orig) ** 2).sum().item()
-        mse_aug  = ((y_flat - pred_aug)  ** 2).sum().item()
+        mse_aug = ((y_flat - pred_aug) ** 2).sum().item()
 
-        return mse_orig - mse_aug   # > 0 means augmented model is better
-
-    def _split_into_two_views(
-        self,
-        x: torch.Tensor,
-        y: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Split the failure dataset into two complementary views.
-
-        In the paper both models start from L (same data) but with different
-        feature subsets or random initialisations for diversity. Here we use a
-        random 50/50 split as a simple placeholder – replace with a proper
-        feature-view split when your feature engineering is finalised.
-
-        :return x1, y1, x2, y2
-        """
-        # TODO I separate the data into two cluster with train_test_split from sklearn for the test but it should be replaced by a more advanced clustering solution
-        x_np = x.cpu().numpy()
-        y_np = y.cpu().numpy()
-
-        x1_np, x2_np, y1_np, y2_np = train_test_split(
-            x_np, y_np, test_size=0.5, random_state=42
-        )
-
-        x1 = torch.tensor(x1_np, dtype=x.dtype, device=self.device)
-        x2 = torch.tensor(x2_np, dtype=x.dtype, device=self.device)
-        y1 = torch.tensor(y1_np, dtype=y.dtype, device=self.device)
-        y2 = torch.tensor(y2_np, dtype=y.dtype, device=self.device)
-
-        return x1, y1, x2, y2
+        return mse_orig - mse_aug  # > 0 means augmented model is better

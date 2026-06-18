@@ -1,9 +1,9 @@
 from torch import nn
 
 
-class TransformerEncoder_LSTM_1(nn.Module):
+class Simple_LSTM(nn.Module):
     """
-    Transformer encoder with LSTM to perform the regression task.
+    Simple LSTM.
     The model come from :
 
         Ricardo Dintén, Marta Zorrilla, Bruno Veloso, João Gama (2026).
@@ -11,21 +11,20 @@ class TransformerEncoder_LSTM_1(nn.Module):
         techniques: Application on real industrial datasets"
 
     The orginal code can be found here : https://github.com/DintenR/Transformer-based-RUL-predictors/tree/main
-    See : CMAPSS > models > TransformerEncoder_LSTM_1.py
+    See : CMAPSS > models > Simple_LSTM.py
     """
-
     def __init__(
             self,
             feature_num,
             sequence_len,
-            transformer_encoder_head_num,
             hidden_dim,
             lstm_num_layers,
             lstm_dropout,
             fc_layer_dim,
-            fc_dropout
+            fc_dropout,
+            **kwargs
     ):
-        super(TransformerEncoder_LSTM_1, self).__init__()
+        super(Simple_LSTM, self).__init__()
 
         self.feature_num = feature_num
         self.sequence_len = sequence_len
@@ -39,11 +38,6 @@ class TransformerEncoder_LSTM_1(nn.Module):
         self.output_dim = 1
         self.lstm_dropout = lstm_dropout
 
-        self.transformer_encoder_head_num = transformer_encoder_head_num
-
-        self.transformer_encoder = nn.TransformerEncoderLayer(d_model=self.sequence_len,
-                                                              nhead=self.transformer_encoder_head_num,
-                                                              )
         # lstm
         self.lstm = nn.LSTM(feature_num,
                             self.lstm_hidden_size,
@@ -58,19 +52,16 @@ class TransformerEncoder_LSTM_1(nn.Module):
             nn.Linear(self.fc_layer_dim, self.output_dim),
         )
 
+
     # x represents our data
     def forward(self, x):
-        # The permutation enable the transformer to learn information from features
-        x = x.permute(0, 2, 1)
-        x = self.transformer_encoder(x)
-        x = x.permute(0, 2, 1)
         # LSTM/
         x, _ = self.lstm(x)
-
+        
         # Raw
         x = x.contiguous()
         x = x[:, -1, :]
-
+        
         x = self.linear(x)
 
         return x

@@ -13,7 +13,8 @@ class Autoencoder(nn.Module):
         kernel_size,
         base_filters,
         latent_dim,
-        dropout
+        dropout,
+        domain_tradeoff: float = 0.0
     ):
         super().__init__()
 
@@ -24,6 +25,7 @@ class Autoencoder(nn.Module):
         self.base_filters = base_filters
         self.latent_dim = latent_dim
         self.dropout = dropout
+        self.domain_tradeoff = domain_tradeoff
 
         self.encoder = Encoder(
             self.in_channels,
@@ -50,3 +52,17 @@ class Autoencoder(nn.Module):
         outputs = self.decoder(latent_code)
 
         return outputs
+
+    def compute_loss(self, anchors, outputs, inputs):
+        regression_loss = nn.MSELoss()(outputs, inputs)
+
+        if self.domain_tradeoff > 0:
+            # TODO Check if it used in the original paper and if yes need to replace domain_disc
+            # batch_size = anchors.shape[0]
+            # domain_pred = self.domain_disc(embeddings[:batch_size])
+            # domain_loss = nn.BCEWithLogitsLoss()(domain_pred, domain_labels)
+            domain_loss = 0
+        else:
+            domain_loss = 0
+
+        return regression_loss + self.domain_tradeoff * domain_loss

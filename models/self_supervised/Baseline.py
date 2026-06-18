@@ -22,3 +22,9 @@ class Baseline(nn.Module):
         prediction = self.regressor(latent_code)
 
         return prediction
+
+    def compute_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        criterion = nn.MSELoss()
+        # RMSE Loss as in the original paper
+        loss = torch.sqrt(criterion(predictions, targets))
+        return loss
