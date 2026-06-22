@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torchmetrics.functional import mean_squared_error
+from utils import utils
 
 
 class TransformerLstmModule(pl.LightningModule):
@@ -45,10 +46,23 @@ class TransformerLstmModule(pl.LightningModule):
         self.test_step_targets.extend(y)
 
     def on_test_epoch_end(self):
-        rmse = mean_squared_error(torch.tensor(self.test_step_outputs), torch.tensor(self.test_step_targets), squared=False)
+        outputs = torch.tensor(self.test_step_outputs)
+        targets = torch.tensor(self.test_step_targets)
+
+        rmse = mean_squared_error(
+            outputs,
+            targets,
+            squared=False
+        )
+
+        np_outputs, np_targets = outputs.cpu().numpy(), targets.cpu().numpy()
+
+        score = utils.score(np_outputs, np_targets)
+
         self.test_step_outputs.clear()
         self.test_step_targets.clear()
         self.log('test_rmse', rmse)
+        self.log('test_score', score)
 
     def on_validation_epoch_end(self):
         # Calculate the average loss

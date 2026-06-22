@@ -4,64 +4,72 @@ C_MAPSS_DIR = "../../data/C_MAPSS"
 
 
 if __name__ == '__main__':
-    import argparse
+    model_version = "transformer"
 
-    parser = argparse.ArgumentParser(description='PyTorch Turbofan Example')
+    dataset_root = C_MAPSS_DIR
+    sub_dataset = "FD001"
+    sequence_len = 30
+    max_rul = 125
+    return_sequence_label = False
+    norm_type = "z-score"
+    cluster_operations = True
+    norm_by_operations = True
+    include_cols = None
+    exclude_cols = None
+    return_id = False
+    validation_rate = 0.2
+    use_only_final_on_test = True
+    use_max_rul_on_test = False
+    use_max_rul_on_valid = True
+    percent_of_broken_data = None
+    percent_of_censored_data = 0.
 
-    parser.add_argument('--sequence-len', type=int, default=60)
-    parser.add_argument('--feature-num', type=int, default=24)
-    parser.add_argument('--hidden-dim', type=int, default=100, help='LSTM hidden dims')
-    parser.add_argument('--fc-layer-dim', type=int, default=100)
-    parser.add_argument('--rnn-num-layers', type=int, default=5)
-    parser.add_argument('--lstm-dropout', type=float, default=0.2)
-    parser.add_argument('--feature-head-num', type=int, default=6)
-    parser.add_argument('--fc-dropout', type=float, default=0.2)
-    parser.add_argument('--dataset-root', type=str, default=C_MAPSS_DIR, help='The dir of CMAPSS dataset')
-    parser.add_argument('--sub-dataset', type=str, default='FD001', help='FD001/2/3/4')
-    parser.add_argument('--norm-type', type=str, default='z-score', help='z-score, -1-1 or 0-1')
-    parser.add_argument('--max-rul', type=int, default=125, help='piece-wise RUL')
-    parser.add_argument('--cluster-operations', action='store_true', default=True)
-    parser.add_argument('--norm-by-operations', action='store_true', default=True)
-    parser.add_argument('--use-max-rul-on-test', action='store_true', default=False)
-    parser.add_argument('--validation-rate', type=float, default=0.2, help='validation set ratio of train set')
-    parser.add_argument('--broken-rate', type=float, default=None)
-    parser.add_argument('--censored-rate', type=float, default=0.0)
-    parser.add_argument('--batch-size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--patience', type=int, default=50, help='Early Stop Patience')
-    parser.add_argument('--max-epochs', type=int, default=500)
-    parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA training')
-    parser.add_argument('--model-version', type=str, default='lstm',
-                        help='model version to train values: transformer, lstm')
+    transformer_encoder_head_num = 10
+    lstm_num_layers = 1
+    hidden_dim = 128
+    lstm_dropout = 0.3
+    fc_layer_dim = 32
+    fc_dropout = 0.4
 
-    args = parser.parse_args()
+    device = None,
+    batch_size = 128,
+    lr = 0.0002,
+    patience = 50,
+    max_epochs = 1,
 
     train_model(
+        checkpoints_path="../C_MAPSS/checkpoints",
+        results_path="../C_MAPSS/results",
+        model_version=model_version,
         # Dataset params
-        data_dir=args.dataset_root,
-        sub_dataset=args.sub_dataset,
-        model_version=args.model_version,
-        sequence_len=args.sequence_len,
-        feature_num=args.feature_num,
-        norm_type=args.norm_type,
-        cluster_operations=args.cluster_operations,
-        norm_by_operations=args.norm_by_operations,
-        use_max_rul_on_test=args.use_max_rul_on_test,
-        piecewise_rul=args.max_rul,
-        validation_rate=args.validation_rate,
-        percent_of_broken_data=args.broken_rate,
-        percent_of_censored_data=args.censored_rate,
+        dataset_root = dataset_root,
+        sub_dataset = sub_dataset,
+        sequence_len = sequence_len,
+        max_rul = max_rul,
+        return_sequence_label = return_sequence_label,
+        norm_type = norm_type,
+        cluster_operations = cluster_operations,
+        norm_by_operations = norm_by_operations,
+        include_cols = include_cols,
+        exclude_cols = exclude_cols,
+        return_id = return_id,
+        validation_rate = validation_rate,
+        use_only_final_on_test = use_only_final_on_test,
+        use_max_rul_on_test = use_max_rul_on_test,
+        use_max_rul_on_valid = use_max_rul_on_valid,
+        percent_of_broken_data = percent_of_broken_data,
+        percent_of_censored_data = percent_of_censored_data,
         # Model params
-        transformer_encoder_head_num=args.feature_head_num,
-        lstm_num_layers=args.rnn_num_layers,
-        hidden_dim=args.hidden_dim,
-        lstm_dropout=args.lstm_dropout,
-        fc_layer_dim=args.fc_layer_dim,
-        fc_dropout=args.fc_dropout,
+        transformer_encoder_head_num = transformer_encoder_head_num,
+        lstm_num_layers = lstm_num_layers,
+        hidden_dim = hidden_dim,
+        lstm_dropout = lstm_dropout,
+        fc_layer_dim = fc_layer_dim,
+        fc_dropout = fc_dropout,
         # Training
-        device='cpu',
-        batch_size=256,#args.batch_size,
-        lr=args.lr,
-        patience=args.patience,
-        max_epochs=args.max_epochs,
+        device = device,
+        batch_size=batch_size,
+        lr=lr,
+        patience=patience,
+        max_epochs=max_epochs,
     )
