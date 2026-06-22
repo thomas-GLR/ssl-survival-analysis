@@ -9,6 +9,29 @@ C_MAPSS_DIR = "../../data/C_MAPSS"
 CHECKPOINTS_DIR = "../checkpoints"
 
 if __name__ == "__main__":
+    dataset_root = C_MAPSS_DIR
+    sub_dataset = "FD001"
+    sequence_len = 30
+    max_rul = 125
+    broken_data = None
+    censored_data = 0.9
+    norm_type = "z-score"
+    cluster_operations = True
+    norm_by_operations = True
+    validation_rate = 0.
+
+    feature_num = 24
+    hidden_dim = 3
+    lstm_num_layers = 3
+    lstm_dropout = 0.2
+    fc_layer_dim = 32
+    fc_dropout = 0.2
+
+    batch_size = 256
+    epochs = 100
+    verbose = 1
+    lr = 1e-3
+
     import argparse
 
     parser = argparse.ArgumentParser(description='PyTorch Turbofan Example')
@@ -37,10 +60,10 @@ if __name__ == "__main__":
     # Coprog parameters
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--batch-size', type=int, default=128)
-    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--verbose', type=int, default=1)
     parser.add_argument('--iterations', type=int, default=5)
-    parser.add_argument('--suspension-pool-size', type=int, default=5)
+    parser.add_argument('--suspension-pool-size', type=int, default=1)
 
     args = parser.parse_args()
 
@@ -69,13 +92,14 @@ if __name__ == "__main__":
         'lstm_num_layers': args.lstm_num_layers,
         'lstm_dropout': args.lstm_dropout,
         'fc_layer_dim': args.fc_layer_dim,
-        'fc_dropout': args.fc_dropout
+        'fc_dropout': args.fc_dropout,
     }
 
     print("Creating LSTM model with parameters :")
     print(lstm_kwargs)
 
     lstm = Simple_LSTM(**lstm_kwargs)
+    lstm2 = Simple_LSTM(**lstm_kwargs)
 
     print(f"Creating CNN model with parameters :\nnum_features: {args.feature_num}")
 
@@ -84,15 +108,15 @@ if __name__ == "__main__":
     )
 
     coprog = Coprog(
-        first_model=cnn,
-        second_model=lstm,
+        first_model=lstm,
+        second_model=lstm2,
         batch_size=args.batch_size,
         epochs=args.epochs,
         verbose=args.verbose,
-        lr=args.lr
+        lr=args.lr,
     )
 
-    features_uncensored, targets_uncensored, features_censored = train_dataset.get_censored_split_tensors()
+    features_uncensored, targets_uncensored, features_censored, ids_censored = train_dataset.get_censored_split_tensors()
     features_tensor, targets_tensor = test_dataset.get_features_targets()
 
     print(f"Training Coprog model...")
@@ -101,6 +125,7 @@ if __name__ == "__main__":
         failure_data=features_uncensored,
         failure_label=targets_uncensored,
         suspension_data=features_censored,
+        suspension_ids=ids_censored,
         iterations=args.iterations,
         suspension_pool_size=args.suspension_pool_size
     )

@@ -70,6 +70,7 @@ class Coprog:
             failure_data: torch.Tensor,
             failure_label: torch.Tensor,
             suspension_data: torch.Tensor,
+            suspension_ids: torch.Tensor,
             iterations: int,
             suspension_pool_size: int
     ) -> None:
@@ -85,6 +86,7 @@ class Coprog:
         failure_data = failure_data.to(self.device)
         failure_label = failure_label.to(self.device).float()
         suspension_data = suspension_data.to(self.device)
+        suspension_ids = suspension_ids.to(self.device)
 
         # Line 1 – L1 = L2 = L  (we split L into two views)
         x1, y1 = failure_data, failure_label
@@ -97,7 +99,7 @@ class Coprog:
         h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1, "h1")
         h2 = self._train_fun(copy.deepcopy(self.second_model), x2, y2, "h2")
 
-        remaining_suspension = suspension_data.clone()
+        remaining_suspension_ids = torch.unique(suspension_ids)# remaining_suspension = suspension_data.clone()
 
         number_iterations = 0
 
@@ -107,13 +109,13 @@ class Coprog:
                 print(f"Iterations {i + 1}/{iterations}")
 
             # Line 4 – Create pool U' of u suspension units
-            if len(remaining_suspension) == 0:
+            if len(remaining_suspension_ids) == 0:
                 if self.verbose > 0:
                     print("No more remaining suspension, stopping the iterations...")
                 break
-            pool_size = min(suspension_pool_size, len(remaining_suspension))
-            pool_indices = torch.randperm(len(remaining_suspension))[:pool_size]
-            suspension_pool = remaining_suspension[pool_indices]  # U'
+            pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
+            shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
+            pool_ids = shuffled_ids[:pool_size] # U'
 
             pi = [None, None]  # π1, π2
 
@@ -122,14 +124,17 @@ class Coprog:
 
                 # Line 6-9 – compute Δ for every X_u ⊂ U'
                 best_delta = 0.0
+                best_unit_id: torch.Tensor | None = None
                 best_xu: torch.Tensor | None = None
                 best_label: torch.Tensor | None = None
 
                 if self.verbose > 0:
                     print("Iterating over the suspension pool...")
 
-                for xu in suspension_pool:
-                    xu = xu.unsqueeze(0)  # (1, *dims)
+                for unit_id in pool_ids:
+                    # Extract all sequences for this specific unit
+                    mask = (suspension_ids == unit_id)
+                    xu = suspension_data[mask]  # Shape: (N_u, *dims)
 
                     # Line 7 – pseudo-label from current model j
                     lu_p = self._predict(hj, xu)  # L^P_u
@@ -143,7 +148,9 @@ class Coprog:
 
                     if self.verbose > 1:
                         print(f"Concatenate yj with lu_p with the respective shape of {yj.size()} {lu_p.size()}")
-                    y_aug = torch.cat([yj, lu_p.view(1, -1)], dim=0)
+                    lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
+                    y_aug = torch.cat([yj, lu_p_reshaped], dim=0)
+
                     hj_prime = self._train_fun(model_j, x_aug, y_aug, f"h{j + 1}_prime")
 
                     # Line 9 – Δ_{j, X_u} = MSE(hj, L) – MSE(h'j, L)
@@ -151,17 +158,17 @@ class Coprog:
 
                     if delta > best_delta:
                         best_delta = delta
+                        best_unit_id = unit_id
                         best_xu = xu
                         best_label = lu_p
 
                 # Lines 11-15 – select best candidate or set π = ∅
-                if best_xu is not None and best_delta > 0:
+                if best_unit_id is not None and best_delta > 0:
                     # Line 12 – X*_j = argmax Δ;  L*_j = h_j(X*_j)
                     # Line 13 – π_j = {(X*_j, L*_j)};  U' = U' \ π_j
-                    pi[j] = (best_xu, best_label)
+                    pi[j] = (best_unit_id, best_xu, best_label)
                     # Remove selected sample from U'
-                    mask = ~(suspension_pool == best_xu).all(dim=tuple(range(1, suspension_pool.dim())))
-                    suspension_pool = suspension_pool[mask]
+                    pool_ids = pool_ids[pool_ids != best_unit_id]
                 else:
                     pi[j] = None  # Line 15
 
@@ -176,23 +183,31 @@ class Coprog:
             # Line 19 – L1 = L1 ∪ π2;  L2 = L2 ∪ π1   (cross-labelling)
             if pi[1] is not None:
                 if self.verbose > 0:
-                    print("Model h1 found a beneficial sample, adding it to the training set of h2...")
-                xu2, lu2 = pi[1]
+                    print(f"Model h2 found a beneficial unit ({pi[1][0].item()}), adding it to h1 training set...")
+                _, xu2, lu2 = pi[1]
+
+                lu2_reshaped = lu2.view(-1, y1.shape[1]) if y1.dim() > 1 else lu2.view(-1)
+
                 x1 = torch.cat([x1, xu2], dim=0)
-                y1 = torch.cat([y1, lu2.view(1, -1)], dim=0)
+                y1 = torch.cat([y1, lu2_reshaped], dim=0)
+
             if pi[0] is not None:
                 if self.verbose > 0:
-                    print("Model h2 found a beneficial sample, adding it to the training set of h1...")
-                xu1, lu1 = pi[0]
+                    print(f"Model h1 found a beneficial unit ({pi[0][0].item()}), adding it to h2 training set...")
+                _, xu1, lu1 = pi[0]
+
+                lu1_reshaped = lu1.view(-1, y2.shape[1]) if y2.dim() > 1 else lu1.view(-1)
+
                 x2 = torch.cat([x2, xu1], dim=0)
-                y2 = torch.cat([y2, lu1.view(1, -1)], dim=0)
+                y2 = torch.cat([y2, lu1_reshaped], dim=0)
 
             # Remove newly labelled samples from U (global pool)
-            for item in [p[0] for p in pi if p is not None]:
-                mask = ~(remaining_suspension == item).all(
-                    dim=tuple(range(1, remaining_suspension.dim()))
-                )
-                remaining_suspension = remaining_suspension[mask]
+            selected_ids = []
+            if pi[0] is not None: selected_ids.append(pi[0][0].item())
+            if pi[1] is not None: selected_ids.append(pi[1][0].item())
+
+            for s_id in set(selected_ids):
+                remaining_suspension_ids = remaining_suspension_ids[remaining_suspension_ids != s_id]
 
             if self.verbose > 0:
                 print("Training first and second model with new dataset augmented by unlabeled data...")

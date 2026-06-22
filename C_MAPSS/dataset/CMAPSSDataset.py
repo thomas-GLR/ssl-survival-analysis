@@ -225,39 +225,35 @@ class CMAPSSDataset(Dataset):
 
         return DataLoader(self, **loader_kwargs)
 
-    def get_censored_split_tensors(self):
+    def get_censored_split_tensors(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Retrieves the features and targets separately for censored data (is_censored=1)
+        Retrieves the features, targets, and ids separately for censored data (is_censored=1)
         and uncensored data (is_censored=0).
-
-        Returns:
-            - features_uncensored (torch.Tensor): Features for is_censored = 0
-            - targets_uncensored (torch.Tensor): Target (RUL) for is_censored = 0
-            - features_censored (torch.Tensor): Features for is_censored = 1
         """
         # Identify ids marked as censored in the DataFrame
         censored_ids = self.df[self.df['is_censored'] == 1]['id'].unique()
 
         # Create a mask to filter sequences/windows generated
-        # self.id_array contain the ID that correspond to each input of self.sequence_array
         mask_censored = np.isin(self.id_array, censored_ids)
         mask_uncensored = ~mask_censored
 
         feat_uncensored = self.sequence_array[mask_uncensored]
         target_uncensored = self.label_array[mask_uncensored]
+
         feat_censored = self.sequence_array[mask_censored]
+        id_censored = self.id_array[mask_censored]  # <-- Extract IDs for censored data
 
         features_uncensored = torch.from_numpy(feat_uncensored).float()
         features_censored = torch.from_numpy(feat_censored).float()
+        ids_censored = torch.from_numpy(id_censored).long()  # <-- Convert to Tensor
 
         # Adjust the shape of the target to correspond to (N, 1)
-        # if return_sequence_label is False
         if not self.return_sequence_label:
             target_uncensored = target_uncensored[:, np.newaxis]
 
         targets_uncensored = torch.from_numpy(target_uncensored).float()
 
-        return features_uncensored, targets_uncensored, features_censored
+        return features_uncensored, targets_uncensored, features_censored, ids_censored
 
     def get_features_targets(self):
         features_tensor = torch.from_numpy(self.sequence_array).float()
