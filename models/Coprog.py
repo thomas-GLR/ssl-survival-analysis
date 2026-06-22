@@ -1,8 +1,9 @@
 import copy
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
 
 class Coprog:
@@ -43,7 +44,8 @@ class Coprog:
             batch_size: int = 32,
             device: torch.device | None = None,
             shuffle_dataloader: bool = False,
-            verbose: int = 0
+            verbose: int = 0,
+            first_and_second_model_already_trained: bool = False
     ):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -60,8 +62,8 @@ class Coprog:
         self.verbose = verbose
 
         # Trained models (set after calling .train())
-        self._h1: nn.Module | None = None
-        self._h2: nn.Module | None = None
+        self._h1: nn.Module | None = self.first_model if first_and_second_model_already_trained else None
+        self._h2: nn.Module | None = self.second_model if first_and_second_model_already_trained else None
 
     def train(
             self,
@@ -97,8 +99,12 @@ class Coprog:
 
         remaining_suspension = suspension_data.clone()
 
+        number_iterations = 0
+
         # Line 3 – Repeat for T times
-        for _ in range(iterations):
+        for i in range(iterations):
+            if self.verbose > 0:
+                print(f"Iterations {i + 1}/{iterations}")
 
             # Line 4 – Create pool U' of u suspension units
             if len(remaining_suspension) == 0:
@@ -195,6 +201,11 @@ class Coprog:
             h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1, "h1")
             h2 = self._train_fun(copy.deepcopy(self.second_model), x2, y2, "h2")
 
+            number_iterations += 1
+
+        if self.verbose > 0:
+            print(f"Number of iterations: {number_iterations} on {iterations} total iterations.")
+
         # Save final trained models
         self._h1 = h1
         self._h2 = h2
@@ -239,7 +250,10 @@ class Coprog:
         if self.verbose > 0:
             print(f"Training the model {model_name} for {self.epochs} epochs...")
 
-        for epoch in range(self.epochs):
+        best_loss = 1_000_000
+        avg_epochs_loss = 0.
+
+        for epoch in tqdm(iterable=range(self.epochs), disable=self.verbose == 0):
             avg_loss = 0.
 
             for x_batch, y_batch in loader:
@@ -250,8 +264,16 @@ class Coprog:
 
                 avg_loss += loss.item()
 
-            if self.verbose > 0:
+            if self.verbose > 1:
                 print(f"Epoch {epoch + 1}/{self.epochs} - Loss : {avg_loss / len(loader)}")
+
+            if avg_loss < best_loss:
+                best_loss = (avg_loss / len(loader))
+
+            avg_epochs_loss += (avg_loss / len(loader))
+
+        if self.verbose > 0:
+            print(f"Best loss for model {model_name} : {best_loss / len(loader)} - Average loss for model {model_name} : {avg_epochs_loss / self.epochs}")
 
         return model
 

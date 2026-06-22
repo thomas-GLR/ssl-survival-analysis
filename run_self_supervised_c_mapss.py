@@ -88,7 +88,7 @@ def train_or_get_autoencoder(
         dataset_root=C_MAPSS_DIR,
         sub_dataset=sub_dataset,
         window_size=seq_len,
-        num_samples=25000,
+        num_samples =25000,
         max_rul=max_rul,
         min_distance=1,
         percent_of_broken_data=percent_of_broken_data,
@@ -232,9 +232,9 @@ if __name__ == "__main__":
         validation_rate=validation_rate,
     )
 
-    train_loader = train_dataset.get_data_loader_without_censored_data_for_cnn_model(256)
-    val_loader = val_dataset.get_data_loader_without_censored_data_for_cnn_model(256)
-    test_loader = test_dataset.get_data_loader_without_censored_data_for_cnn_model(256)
+    train_loader = train_dataset.get_data_loader_without_censored_data(256, is_model_cnn=True)
+    val_loader = val_dataset.get_data_loader_without_censored_data(256, is_model_cnn=True)
+    test_loader = test_dataset.get_data_loader_without_censored_data(256, is_model_cnn=True)
 
     baseline_regressor = train_or_get_baseline_regressor_model(train_loader, val_loader, epochs, "baseline_regressor.pth")
 

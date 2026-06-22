@@ -271,10 +271,11 @@ class CMAPSSDataset(Dataset):
 
         return features_tensor, targets_tensor
 
-    def get_data_loader_without_censored_data_for_cnn_model(
+    def get_data_loader_without_censored_data(
             self,
             batch_size: int,
-            shuffle: bool=False
+            shuffle: bool=False,
+            is_model_cnn: bool=False,
     ) -> DataLoader:
         # Identify ids marked as censored in the DataFrame
         censored_ids = self.df[self.df['is_censored'] == 1]['id'].unique()
@@ -289,8 +290,9 @@ class CMAPSSDataset(Dataset):
 
         features_uncensored = torch.from_numpy(feat_uncensored).float()
 
-        # For conv1d the features (channels) should be in second place
-        features_uncensored = features_uncensored.permute(0, 2, 1)
+        if is_model_cnn:
+            # For conv1d the features (channels) should be in second place
+            features_uncensored = features_uncensored.permute(0, 2, 1)
 
         if not self.return_sequence_label:
             target_uncensored = target_uncensored[:, np.newaxis]

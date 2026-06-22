@@ -2,6 +2,8 @@ from dataset.PyclusDataset import PyclusDataset
 from models.SslPCT import SslPCT
 import numpy as np
 
+from utils.utils import score
+
 C_MAPSS_DIR = "data/C_MAPSS"
 
 
@@ -44,12 +46,6 @@ if __name__ == "__main__":
     )
 
     rmse = np.sqrt(np.mean((y_true_rul - y_pred_rul) ** 2))
-
-
-    def score(y_pred, y_true):
-        d = y_pred - y_true
-        return np.sum(np.where(d < 0, np.exp(-d / 13) - 1, np.exp(d / 10) - 1))
-
 
     print(f"Test RMSE: {rmse}")
     print(f"Score: {score(y_pred_rul, y_true_rul)}")
