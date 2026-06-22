@@ -44,7 +44,9 @@ class Baseline(pl.LightningModule, LoadEncoderMixin):
         self.embedding_metric = metrics.EmbeddingViz(
             20000, self.latent_dim, combined=False
         )
-        self.regression_metrics = {i: metrics.RMSELoss() for i in range(1, 5)}
+        # self.regression_metrics = {i: metrics.RMSELoss() for i in range(1, 5)}
+        self.val_rmse = metrics.RMSELoss()
+        self.test_rmse = metrics.RMSELoss()
 
         self.save_hyperparameters()
 
@@ -104,7 +106,8 @@ class Baseline(pl.LightningModule, LoadEncoderMixin):
         return loss
 
     def on_validation_epoch_start(self):
-        self._reset_all_metrics()
+        # self._reset_all_metrics()
+        self.val_rmse.reset()
 
     def on_test_epoch_start(self):
         self._reset_all_metrics()
@@ -115,10 +118,16 @@ class Baseline(pl.LightningModule, LoadEncoderMixin):
             metric.reset()
 
     def validation_step(self, batch, batch_idx):
-        self._evaluate(batch, metric_id=1)
+        # self._evaluate(batch, metric_id=1)
+        features, labels = batch
+        predictions = self(features)
+        self.val_rmse.update(predictions, features)
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
-        self._evaluate(batch, metric_id=dataloader_idx + 1)
+        # self._evaluate(batch, metric_id=dataloader_idx + 1)
+        features, labels = batch
+        predictions = self(features)
+        self.test_rmse.update(predictions, features)
 
     def _evaluate(self, batch, metric_id):
         features, labels = batch
@@ -129,7 +138,8 @@ class Baseline(pl.LightningModule, LoadEncoderMixin):
             self.embedding_metric.update(latent_code, torch.zeros_like(labels), labels)
 
     def on_validation_epoch_end(self):
-        self.log("val/regression_loss", self.regression_metrics[1].compute())
+        # self.log("val/regression_loss", self.regression_metrics[1].compute())
+        self.log("val/rmse", self.val_rmse.compute())
         if self.record_embeddings:
             fig_class, fig_rul = self.embedding_metric.compute()
             self.logger.log_figure("val/embeddings_class", fig_class, self.global_step)
@@ -137,5 +147,6 @@ class Baseline(pl.LightningModule, LoadEncoderMixin):
             self.embedding_metric.reset()
 
     def on_test_epoch_end(self):
-        for fd, metric in self.regression_metrics.items():
-            self.log(f"test/regression_loss_fd{fd}", metric.compute())
+        self.log("test/rmse", self.test_rmse.compute())
+        # for fd, metric in self.regression_metrics.items():
+        #         self.log(f"test/regression_loss_fd{fd}", metric.compute())

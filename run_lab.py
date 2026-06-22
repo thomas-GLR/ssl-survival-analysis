@@ -37,7 +37,6 @@ if __name__ == "__main__":
         "node_modules",
         ".idea",
         "data",
-        "pyclus"
     }
 
     for root, dirs, files in os.walk(project_path):
@@ -47,4 +46,4 @@ if __name__ == "__main__":
         for file in files:
             full_path = os.path.join(root, file)
             relative_path = os.path.relpath(full_path, project_path)
-            print(relative_path.replace("\\", "/"))
+            print(f"\"{relative_path.replace("\\", "/")}\",")
