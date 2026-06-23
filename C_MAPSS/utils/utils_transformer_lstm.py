@@ -1,19 +1,189 @@
+from datetime import datetime
 import os
 
+import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
 from torch.serialization import add_safe_globals
 from torch.utils.data import DataLoader
 
+import constants.results_columns as results_columns
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from C_MAPSS.lightning.TransformerLstmModule import TransformerLstmModule
 from C_MAPSS.models.Simple_LSTM import Simple_LSTM
 from C_MAPSS.models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
+from utils.utils import cmapss_score
+from C_MAPSS.utils.utils_cmapss import extract_benchmark_information_from_config, extract_dataset_params_from_config, \
+    extract_model_params_from_config
 
 # For PyTorch 2.6+
 # We indicate to PyTorch that these classes are "safe" when loading checkpoints
 add_safe_globals([Simple_LSTM, TransformerEncoder_LSTM_1])
+
+NECESSARY_TRANSFORMER_KEYS = [
+    "sequence_len",
+    "transformer_encoder_head_num",
+    "hidden_dim",
+    "lstm_num_layers",
+    "lstm_dropout",
+    "fc_layer_dim",
+    "fc_dropout",
+    "batch_size",
+    "lr",
+    "patience",
+    "max_epochs",
+]
+
+NECESSARY_LSTM_KEYS = [
+    "sequence_len",
+    "hidden_dim",
+    "lstm_num_layers",
+    "lstm_dropout",
+    "fc_layer_dim",
+    "fc_dropout",
+    "batch_size",
+    "lr",
+    "patience",
+    "max_epochs",
+]
+
+NECESSARY_DATASET_KEYS = [
+    "seed",
+    "max_rul",
+    "return_sequence_label",
+    "norm_type",
+    "cluster_operations",
+    "norm_by_operations",
+    "include_cols",
+    "exclude_cols",
+    "return_id",
+    "validation_rate",
+    "use_only_final_on_test",
+    "use_max_rul_on_test",
+    "use_max_rul_on_valid",
+]
+
+
+def benchmark_for_transformer_or_lstm(
+        config_path: str,
+        checkpoints_path: str,
+        results_path: str,
+        dataset_root: str,
+        model_version: str,
+        device: str,
+        benchmark_version: str = "default",
+) -> None:
+    """
+    Launch benchmark on cmapss depending on information in config file
+
+    :param config_path: the path for all the config files
+    :param checkpoints_path: the path to store the checkpoints
+    :param results_path: the path to store results
+    :param dataset_root: the path to the dataset folder where all cmapss files are stored
+    :param model_version: the version of the model (transformer, lstm)
+    :param device: the device where to run the model
+    :param benchmark_version: the folder of the version for the benchmark.
+        It enables to run different benchmark configuration
+    """
+    config_path = f"{config_path}/{benchmark_version}"
+    config_benchmark_file_path = f"{config_path}/benchmark.json"
+    config_model_file_path = f"{config_path}/{model_version}.json"
+
+    assert os.path.exists(checkpoints_path), f"{checkpoints_path} does not exist."
+    assert os.path.exists(results_path), f"{results_path} does not exist."
+    assert os.path.exists(config_path), f"{config_path} does not exist."
+    assert os.path.exists(dataset_root), f"{dataset_root} does not exist."
+    assert os.path.exists(config_benchmark_file_path), f"{config_benchmark_file_path} does not exist."
+    assert os.path.exists(config_model_file_path), f"{config_model_file_path} does not exist."
+
+    broken_percentages, censored_percentages, cmapss_files = extract_benchmark_information_from_config(
+        config_benchmark_file_path
+    )
+
+    columns = [
+        results_columns.SUB_DATASET,
+        results_columns.CENSORED_PERCENTAGE,
+        results_columns.BROKEN_PERCENTAGE,
+        results_columns.MODEL,
+        results_columns.RMSE,
+        results_columns.SCORE
+    ]
+    rows = []
+
+    benchmark_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    for sub_dataset in cmapss_files:
+        secure_save_for_sub_dataset_rows = []
+
+        for censored_percentage in censored_percentages:
+            secure_save_for_censored_percentage_rows = []
+
+            for broken_percentage in broken_percentages:
+                print(
+                    f"Training model {model_version} for the sub dataset : {sub_dataset}, censored percentage : {censored_percentage} and broken percentage : {broken_percentage}")
+
+                dataset_params = extract_dataset_params_from_config(
+                    config_path=config_model_file_path,
+                    sub_dataset=sub_dataset,
+                    necessary_keys=NECESSARY_DATASET_KEYS,
+                )
+
+                necessary_model_keys = NECESSARY_TRANSFORMER_KEYS if model_version == "transformer" else NECESSARY_LSTM_KEYS
+
+                model_params = extract_model_params_from_config(
+                    config_model_file_path,
+                    sub_dataset=sub_dataset,
+                    necessary_keys=necessary_model_keys,
+                )
+
+                rmse, score = train_model(
+                    checkpoints_path=checkpoints_path,
+                    results_path=results_path,
+                    model_version=model_version,
+                    dataset_root=dataset_root,
+                    sub_dataset=sub_dataset,
+                    percent_of_broken_data=broken_percentage,
+                    percent_of_censored_data=censored_percentage,
+                    **dataset_params,
+                    **model_params,
+                    device=device,
+                    datetime_for_folders=benchmark_datetime,
+                )
+
+                new_dataframe_row = {
+                    results_columns.SUB_DATASET: sub_dataset,
+                    results_columns.CENSORED_PERCENTAGE: censored_percentage,
+                    results_columns.BROKEN_PERCENTAGE: broken_percentage,
+                    results_columns.MODEL: model_version,
+                    results_columns.RMSE: rmse,
+                    results_columns.SCORE: score,
+                }
+
+                rows.append(new_dataframe_row)
+                secure_save_for_censored_percentage_rows.append(new_dataframe_row)
+                secure_save_for_sub_dataset_rows.append(new_dataframe_row)
+
+            secure_save_for_censored_percentage = pd.DataFrame(secure_save_for_censored_percentage_rows, columns=columns)
+
+            print(f"Saving intermediate result for sub dataset {sub_dataset} and censored percentage : {censored_percentage}...")
+            secure_save_for_censored_percentage.to_csv(
+                f"{results_path}/secure_{sub_dataset}_censored_{censored_percentage:.2f}_{model_version}_benchmark_{benchmark_version}_results_turbofan.csv",
+                index=False)
+
+
+        secure_save_for_sub_dataset = pd.DataFrame(secure_save_for_sub_dataset_rows, columns=columns)
+
+        print(f"Saving intermediate result for sub dataset {sub_dataset}...")
+        secure_save_for_sub_dataset.to_csv(f"{results_path}/secure_{sub_dataset}_{model_version}_benchmark_{benchmark_version}_results_turbofan.csv", index=False)
+
+    df_results = pd.DataFrame(rows, columns=columns)
+
+    print(df_results.head())
+
+    print("Saving results...")
+
+    df_results.to_csv(f"{results_path}/{model_version}_benchmark_{benchmark_version}_results_turbofan.csv", index=False)
 
 
 def train_model(
@@ -23,22 +193,22 @@ def train_model(
         # Dataset params
         dataset_root: str,
         seed: int | None,
-        sub_dataset: str='FD001',
-        sequence_len: int=30,
-        max_rul: int=125,
-        return_sequence_label: bool=False,
-        norm_type: str='z-score',
-        cluster_operations: bool=True,
-        norm_by_operations: bool=True,
-        include_cols: list[str] | None=None,
-        exclude_cols: list[str] | None=None,
-        return_id: bool= False,
+        sub_dataset: str,
+        sequence_len: int = 30,
+        max_rul: int = 125,
+        return_sequence_label: bool = False,
+        norm_type: str = 'z-score',
+        cluster_operations: bool = True,
+        norm_by_operations: bool = True,
+        include_cols: list[str] | None = None,
+        exclude_cols: list[str] | None = None,
+        return_id: bool = False,
         validation_rate=0.2,
-        use_only_final_on_test: bool=True,
-        use_max_rul_on_test: bool=False,
-        use_max_rul_on_valid: bool=True,
-        percent_of_broken_data: float | None=None,
-        percent_of_censored_data: float=0.9,
+        use_only_final_on_test: bool = True,
+        use_max_rul_on_test: bool = False,
+        use_max_rul_on_valid: bool = True,
+        percent_of_broken_data: float | None = None,
+        percent_of_censored_data: float = 0.9,
         # Model params
         transformer_encoder_head_num=2,
         lstm_num_layers=3,
@@ -47,21 +217,33 @@ def train_model(
         fc_layer_dim=32,
         fc_dropout=0.2,
         # Training
-        device: str | None=None,
+        device: str | None = None,
         batch_size=256,
         lr=0.001,
         patience=10,
-        max_epochs: int=500,
-):
+        max_epochs: int = 500,
+        datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+) -> tuple[float, float]:
     assert os.path.exists(checkpoints_path), f"{checkpoints_path} does not exist"
     assert os.path.exists(results_path), f"{results_path} does not exist"
     assert os.path.exists(dataset_root), f"{dataset_root} does not exist"
 
-    assert sub_dataset in ['FD001', 'FD002', 'FD003', 'FD004'], f"Sub dataset must be one of ['FD001', 'FD002', 'FD003', 'FD004'] and not {sub_dataset}"
+    assert sub_dataset in ['FD001', 'FD002', 'FD003',
+                           'FD004'], f"Sub dataset must be one of ['FD001', 'FD002', 'FD003', 'FD004'] and not {sub_dataset}"
 
     device = device or 'cuda' if torch.cuda.is_available() else 'cpu'
 
     scores = pd.DataFrame(columns=['train_rmse', 'val_rmse', 'test_rmse', 'test_score'])
+
+    broken_percentage = 0. if percent_of_broken_data is None else percent_of_broken_data
+
+    folder_for_current_training = f"/model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
+
+    checkpoints_path = f'{checkpoints_path}/{folder_for_current_training}'
+    results_path = f'{results_path}/{folder_for_current_training}'
+
+    if not os.path.exists(results_path):
+        os.makedirs(results_path)
 
     dataset_kwargs = {
         'dataset_root': dataset_root,
@@ -112,7 +294,8 @@ def train_model(
     # As the models can only handle supervised learning we need to filtered censored data
     train_loader = train_dataset.get_data_loader_without_censored_data(batch_size=batch_size)
     test_loader = test_dataset.get_data_loader_without_censored_data(batch_size=batch_size)
-    valid_loader = valid_dataset.get_data_loader_without_censored_data(batch_size=batch_size) if valid_dataset is not None else None
+    valid_loader = valid_dataset.get_data_loader_without_censored_data(
+        batch_size=batch_size) if valid_dataset is not None else None
 
     model_kwargs = {
         'sequence_len': sequence_len,
@@ -150,7 +333,7 @@ def train_model(
     )
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        dirpath=f'{checkpoints_path}/model-{model_version}-turbofan-{sub_dataset}',
+        dirpath=checkpoints_path,
         monitor='val_loss',
         filename='checkpoint-{epoch:02d}-{val_rmse:.4f}',
         save_top_k=1,
@@ -186,29 +369,33 @@ def train_model(
     print(f"Scores from train and test :\n{scores}")
 
     # Save model predictions
-    model_trained = pl.LightningModule.load_from_checkpoint(checkpoint_callback.best_model_path)
+    if model_version == 'transformer':
+        model_for_reload = TransformerEncoder_LSTM_1(**model_kwargs)
+    elif model_version == 'lstm':
+        model_for_reload = Simple_LSTM(**model_kwargs)
+    else:
+        raise ValueError(f"Model reload version {model_version} is not supported")
 
-    transformer_lstm_module_with_trained_model = TransformerLstmModule(
-        lr=lr,
-        model=model_trained
+    transformer_lstm_module_with_trained_model = TransformerLstmModule.load_from_checkpoint(
+        checkpoint_callback.best_model_path,
+        model=model_for_reload,
     )
 
     transformer_lstm_module_with_trained_model = transformer_lstm_module_with_trained_model.to(device)
     transformer_lstm_module_with_trained_model.eval()
 
-    for (loader, prediction_type) in zip([test_loader, train_loader], ['test', 'train']):
-        generate_and_save_model_prediction(
-            loader=loader,
-            device=device,
-            module=transformer_lstm_module_with_trained_model,
-            model_version=model_version,
-            prediction_type=prediction_type,
-            results_path=results_path,
-            sub_dataset=sub_dataset,
-        )
+    return _generate_and_save_model_prediction(
+        loader=test_loader,
+        device=device,
+        module=transformer_lstm_module_with_trained_model,
+        model_version=model_version,
+        prediction_type='test',
+        results_path=results_path,
+        sub_dataset=sub_dataset,
+    )
 
 
-def generate_and_save_model_prediction(
+def _generate_and_save_model_prediction(
         loader: DataLoader,
         device: str,
         module: pl.LightningModule,
@@ -216,7 +403,7 @@ def generate_and_save_model_prediction(
         prediction_type: str,
         results_path: str,
         sub_dataset: str,
-) -> None:
+) -> tuple[float, float]:
     """
     Generate results for predictions from the data_loader and save them in csv file
 
@@ -247,3 +434,11 @@ def generate_and_save_model_prediction(
     df.to_csv(csv_path, index=False)
 
     print(f"Results for {prediction_type} are saved under : {csv_path}")
+
+    predictions_tensor = torch.Tensor(predictions)
+    targets_tensor = torch.Tensor(targets)
+
+    rmse = torch.sqrt(torch.mean((targets_tensor - predictions_tensor) ** 2))
+    score = cmapss_score(np.array(predictions), np.array(targets))
+
+    return rmse.item(), score

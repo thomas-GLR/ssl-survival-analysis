@@ -1,0 +1,118 @@
+{
+  "FD001": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "return_sequence_label": false,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "return_id": false,
+      "validation_rate": 0.2,
+      "use_only_final_on_test": true,
+      "use_max_rul_on_test": false,
+      "use_max_rul_on_valid": true
+    },
+    "model_params": {
+      "sequence_len": 60,
+      "hidden_dim": 128,
+      "lstm_num_layers": 3,
+      "lstm_dropout": 0.2,
+      "fc_layer_dim": 128,
+      "fc_dropout": 0.5,
+      "batch_size": 128,
+      "lr": 0.0002,
+      "patience": 50,
+      "max_epochs": 500
+    }
+  },
+  "FD002": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "return_sequence_label": false,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "return_id": false,
+      "validation_rate": 0.2,
+      "use_only_final_on_test": true,
+      "use_max_rul_on_test": false,
+      "use_max_rul_on_valid": true
+    },
+    "model_params": {
+      "sequence_len": 60,
+      "hidden_dim": 128,
+      "lstm_num_layers": 3,
+      "lstm_dropout": 0.2,
+      "fc_layer_dim": 128,
+      "fc_dropout": 0.5,
+      "batch_size": 128,
+      "lr": 0.0002,
+      "patience": 50,
+      "max_epochs": 500
+    }
+  },
+  "FD003": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "return_sequence_label": false,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "return_id": false,
+      "validation_rate": 0.2,
+      "use_only_final_on_test": true,
+      "use_max_rul_on_test": false,
+      "use_max_rul_on_valid": true
+    },
+    "model_params": {
+      "sequence_len": 60,
+      "hidden_dim": 128,
+      "lstm_num_layers": 3,
+      "lstm_dropout": 0.2,
+      "fc_layer_dim": 128,
+      "fc_dropout": 0.5,
+      "batch_size": 128,
+      "lr": 0.0002,
+      "patience": 50,
+      "max_epochs": 500
+    }
+  },
+  "FD004": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "return_sequence_label": false,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "return_id": false,
+      "validation_rate": 0.2,
+      "use_only_final_on_test": true,
+      "use_max_rul_on_test": false,
+      "use_max_rul_on_valid": true
+    },
+    "model_params": {
+      "sequence_len": 60,
+      "hidden_dim": 128,
+      "lstm_num_layers": 3,
+      "lstm_dropout": 0.2,
+      "fc_layer_dim": 128,
+      "fc_dropout": 0.5,
+      "batch_size": 128,
+      "lr": 0.0002,
+      "patience": 50,
+      "max_epochs": 500
+    }
+  }
+}

@@ -1,5 +1,4 @@
 import copy
-from tabnanny import verbose
 
 import torch
 import torch.nn as nn
@@ -40,9 +39,12 @@ class Coprog:
             second_model: nn.Module,
             w1: float = 0.5,
             w2: float = 0.5,
-            lr: float = 1e-3,
-            epochs: int = 20,
-            batch_size: int = 32,
+            lr_first_model: float = 1e-3,
+            lr_second_model: float = 1e-3,
+            epochs_first_model: int = 20,
+            epochs_second_model: int = 20,
+            batch_size_first_model: int = 32,
+            batch_size_second_model: int = 32,
             device: torch.device | None = None,
             shuffle_dataloader: bool = False,
             verbose: int = 0,
@@ -56,9 +58,14 @@ class Coprog:
 
         self.w1 = w1
         self.w2 = w2
-        self.lr = lr
-        self.epochs = epochs
-        self.batch_size = batch_size
+
+        self.lr_first_model = lr_first_model
+        self.lr_second_model = lr_second_model
+        self.epochs_first_model = epochs_first_model
+        self.epochs_second_model = epochs_second_model
+        self.batch_size_first_model = batch_size_first_model
+        self.batch_size_second_model = batch_size_second_model
+
         self.shuffle_dataloader = shuffle_dataloader
         self.verbose = verbose
 
@@ -97,8 +104,24 @@ class Coprog:
             print("Training first and second model with labeled data...")
 
         # Line 2 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
-        h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1, "h1")
-        h2 = self._train_fun(copy.deepcopy(self.second_model), x2, y2, "h2")
+        h1 = self._train_fun(
+            copy.deepcopy(self.first_model),
+            x1,
+            y1,
+            self.lr_first_model,
+            self.batch_size_first_model,
+            self.epochs_first_model,
+            "h1",
+        )
+        h2 = self._train_fun(
+            copy.deepcopy(self.second_model),
+            x2,
+            y2,
+            self.lr_second_model,
+            self.batch_size_second_model,
+            self.epochs_second_model,
+            "h2"
+        )
 
         remaining_suspension_ids = torch.unique(suspension_ids)# remaining_suspension = suspension_data.clone()
 
@@ -119,6 +142,19 @@ class Coprog:
             pool_ids = shuffled_ids[:pool_size] # U'
 
             pi = [None, None]  # π1, π2
+
+            training_params = [
+                {
+                    "lr": self.lr_first_model,
+                    "batch_size": self.batch_size_first_model,
+                    "epochs": self.epochs_first_model,
+                },
+                {
+                    "lr": self.lr_second_model,
+                    "batch_size": self.batch_size_second_model,
+                    "epochs": self.epochs_second_model,
+                }
+            ]
 
             # Line 5 – for j = 1 to 2
             for j, (hj, xj, yj) in enumerate([(h1, x1, y1), (h2, x2, y2)]):
@@ -152,7 +188,15 @@ class Coprog:
                     lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
                     y_aug = torch.cat([yj, lu_p_reshaped], dim=0)
 
-                    hj_prime = self._train_fun(model_j, x_aug, y_aug, f"h{j + 1}_prime")
+                    hj_prime = self._train_fun(
+                        copy.deepcopy(self.first_model),
+                        x1,
+                        y1,
+                        training_params[j]["lr"],
+                        training_params[j]["batch_size"],
+                        training_params[j]["epochs"],
+                        f"h{j + 1}_prime",
+                    )
 
                     # Line 9 – Δ_{j, X_u} = MSE(hj, L) – MSE(h'j, L)
                     delta = self._confidence_measure(xj, yj, hj, hj_prime)
@@ -214,9 +258,24 @@ class Coprog:
                 print("\tTraining first and second model with new dataset augmented by unlabeled data...")
 
             # Line 20 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
-            h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1, "h1")
-            h2 = self._train_fun(copy.deepcopy(self.second_model), x2, y2, "h2")
-
+            h1 = self._train_fun(
+                copy.deepcopy(self.first_model),
+                x1,
+                y1,
+                self.lr_first_model,
+                self.batch_size_first_model,
+                self.epochs_first_model,
+                "h1",
+            )
+            h2 = self._train_fun(
+                copy.deepcopy(self.second_model),
+                x2,
+                y2,
+                self.lr_second_model,
+                self.batch_size_second_model,
+                self.epochs_second_model,
+                "h2"
+            )
             number_iterations += 1
 
         if self.verbose > 0:
@@ -248,6 +307,9 @@ class Coprog:
             model: nn.Module,
             x: torch.Tensor,
             y: torch.Tensor,
+            lr: float,
+            batch_size: int,
+            epochs: int,
             model_name: str = ""
     ) -> nn.Module:
         """
@@ -257,19 +319,19 @@ class Coprog:
         model = model.to(self.device)
         model.train()
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         criterion = nn.MSELoss()
 
         dataset = TensorDataset(x, y)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=self.shuffle_dataloader)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=self.shuffle_dataloader)
 
         if self.verbose > 1:
-            print(f"\tTraining the model {model_name} for {self.epochs} epochs...")
+            print(f"\tTraining the model {model_name} for {epochs} epochs...")
 
         best_loss = 1_000_000
         avg_epochs_loss = 0.
 
-        for epoch in tqdm(iterable=range(self.epochs), disable=self.verbose < 2, desc="Epochs iterator"):
+        for epoch in tqdm(iterable=range(epochs), disable=self.verbose < 2, desc="Epochs iterator"):
             avg_loss = 0.
 
             for x_batch, y_batch in loader:
@@ -281,7 +343,7 @@ class Coprog:
                 avg_loss += loss.item()
 
             if self.verbose > 2:
-                print(f"\tEpoch {epoch + 1}/{self.epochs} - Loss : {avg_loss / len(loader)}")
+                print(f"\tEpoch {epoch + 1}/{epochs} - Loss : {avg_loss / len(loader)}")
 
             if avg_loss < best_loss:
                 best_loss = (avg_loss / len(loader))

@@ -5,6 +5,7 @@ import os
 import datetime
 
 from lifelines.utils import add_covariate_to_timeline, to_long_format
+from numpy import ndarray
 
 import constants.scania_component_x_columns as scania_cols
 import constants.c_mapss_columns as c_mapss_cols
@@ -192,7 +193,7 @@ def get_train_survival_dataset(print_information: bool = False) -> pd.DataFrame:
 
     return survival_dataset.drop(columns=[scania_cols.LENGTH_OF_STUDY_TIME_STEP, scania_cols.VEHICLE_ID], axis=1)
 
-def cmapss_score(predict, label):
+def cmapss_score(predict: ndarray, label: ndarray) -> float:
     a1 = 13
     a2 = 10
     error = predict - label

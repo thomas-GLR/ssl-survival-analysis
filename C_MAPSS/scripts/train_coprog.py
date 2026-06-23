@@ -111,10 +111,13 @@ if __name__ == "__main__":
     coprog = Coprog(
         first_model=lstm,
         second_model=lstm2,
-        batch_size=args.batch_size,
-        epochs=args.epochs,
+        lr_first_model=args.lr,
+        lr_second_model=args.lr,
+        epochs_first_model=args.epochs,
+        epochs_second_model=args.epochs,
+        batch_size_first_model=args.batch_size,
+        batch_size_second_model=args.batch_size,
         verbose=args.verbose,
-        lr=args.lr,
     )
 
     features_uncensored, targets_uncensored, features_censored, ids_censored = train_dataset.get_censored_split_tensors()

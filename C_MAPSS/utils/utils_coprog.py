@@ -18,9 +18,12 @@ def train_model(
     coprog_iterations: int,
     coprog_suspension_pool_size: int,
     # Training params
-    batch_size: int,
-    epochs: int,
-    lr: float,
+    lr_first_model: float,
+    lr_second_model: float,
+    epochs_first_model: int,
+    epochs_second_model: int,
+    batch_size_first_model: int,
+    batch_size_second_model: int,
     # Dataset params
     dataset_root: str,
     seed: int | None,
@@ -90,10 +93,13 @@ def train_model(
     coprog = Coprog(
         first_model=cnn,
         second_model=lstm,
-        batch_size=batch_size,
-        epochs=epochs,
+        lr_first_model=lr_first_model,
+        lr_second_model=lr_second_model,
+        epochs_first_model=epochs_first_model,
+        epochs_second_model=epochs_second_model,
+        batch_size_first_model=batch_size_first_model,
+        batch_size_second_model=batch_size_second_model,
         verbose=1,
-        lr=lr,
     )
 
     print(f"Training Coprog model...")
@@ -123,4 +129,4 @@ def train_model(
     print(f"Test RMSE: {rmse}")
     print(f"Score: {score}")
 
-    return rmse, score
+    return rmse.item(), score

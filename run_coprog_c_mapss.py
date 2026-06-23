@@ -87,8 +87,10 @@ if __name__ == "__main__":
     coprog = Coprog(
         first_model=first_model,
         second_model=second_model,
-        batch_size=128,
-        epochs=100,
+        epochs_first_model=100,
+        epochs_second_model=100,
+        batch_size_first_model=128,
+        batch_size_second_model=128,
         verbose=1,
         first_and_second_model_already_trained=coprog_already_trained
     )

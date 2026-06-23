@@ -141,12 +141,12 @@ class CMAPSSDataset(Dataset):
         self.sequence_len = sequence_len
 
         # feature cols define
-        if include_cols is not None:
+        if include_cols is not None and len(include_cols) > 0:
             self.feature_cols = include_cols
         else:
             self.feature_cols = CMAPSSDataset.OPERATION_COLS + CMAPSSDataset.SENSOR_COLS
 
-        if exclude_cols is not None:
+        if exclude_cols is not None and len(exclude_cols) > 0:
             for v in exclude_cols:
                 if v in self.feature_cols:
                     self.feature_cols.remove(v)

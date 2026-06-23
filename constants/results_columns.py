@@ -1,0 +1,6 @@
+SUB_DATASET = "Sub dataset"
+CENSORED_PERCENTAGE = "Censored percentage"
+BROKEN_PERCENTAGE = "Broken percentage"
+MODEL = "Model"
+RMSE = "RMSE"
+SCORE = "Score"
