@@ -24,6 +24,7 @@ def train_model(
         use_max_rul_on_valid: bool,
         percent_of_censored_data: float,
         percent_of_broken_data: float | None,
+        summarize_features: bool,
         random_state: int=42,
 ) -> tuple[float, float]:
     rsf = RandomSurvivalForest(
@@ -32,6 +33,9 @@ def train_model(
     )
 
     print("Loading dataset...")
+
+    cluster_operations = False if summarize_features else cluster_operations
+    norm_by_operations = False if summarize_features else norm_by_operations
 
     train_dataset, test_dataset, _ = ScikitDataset.from_cmapss(
         dataset_root=dataset_root,
@@ -45,6 +49,7 @@ def train_model(
         use_max_rul_on_valid=use_max_rul_on_valid,
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
+        summarize_features=summarize_features,
     )
 
     train_X = train_dataset.X
@@ -68,6 +73,7 @@ def train_model(
             max_depth,
             min_samples_split,
             min_samples_leaf,
+            random_state,
         )
 
     else:
@@ -125,6 +131,7 @@ def select_best_params(
     max_depth: list[int] | None,
     min_samples_split: list[int] | None,
     min_samples_leaf: list[int] | None,
+    random_state: int | None,
 ) -> RandomSurvivalForest:
     param_grid = {}
 
@@ -142,7 +149,7 @@ def select_best_params(
 
     status = train_Y["Status"]
 
-    stratified_k_fold = StratifiedKFold(n_splits=cv_for_grid_search, shuffle=True, random_state=42)
+    stratified_k_fold = StratifiedKFold(n_splits=cv_for_grid_search, shuffle=True, random_state=random_state)
     # We need a custom split when there is no enough failure data and we wan't failure data for each fold
     custom_splits = list(stratified_k_fold.split(train_X, status))
 

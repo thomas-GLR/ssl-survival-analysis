@@ -46,6 +46,32 @@ class SslPCT(ClusModelRegression, ClusModelEnsemble):
 		java_parameters: str = "",
 		**kwargs,
 	):
+		"""
+
+		:param ensemble_method:
+		:param feature_subset:
+		:param min_leaf_size:
+		:param n_trees:
+		:param verbose:
+		:param random_state:
+		:param split_heuristic:
+		:param missing_clustering_attr_handling:
+		:param missing_target_attr_handling:
+		:param pruning_method:
+			- The pruning method for regression trees is M5
+			- For multi-target regression trees, the pruning method is M5MultiTarget
+			- CartVSB work better than M5 on multi-target regression
+		:param semi_supervised_method:
+		:param percentage_labeled:
+		:param pruning_when_tuning:
+		:param internal_folds:
+		:param possible_weights:
+		:param write_ensemble_predictions:
+		:param number_of_threads:
+		:param is_multi_target:
+		:param java_parameters:
+		:param kwargs:
+		"""
 		self._ssl_init_params = {
 			"ensemble_method": ensemble_method,
 			"feature_subset": feature_subset,
@@ -99,9 +125,9 @@ class SslPCT(ClusModelRegression, ClusModelEnsemble):
 			**clus_kwargs,
 		)
 
-	def fit(self, X, y, **kwargs):
-		"""Entraîne le modèle sur `X` et `y` au format scikit-learn."""
-		return super().fit(X, y, **kwargs)
+	# def fit(self, X, y, **kwargs):
+	# 	"""Entraîne le modèle sur `X` et `y` au format scikit-learn."""
+	# 	return super().fit(X, y, **kwargs)
 
 	def get_params(self, deep: bool = True) -> Dict[str, Any]:
 		"""Retourne les paramètres initiaux du wrapper, comme un estimateur sklearn."""

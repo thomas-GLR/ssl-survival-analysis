@@ -30,14 +30,22 @@ class PyclusDataset:
     def from_cmapss(
             dataset_root: str,
             seed: int | None,
+            summarize_features: bool,
             sub_dataset: str = 'FD001',
             max_rul=None,
+            norm_type=None,
+            cluster_operations=False,
+            norm_by_operations=False,
             validation_rate=0.2,
             use_max_rul_on_test=False,
             use_max_rul_on_valid=True,
             percent_of_censored_data: float = 0.0,
             percent_of_broken_data: float | None = None
     ):
+        # We don't wan't to normalize if we summarize features with mean, std, slope...
+        cluster_operations = False if summarize_features else cluster_operations
+        norm_by_operations = False if summarize_features else norm_by_operations
+
         train_cmapss, test_cmapss, valid_cmapss = CMAPSSLoader.get_datasets(
             dataset_root=dataset_root,
             sub_dataset=sub_dataset,
@@ -45,9 +53,9 @@ class PyclusDataset:
             seed=seed,
             max_rul=max_rul,
             return_sequence_label=True,
-            norm_type=None,
-            cluster_operations=False,
-            norm_by_operations=False,
+            norm_type=norm_type,
+            cluster_operations=cluster_operations,
+            norm_by_operations=norm_by_operations,
             include_cols=None,
             exclude_cols=None,
             return_id=True,
@@ -60,7 +68,7 @@ class PyclusDataset:
         )
 
         return PyclusDataset._transform_datasets_to_pyclus(
-            train_cmapss, test_cmapss, valid_cmapss, cmapss_col.ID, cmapss_col.TIME
+            train_cmapss, test_cmapss, valid_cmapss, cmapss_col.ID, cmapss_col.TIME, summarize_features
         )
 
     # ============================================================================
@@ -74,6 +82,7 @@ class PyclusDataset:
             valid_dataset,
             id_col: str,
             time_col: str,
+            summarize_features: bool,
             feature_cols=None
     ):
         """
@@ -84,18 +93,25 @@ class PyclusDataset:
         :param valid_dataset: Dataset with a 'df' column
         :return: Tuple of (train_pyclus, test_pyclus, valid_pyclus)
         """
-        # Aggregate the data by unit (id) with summarized features
-        PyclusDataset._group_by_id_with_summary_features(
-            train_dataset, id_col, time_col, is_test_dataset=False, feature_cols=feature_cols
-        )
-        PyclusDataset._group_by_id_with_summary_features(
-            test_dataset, id_col, time_col, is_test_dataset=True, feature_cols=feature_cols
-        )
-
-        if valid_dataset is not None:
+        if summarize_features:
+            # Aggregate the data by unit (id) with summarized features
             PyclusDataset._group_by_id_with_summary_features(
-                valid_dataset, id_col, time_col, is_test_dataset=False, feature_cols=feature_cols
+                train_dataset, id_col, time_col, is_test_dataset=False, feature_cols=feature_cols
             )
+            PyclusDataset._group_by_id_with_summary_features(
+                test_dataset, id_col, time_col, is_test_dataset=True, feature_cols=feature_cols
+            )
+
+            if valid_dataset is not None:
+                PyclusDataset._group_by_id_with_summary_features(
+                    valid_dataset, id_col, time_col, is_test_dataset=False, feature_cols=feature_cols
+                )
+        else:
+            PyclusDataset._keep_last_time_to_event_by_id(train_dataset, id_col, time_col)
+            PyclusDataset._keep_last_time_to_event_by_id(test_dataset, id_col, time_col)
+
+            if valid_dataset is not None:
+                PyclusDataset._keep_last_time_to_event_by_id(valid_dataset, id_col, time_col)
 
         # Build the time grid from the train dataset
         time_grid = np.sort(train_dataset.df[PyclusDataset.TIME_TO_EVENT_COLUMN].unique())
@@ -125,6 +141,28 @@ class PyclusDataset:
             PyclusDataset(test_X, test_Y, test_ids, time_grid, test_features, true_rul=test_true_rul),
             val_pyclus_dataset
         )
+
+    @staticmethod
+    def _keep_last_time_to_event_by_id(
+            dataset,
+            id_col: str,
+            time_col: str,
+    ):
+        """
+        For each unit (id), keep only the row with the last time_to_event RUL value.
+        Modifies dataset.df directly.
+
+        :param dataset: Dataset with attribute 'df'
+        :param id_col: Name of the id column
+        """
+        df = dataset.df
+
+        df[PyclusDataset.TIME_TO_EVENT_COLUMN] = df[time_col]
+        # If censored then the event didn't occur so 0 otherwise 1
+        df[PyclusDataset.EVENT_COLUMN] = df['is_censored'].apply(lambda x: 0 if x == 1 else 1)
+
+        idx_max_time_to_event = df.groupby(id_col)[time_col].idxmax()
+        dataset.df = df.loc[idx_max_time_to_event].reset_index(drop=True)
 
     @staticmethod
     def _group_by_id_with_summary_features(

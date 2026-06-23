@@ -14,12 +14,13 @@ if __name__ == '__main__':
     sub_dataset = "FD001"
     max_rul = 125
     norm_type = "z-score"
-    cluster_operations = False
-    norm_by_operations = False
+    cluster_operations = True
+    norm_by_operations = True
     use_max_rul_on_test = False
     use_max_rul_on_valid = True
     percent_of_censored_data = 0.9
     percent_of_broken_data = None
+    summarize_features = True
 
     rmse, score = train_model(
         n_estimators=n_estimators,
@@ -37,4 +38,5 @@ if __name__ == '__main__':
         use_max_rul_on_valid=use_max_rul_on_valid,
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
+        summarize_features=summarize_features,
     )

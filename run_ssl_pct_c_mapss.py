@@ -11,6 +11,10 @@ if __name__ == "__main__":
     sub_dataset = "FD001"
     max_rul = None
     validation_rate = 0.0
+    norm_type = "z-score"
+    summarize_features = True
+    cluster_operations = False
+    norm_by_operations = False
     use_max_rul_on_test = False
     use_max_rul_on_valid = True
     percent_of_censored_data = 0.9
@@ -27,22 +31,26 @@ if __name__ == "__main__":
         use_max_rul_on_valid=use_max_rul_on_valid,
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
+        summarize_features=summarize_features
     )
-
-
 
     X_train, y_train = train_dataset.X, train_dataset.Y
     X_test, y_test = test_dataset.X, test_dataset.Y
 
-    # print(f"Train : {y_train}")
-    # print(f"Valid : {y_valid}")
-    # print(f"Test : {y_test}")
+    percentage_labeled = int((1 - percent_of_censored_data) * 100)
 
-    sslPCT = SslPCT()
+    sslPCT = SslPCT(
+        min_leaf_size=1,
+        n_trees=100,
+        max_death=5,
+        pruning_method="M5MultiTarget",
+        percentage_labeled=percentage_labeled,
+        is_multi_target=True,
+    )
 
     sslPCT.fit(X_train, y_train)
 
-    y_true_rul = test_dataset.to_rul()  # exact, vient directement de true_rul
+    y_true_rul = test_dataset.to_rul()
 
     y_hat = sslPCT.predict(test_dataset.X)
     y_pred_rul = PyclusDataset.survival_targets_to_rul(

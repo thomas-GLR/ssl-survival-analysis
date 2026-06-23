@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from numpy import ndarray
 
 import constants.c_mapss_columns as cmapss_col
@@ -34,6 +35,7 @@ class ScikitDataset:
             sub_dataset: str,
             max_rul: int,
             seed: int | None,
+            summarize_features: bool,
             norm_type="z-score",
             cluster_operations=True,
             norm_by_operations=True,
@@ -64,7 +66,7 @@ class ScikitDataset:
         )
 
         return ScikitDataset._transform_datasets_to_scikit(
-            train_cmapss, test_cmapss, valid_cmapss, cmapss_col.ID, cmapss_col.TIME
+            train_cmapss, test_cmapss, valid_cmapss, cmapss_col.ID, cmapss_col.TIME, summarize_features
         )
 
     # ============================================================================
@@ -78,6 +80,7 @@ class ScikitDataset:
             valid_dataset,
             id_col: str,
             time_col: str,
+            summarize_features: bool,
             feature_cols=None
     ):
         """
@@ -88,17 +91,31 @@ class ScikitDataset:
         :param valid_dataset: Dataset with a 'df' column
         :return: Tuple of (train_pyclus, test_pyclus, valid_pyclus)
         """
-        ScikitDataset._create_time_to_event_and_event_column(train_dataset, time_col)
-        ScikitDataset._create_time_to_event_and_event_column(test_dataset, time_col)
+        if summarize_features:
+            # Aggregate the data by unit (id) with summarized features
+            ScikitDataset._group_by_id_with_summary_features(
+                train_dataset, id_col, time_col, is_test_dataset=False, feature_cols=feature_cols
+            )
+            ScikitDataset._group_by_id_with_summary_features(
+                test_dataset, id_col, time_col, is_test_dataset=True, feature_cols=feature_cols
+            )
 
-        if valid_dataset is not None:
-            ScikitDataset._create_time_to_event_and_event_column(valid_dataset, time_col)
+            if valid_dataset is not None:
+                ScikitDataset._group_by_id_with_summary_features(
+                    valid_dataset, id_col, time_col, is_test_dataset=False, feature_cols=feature_cols
+                )
+        else:
+            ScikitDataset._create_time_to_event_and_event_column(train_dataset, time_col)
+            ScikitDataset._create_time_to_event_and_event_column(test_dataset, time_col)
 
-        ScikitDataset._keep_last_time_to_event_by_id(train_dataset, id_col)
-        ScikitDataset._keep_last_time_to_event_by_id(test_dataset, id_col)
+            if valid_dataset is not None:
+                ScikitDataset._create_time_to_event_and_event_column(valid_dataset, time_col)
 
-        if valid_dataset is not None:
-            ScikitDataset._keep_last_time_to_event_by_id(valid_dataset, id_col)
+            ScikitDataset._keep_last_time_to_event_by_id(train_dataset, id_col)
+            ScikitDataset._keep_last_time_to_event_by_id(test_dataset, id_col)
+
+            if valid_dataset is not None:
+                ScikitDataset._keep_last_time_to_event_by_id(valid_dataset, id_col)
 
         train_X, train_Y, train_ids, train_feature_cols = ScikitDataset._to_scikit_format(train_dataset, time_col,
                                                                                           feature_cols)
@@ -146,6 +163,87 @@ class ScikitDataset:
         df = dataset.df
         idx_max_time_to_event = df.groupby(id_col)[ScikitDataset.TIME_TO_EVENT_COLUMN].idxmax()
         dataset.df = df.loc[idx_max_time_to_event].reset_index(drop=True)
+
+    @staticmethod
+    def _group_by_id_with_summary_features(
+            dataset,
+            id_col: str,
+            time_col: str,
+            is_test_dataset: bool = False,
+            feature_cols=None
+    ) -> None:
+        """
+        Aggregate data by unit (id) by computing summarized features
+        (mean, last, slope, max for each column).
+        Modifies dataset.df directly.
+
+        :param dataset: Dataset with attributes 'df' and 'feature_cols'
+        :param is_test_dataset: Boolean to mark test data
+        :param feature_cols: List of columns to summarize (optional)
+        """
+        if feature_cols is None:
+            feature_cols = dataset.feature_cols
+
+        df = dataset.df
+        summary_features_by_id_df = df.groupby(id_col).apply(
+            lambda grp: ScikitDataset._compute_summary_features_per_id(
+                grp, feature_cols, time_col, is_test_dataset
+            ),
+            include_groups=False
+        )
+        dataset.df = summary_features_by_id_df
+
+
+    @staticmethod
+    def _compute_summary_features_per_id(
+            group: pd.DataFrame,
+            feature_cols: list,
+            time_col: str,
+            is_test_dataset: bool = False
+    ) -> pd.Series:
+        """
+        Compute summarized features (mean, last, slope, max) for a unit.
+
+        :param group: DataFrame grouped by id
+        :param feature_cols: Columns to summarize
+        :param is_test_dataset: Boolean to mark test data
+        :return: pd.Series with the aggregated features
+        """
+        group = group.sort_values(time_col)
+        row = {}
+
+        for col in feature_cols:
+            vals = group[col].dropna()
+            times = group.loc[group[col].notna(), time_col]
+
+            if len(vals) == 0:
+                row[f"{col}_mean"] = np.nan
+                row[f"{col}_last"] = np.nan
+                row[f"{col}_slope"] = np.nan
+                row[f"{col}_max"] = np.nan
+            else:
+                row[f"{col}_mean"] = vals.mean()
+                row[f"{col}_last"] = vals.iloc[-1]
+                row[f"{col}_max"] = vals.max()
+
+                # Slope in linear regression if >= 2 values
+                if len(vals) >= 2:
+                    slope = np.polyfit(times, vals, 1)[0]
+                else:
+                    slope = 0.0
+                row[f"{col}_slope"] = slope
+
+        last_idx = group[time_col].idxmax()
+        last_real_rul = group.loc[last_idx, 'real_rul']
+        #
+        # row[ScikitDataset.TIME_TO_EVENT_COLUMN] = group['rul'].max()
+        # row[ScikitDataset.EVENT_COLUMN] = 1 if (is_test_dataset or last_real_rul <= 0) else 0
+
+        row[ScikitDataset.TIME_TO_EVENT_COLUMN] = group[time_col].max()
+        row[ScikitDataset.EVENT_COLUMN] = 1 if (is_test_dataset or last_real_rul <= 0) else 0
+
+        return pd.Series(row)
+
 
     @staticmethod
     def _to_scikit_format(
