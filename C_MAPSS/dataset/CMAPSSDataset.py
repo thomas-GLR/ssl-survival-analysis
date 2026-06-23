@@ -350,7 +350,7 @@ class CMAPSSDataset(Dataset):
         else:
             self.kmeans_model = kmeans_model
 
-        op_types = self.kmeans_model = kmeans_model.predict(features)
+        op_types = self.kmeans_model.predict(features)
         df.insert(2, 'op_type', op_types)
 
         self.df = df

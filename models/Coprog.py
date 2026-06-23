@@ -1,4 +1,5 @@
 import copy
+from tabnanny import verbose
 
 import torch
 import torch.nn as nn
@@ -111,7 +112,7 @@ class Coprog:
             # Line 4 – Create pool U' of u suspension units
             if len(remaining_suspension_ids) == 0:
                 if self.verbose > 0:
-                    print("No more remaining suspension, stopping the iterations...")
+                    print("\tNo more remaining suspension, stopping the iterations...")
                 break
             pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
             shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
@@ -129,9 +130,9 @@ class Coprog:
                 best_label: torch.Tensor | None = None
 
                 if self.verbose > 0:
-                    print("Iterating over the suspension pool...")
+                    print("\tIterating over the suspension pool...")
 
-                for unit_id in pool_ids:
+                for unit_id in tqdm(iterable=pool_ids, disable=self.verbose != 1, desc="\tSuspension pool iterator"):
                     # Extract all sequences for this specific unit
                     mask = (suspension_ids == unit_id)
                     xu = suspension_data[mask]  # Shape: (N_u, *dims)
@@ -140,14 +141,14 @@ class Coprog:
                     lu_p = self._predict(hj, xu)  # L^P_u
 
                     if self.verbose > 1:
-                        print(f"The prediction for the current xu is lu_p with the shape : {lu_p.size()}")
+                        print(f"\tThe prediction for the current xu is lu_p with the shape : {lu_p.size()}")
 
                     # Line 8 – train a temporary model h'j
                     model_j = copy.deepcopy(self.first_model if j == 0 else self.second_model)
                     x_aug = torch.cat([xj, xu], dim=0)
 
                     if self.verbose > 1:
-                        print(f"Concatenate yj with lu_p with the respective shape of {yj.size()} {lu_p.size()}")
+                        print(f"\tConcatenate yj with lu_p with the respective shape of {yj.size()} {lu_p.size()}")
                     lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
                     y_aug = torch.cat([yj, lu_p_reshaped], dim=0)
 
@@ -177,13 +178,13 @@ class Coprog:
             # Line 18 – if π1 == ∅ && π2 == ∅  exit
             if pi[0] is None and pi[1] is None:
                 if self.verbose > 0:
-                    print("No beneficial samples found by either model, stopping the iterations...")
+                    print("\tNo beneficial samples found by either model, stopping the iterations...")
                 break
 
             # Line 19 – L1 = L1 ∪ π2;  L2 = L2 ∪ π1   (cross-labelling)
             if pi[1] is not None:
                 if self.verbose > 0:
-                    print(f"Model h2 found a beneficial unit ({pi[1][0].item()}), adding it to h1 training set...")
+                    print(f"\tModel h2 found a beneficial unit ({pi[1][0].item()}), adding it to h1 training set...")
                 _, xu2, lu2 = pi[1]
 
                 lu2_reshaped = lu2.view(-1, y1.shape[1]) if y1.dim() > 1 else lu2.view(-1)
@@ -193,7 +194,7 @@ class Coprog:
 
             if pi[0] is not None:
                 if self.verbose > 0:
-                    print(f"Model h1 found a beneficial unit ({pi[0][0].item()}), adding it to h2 training set...")
+                    print(f"\tModel h1 found a beneficial unit ({pi[0][0].item()}), adding it to h2 training set...")
                 _, xu1, lu1 = pi[0]
 
                 lu1_reshaped = lu1.view(-1, y2.shape[1]) if y2.dim() > 1 else lu1.view(-1)
@@ -210,7 +211,7 @@ class Coprog:
                 remaining_suspension_ids = remaining_suspension_ids[remaining_suspension_ids != s_id]
 
             if self.verbose > 0:
-                print("Training first and second model with new dataset augmented by unlabeled data...")
+                print("\tTraining first and second model with new dataset augmented by unlabeled data...")
 
             # Line 20 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
             h1 = self._train_fun(copy.deepcopy(self.first_model), x1, y1, "h1")
@@ -262,13 +263,13 @@ class Coprog:
         dataset = TensorDataset(x, y)
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=self.shuffle_dataloader)
 
-        if self.verbose > 0:
-            print(f"Training the model {model_name} for {self.epochs} epochs...")
+        if self.verbose > 1:
+            print(f"\tTraining the model {model_name} for {self.epochs} epochs...")
 
         best_loss = 1_000_000
         avg_epochs_loss = 0.
 
-        for epoch in tqdm(iterable=range(self.epochs), disable=self.verbose == 0):
+        for epoch in tqdm(iterable=range(self.epochs), disable=self.verbose < 2, desc="Epochs iterator"):
             avg_loss = 0.
 
             for x_batch, y_batch in loader:
@@ -279,16 +280,16 @@ class Coprog:
 
                 avg_loss += loss.item()
 
-            if self.verbose > 1:
-                print(f"Epoch {epoch + 1}/{self.epochs} - Loss : {avg_loss / len(loader)}")
+            if self.verbose > 2:
+                print(f"\tEpoch {epoch + 1}/{self.epochs} - Loss : {avg_loss / len(loader)}")
 
             if avg_loss < best_loss:
                 best_loss = (avg_loss / len(loader))
 
             avg_epochs_loss += (avg_loss / len(loader))
 
-        if self.verbose > 0:
-            print(f"Best loss for model {model_name} : {best_loss / len(loader)} - Average loss for model {model_name} : {avg_epochs_loss / self.epochs}")
+        if self.verbose > 1:
+            print(f"\tBest loss for model {model_name} : {best_loss / len(loader)} - Average loss for model {model_name} : {avg_epochs_loss / self.epochs}")
 
         return model
 
