@@ -1,0 +1,174 @@
+import numpy as np
+from numpy import ndarray
+
+import constants.c_mapss_columns as cmapss_col
+from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
+
+
+class ScikitDataset:
+    TIME_TO_EVENT_COLUMN = 'time_to_event'
+    EVENT_COLUMN = 'event'
+
+    def __init__(self, X: ndarray, Y: ndarray, ids: ndarray, feature_names: list[str], rul: ndarray | None=None):
+        """
+
+        :param X: features
+        :param Y: targets
+        :param ids: list of ids for each unit
+        :param feature_names: the name of the features
+        :param rul: rul for the test dataset
+        """
+        self.X = X
+        self.Y = Y
+        self.ids = ids
+        self.feature_names_pyclus = feature_names
+        self.rul = rul
+
+    # ============================================================================
+    # FACTORY METHODS
+    # ============================================================================
+
+    @staticmethod
+    def from_cmapss(
+            dataset_root: str,
+            sub_dataset: str,
+            max_rul: int,
+            seed: int | None,
+            norm_type="z-score",
+            cluster_operations=True,
+            norm_by_operations=True,
+            use_max_rul_on_test=False,
+            use_max_rul_on_valid=True,
+            percent_of_censored_data: float = 0.,
+            percent_of_broken_data: float | None = None
+    ):
+        train_cmapss, test_cmapss, valid_cmapss = CMAPSSLoader.get_datasets(
+            dataset_root=dataset_root,
+            sub_dataset=sub_dataset,
+            sequence_len=1,
+            seed=seed,
+            max_rul=max_rul,
+            return_sequence_label=True,
+            norm_type=norm_type,
+            cluster_operations=cluster_operations,
+            norm_by_operations=norm_by_operations,
+            include_cols=None,
+            exclude_cols=None,
+            return_id=True,
+            validation_rate=0.,
+            use_only_final_on_test=False,
+            use_max_rul_on_test=use_max_rul_on_test,
+            use_max_rul_on_valid=use_max_rul_on_valid,
+            percent_of_censored_data=percent_of_censored_data,
+            percent_of_broken_data=percent_of_broken_data
+        )
+
+        return ScikitDataset._transform_datasets_to_scikit(
+            train_cmapss, test_cmapss, valid_cmapss, cmapss_col.ID, cmapss_col.TIME
+        )
+
+    # ============================================================================
+    # GENERIC METHOD TO TRANSFORM DATASET FOR PYCLUS
+    # ============================================================================
+
+    @staticmethod
+    def _transform_datasets_to_scikit(
+            train_dataset,
+            test_dataset,
+            valid_dataset,
+            id_col: str,
+            time_col: str,
+            feature_cols=None
+    ):
+        """
+        Transform 3 datasets (train, test, valid) into the pyclus format.
+
+        :param train_dataset: Dataset with a 'df' column
+        :param test_dataset: Dataset with a 'df' column
+        :param valid_dataset: Dataset with a 'df' column
+        :return: Tuple of (train_pyclus, test_pyclus, valid_pyclus)
+        """
+        ScikitDataset._create_time_to_event_and_event_column(train_dataset, time_col)
+        ScikitDataset._create_time_to_event_and_event_column(test_dataset, time_col)
+
+        if valid_dataset is not None:
+            ScikitDataset._create_time_to_event_and_event_column(valid_dataset, time_col)
+
+        ScikitDataset._keep_last_time_to_event_by_id(train_dataset, id_col)
+        ScikitDataset._keep_last_time_to_event_by_id(test_dataset, id_col)
+
+        if valid_dataset is not None:
+            ScikitDataset._keep_last_time_to_event_by_id(valid_dataset, id_col)
+
+        train_X, train_Y, train_ids, train_feature_cols = ScikitDataset._to_scikit_format(train_dataset, time_col,
+                                                                                          feature_cols)
+        test_X, test_Y, test_ids, test_feature_cols = ScikitDataset._to_scikit_format(test_dataset, time_col,
+                                                                                      feature_cols)
+
+        val_scikit_dataset = None
+
+        if valid_dataset is not None:
+            valid_X, valid_Y, valid_ids, valid_feature_cols = ScikitDataset._to_scikit_format(test_dataset, time_col,
+                                                                                              feature_cols)
+
+            val_scikit_dataset = ScikitDataset(valid_X, valid_Y, valid_ids, valid_feature_cols)
+
+        # Create the ScikitDataset instances
+        return (
+            ScikitDataset(train_X, train_Y, train_ids, train_feature_cols), # Train
+            ScikitDataset(test_X, test_Y, test_ids, test_feature_cols, test_dataset.final_rul), # Test
+            val_scikit_dataset # Valid
+        )
+
+    @staticmethod
+    def _create_time_to_event_and_event_column(dataset, time_col: str):
+        df = dataset.df
+
+        df[ScikitDataset.TIME_TO_EVENT_COLUMN] = df[time_col]
+        # If censored then the event didn't occur so 0 otherwise 1
+        df[ScikitDataset.EVENT_COLUMN] = df['is_censored'].apply(lambda x: 0 if x == 1 else 1)
+
+        dataset.df = df
+
+
+    @staticmethod
+    def _keep_last_time_to_event_by_id(
+            dataset,
+            id_col: str,
+    ):
+        """
+        For each unit (id), keep only the row with the last time_to_event RUL value.
+        Modifies dataset.df directly.
+
+        :param dataset: Dataset with attribute 'df'
+        :param id_col: Name of the id column
+        """
+        df = dataset.df
+        idx_max_time_to_event = df.groupby(id_col)[ScikitDataset.TIME_TO_EVENT_COLUMN].idxmax()
+        dataset.df = df.loc[idx_max_time_to_event].reset_index(drop=True)
+
+    @staticmethod
+    def _to_scikit_format(
+            dataset,
+            time_col: str,
+            feature_cols: list[str] | None = None,
+    ) -> tuple[ndarray, ndarray, ndarray, list[str]]:
+        df = dataset.df
+
+        if feature_cols is None:
+            exclude = {time_col, ScikitDataset.TIME_TO_EVENT_COLUMN, ScikitDataset.EVENT_COLUMN}
+            feature_cols = [c for c in df.columns if c not in exclude]
+
+        X = df[feature_cols].to_numpy(dtype=object)
+
+        Y = df[[ScikitDataset.EVENT_COLUMN, ScikitDataset.TIME_TO_EVENT_COLUMN]].to_numpy(dtype=object)
+
+        Y = np.array(
+            [(bool(status), time) for status, time in Y],
+            dtype=[('Status', '?'), ('Time', '<f8')]
+        )
+
+        # Ids and feature names
+        ids = df.index.to_numpy()
+
+        return X, Y, ids, feature_cols
