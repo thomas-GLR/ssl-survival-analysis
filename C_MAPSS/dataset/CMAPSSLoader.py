@@ -11,8 +11,9 @@ class CMAPSSLoader:
     @staticmethod
     def get_datasets(
             dataset_root,
-            sub_dataset='FD001',
-            sequence_len=1,
+            sub_dataset: str,
+            sequence_len: int,
+            seed: int | None,
             max_rul=None,
             return_sequence_label=False,
             norm_type=None,
@@ -26,7 +27,7 @@ class CMAPSSLoader:
             use_max_rul_on_test=False,
             use_max_rul_on_valid=True,
             percent_of_censored_data: float = 0.0,
-            percent_of_broken_data: float | None = None
+            percent_of_broken_data: float | None = None,
     ) -> tuple[CMAPSSDataset, CMAPSSDataset, CMAPSSDataset]:
         """
             Get train, valid, test dataset from dataset file.
@@ -69,7 +70,12 @@ class CMAPSSLoader:
         :param percent_of_broken_data:
             This is the percent of damage until the data is censored. Default is 0.0
 
+        :param seed:
+            Set the seed to reproduce results
         """
+        if seed is not None:
+            np.random.seed(seed)
+
         if sub_dataset == 'PHM08':
             train_df = pd.read_csv(os.path.join(dataset_root, 'train.txt'), sep=' ', header=None)
             test_df = pd.read_csv(os.path.join(dataset_root, 'test.txt'.format(sub_dataset)), sep=' ', header=None)
@@ -114,7 +120,8 @@ class CMAPSSLoader:
             'cluster_operations': cluster_operations,
             'norm_by_operations': norm_by_operations,
             'return_sequence_label': return_sequence_label,
-            'return_id': return_id
+            'return_id': return_id,
+            'seed': seed,
         }
 
         # Only the train and val dataset should have censored data

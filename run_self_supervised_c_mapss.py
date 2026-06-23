@@ -8,7 +8,7 @@ from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from dataset.SiamesedDataset import SiameseDataset
 from models.self_supervised import Baseline
 from models.self_supervised.Autoencoder import Autoencoder
-from utils.utils import score
+from utils.utils import cmapss_score
 
 C_MAPSS_DIR = "data/C_MAPSS"
 
@@ -69,6 +69,7 @@ def train_one_epoch_siamese_network_baseline(model: nn.Module, optimizer: torch.
 def train_or_get_autoencoder(
         sub_dataset: str,
         seq_len: int,
+        seed: int | None,
         max_rul: int,
         percent_of_broken_data: float | None,
         percent_of_censored_data: float,
@@ -88,6 +89,7 @@ def train_or_get_autoencoder(
         dataset_root=C_MAPSS_DIR,
         sub_dataset=sub_dataset,
         window_size=seq_len,
+        seed=seed,
         num_samples =25000,
         max_rul=max_rul,
         min_distance=1,
@@ -203,12 +205,14 @@ if __name__ == "__main__":
     norm_by_operations = True
     validation_rate = 0.2
     epochs = 100
+    seed = 42
 
     sub_dataset = "FD001"
 
     autoencoder = train_or_get_autoencoder(
         sub_dataset=sub_dataset,
         seq_len=seq_len,
+        seed=seed,
         max_rul=max_rul,
         percent_of_broken_data=percent_of_broken_data,
         percent_of_censored_data=percent_of_censored_data,
@@ -223,6 +227,7 @@ if __name__ == "__main__":
         dataset_root=C_MAPSS_DIR,
         sub_dataset=sub_dataset,
         sequence_len=seq_len,
+        seed=seed,
         max_rul=max_rul,
         percent_of_broken_data=percent_of_broken_data,
         percent_of_censored_data=percent_of_censored_data,
@@ -252,4 +257,4 @@ if __name__ == "__main__":
     y_true = torch.cat([y for y, _ in test_results])
     y_pred = torch.cat([y_hat for _, y_hat in test_results])
     print(f'Test RMSE for {sub_dataset}: {rmse}')
-    print(f'Score for {sub_dataset}: {score(y_pred.detach().numpy(), y_true.detach().numpy())}')
+    print(f'Score for {sub_dataset}: {cmapss_score(y_pred.detach().numpy(), y_true.detach().numpy())}')

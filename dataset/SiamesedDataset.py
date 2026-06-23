@@ -271,6 +271,7 @@ class SiameseDataset:
     def from_cmapss(
             cls,
             dataset_root: str,
+            seed: int | None,
             sub_dataset: str = "FD001",
             window_size: Optional[int] = None,
             max_rul: int = 125,
@@ -296,6 +297,7 @@ class SiameseDataset:
             Semi-Supervised Learning for Remaining Useful Lifetime
             Estimation Through Self-Supervision."
 
+        :param seed: Set the seed to reproduce restults
         :param dataset_root: root directory containing the raw CMAPSS txt files.
         :param sub_dataset: sub-dataset to pretrain on, 'FD001' to 'FD004'.
         :param window_size: window length; defaults to the paper's per-fd value.
@@ -362,6 +364,7 @@ class SiameseDataset:
             dataset_root=dataset_root,
             sub_dataset=sub_dataset,
             sequence_len=window_size,
+            seed=seed,
             max_rul=max_rul,
             return_sequence_label=False,
             norm_type=norm_type,

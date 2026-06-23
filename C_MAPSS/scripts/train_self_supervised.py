@@ -13,6 +13,7 @@ if __name__ == '__main__':
     cluster_operations = True
     norm_by_operations = True
     validation_rate = 0.2
+    seed = 42
 
     # Pretrain model parameters
     mode = "autoencoder"  # metric or autoencoder
@@ -24,6 +25,7 @@ if __name__ == '__main__':
         dataset_root=dataset_root,
         sub_dataset=sub_dataset,
         seq_len=seq_len,
+        seed=seed,
         max_rul=max_rul,
         percent_of_broken_data=percent_of_broken_data,
         percent_of_censored_data=percent_of_censored_data,

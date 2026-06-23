@@ -2,7 +2,7 @@ from dataset.PyclusDataset import PyclusDataset
 from models.SslPCT import SslPCT
 import numpy as np
 
-from utils.utils import score
+from utils.utils import cmapss_score
 
 C_MAPSS_DIR = "data/C_MAPSS"
 
@@ -15,17 +15,21 @@ if __name__ == "__main__":
     use_max_rul_on_valid = True
     percent_of_censored_data = 0.9
     percent_of_broken_data = None
+    seed = 42
 
     train_dataset, test_dataset, _ = PyclusDataset.from_cmapss(
         dataset_root=C_MAPSS_DIR,
         sub_dataset=sub_dataset,
         max_rul=max_rul,
+        seed=seed,
         validation_rate=validation_rate,
         use_max_rul_on_test=use_max_rul_on_test,
         use_max_rul_on_valid=use_max_rul_on_valid,
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
     )
+
+
 
     X_train, y_train = train_dataset.X, train_dataset.Y
     X_test, y_test = test_dataset.X, test_dataset.Y
@@ -48,4 +52,4 @@ if __name__ == "__main__":
     rmse = np.sqrt(np.mean((y_true_rul - y_pred_rul) ** 2))
 
     print(f"Test RMSE: {rmse}")
-    print(f"Score: {score(y_pred_rul, y_true_rul)}")
+    print(f"Score: {cmapss_score(y_pred_rul, y_true_rul)}")

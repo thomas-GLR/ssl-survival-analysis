@@ -5,7 +5,7 @@ from models import Coprog
 import os
 import torch
 
-from utils.utils import score
+from utils.utils import cmapss_score
 
 C_MAPSS_DIR = "data/C_MAPSS"
 
@@ -56,6 +56,7 @@ if __name__ == "__main__":
         dataset_root=C_MAPSS_DIR,
         sub_dataset="FD001",
         sequence_len=30,
+        seed=42,
         max_rul=125,
         percent_of_broken_data=None,
         percent_of_censored_data=0.9,
@@ -125,4 +126,4 @@ if __name__ == "__main__":
     rmse = torch.sqrt(torch.mean((targets_tensor - y_hat) ** 2))
 
     print(f"Test RMSE: {rmse}")
-    print(f"Score: {score(y_hat, targets_tensor)}")
+    print(f"Score: {cmapss_score(y_hat, targets_tensor)}")

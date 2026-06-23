@@ -1,5 +1,7 @@
-from dataset import PyclusDataset
+from dataset import PyclusDataset, ScikitDataset, SiamesedDataset
 
 __all__ = [
-    'PyclusDataset'
+    'PyclusDataset',
+    'ScikitDataset',
+    'SiamesedDataset',
 ]

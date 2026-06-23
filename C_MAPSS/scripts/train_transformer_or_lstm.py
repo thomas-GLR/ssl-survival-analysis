@@ -8,6 +8,7 @@ if __name__ == '__main__':
 
     dataset_root = C_MAPSS_DIR
     sub_dataset = "FD001"
+    seed = 42
     sequence_len = 30
     max_rul = 125
     return_sequence_label = False
@@ -45,6 +46,7 @@ if __name__ == '__main__':
         dataset_root = dataset_root,
         sub_dataset = sub_dataset,
         sequence_len = sequence_len,
+        seed=seed,
         max_rul = max_rul,
         return_sequence_label = return_sequence_label,
         norm_type = norm_type,

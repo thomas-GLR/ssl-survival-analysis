@@ -20,6 +20,7 @@ def train_self_supervised(
         cluster_operations: bool,
         norm_by_operations: bool,
         validation_rate: float,
+        seed: int | None,
 
         # Pretrain model parameters
         mode: str,  # metric or autoencoder
@@ -68,6 +69,7 @@ def train_self_supervised(
         dataset_root=dataset_root,
         sub_dataset=sub_dataset,
         seq_len=seq_len,
+        seed=seed,
         max_rul=max_rul,
         percent_of_broken_data=percent_of_broken_data,
         percent_of_censored_data=percent_of_censored_data,
@@ -110,6 +112,7 @@ def train_self_supervised(
         cluster_operations=cluster_operations,
         norm_by_operations=norm_by_operations,
         validation_rate=validation_rate,
+        seed=seed,
     )
 
     train_loader = train_dataset.get_data_loader_without_censored_data(batch_size_baseline, is_model_cnn=True)
@@ -198,6 +201,7 @@ def get_pair_loader_for_pretraining(
         dataset_root: str,
         sub_dataset: str,
         seq_len: int,
+        seed: int | None,
         max_rul: int,
         percent_of_broken_data: float | None,
         percent_of_censored_data: float,
@@ -210,6 +214,7 @@ def get_pair_loader_for_pretraining(
         dataset_root=dataset_root,
         sub_dataset=sub_dataset,
         window_size=seq_len,
+        seed=seed,
         num_samples=25000,
         max_rul=max_rul,
         min_distance=1,

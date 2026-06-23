@@ -37,7 +37,9 @@ class CMAPSSDataset(Dataset):
             return_id=False,
             kmeans_model=None,
             percent_of_censored_data: float=0.0,
-            percent_of_broken_data: float | None=None):
+            percent_of_broken_data: float | None=None,
+            seed: int | None=None,
+    ):
         """
 
             C-MAPSS Dataset, create pytorch Dataset by pd.Dataframe use original txt file,
@@ -110,6 +112,9 @@ class CMAPSSDataset(Dataset):
             This is the percent of damage until the data is censored.
             Default is None which means the broken percent is random
 
+        :param seed:
+            Set the seed to reproduce results
+
         :param return_id:
             return unit id, default is False
 
@@ -117,6 +122,9 @@ class CMAPSSDataset(Dataset):
         super().__init__()
         assert isinstance(data_df, pd.DataFrame), 'data_df need pd.DataFrame'
         assert len(data_df.columns) >= 26, 'Invalid Dataframe input (columns < 26)'
+
+        if seed is not None:
+            np.random.seed(seed)
 
         self.has_cluster_operations = False
         self.has_normalization = False

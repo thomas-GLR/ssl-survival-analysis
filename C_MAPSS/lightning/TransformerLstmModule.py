@@ -57,7 +57,7 @@ class TransformerLstmModule(pl.LightningModule):
 
         np_outputs, np_targets = outputs.cpu().numpy(), targets.cpu().numpy()
 
-        score = utils.score(np_outputs, np_targets)
+        score = utils.cmapss_score(np_outputs, np_targets)
 
         self.test_step_outputs.clear()
         self.test_step_targets.clear()

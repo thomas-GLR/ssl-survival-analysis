@@ -22,6 +22,7 @@ def train_model(
         model_version: str,
         # Dataset params
         dataset_root: str,
+        seed: int | None,
         sub_dataset: str='FD001',
         sequence_len: int=30,
         max_rul: int=125,
@@ -86,7 +87,24 @@ def train_model(
     print(dataset_kwargs)
 
     train_dataset, test_dataset, valid_dataset = CMAPSSLoader.get_datasets(
-        **dataset_kwargs
+        dataset_root=dataset_root,
+        sub_dataset=sub_dataset,
+        sequence_len=sequence_len,
+        seed=seed,
+        max_rul=max_rul,
+        return_sequence_label=return_sequence_label,
+        norm_type=norm_type,
+        cluster_operations=cluster_operations,
+        norm_by_operations=norm_by_operations,
+        include_cols=include_cols,
+        exclude_cols=exclude_cols,
+        return_id=return_id,
+        validation_rate=validation_rate,
+        use_only_final_on_test=use_only_final_on_test,
+        use_max_rul_on_test=use_max_rul_on_test,
+        use_max_rul_on_valid=use_max_rul_on_valid,
+        percent_of_broken_data=percent_of_broken_data,
+        percent_of_censored_data=percent_of_censored_data,
     )
 
     feature_num = len(train_dataset.feature_cols)

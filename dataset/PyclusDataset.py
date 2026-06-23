@@ -29,6 +29,7 @@ class PyclusDataset:
     @staticmethod
     def from_cmapss(
             dataset_root: str,
+            seed: int | None,
             sub_dataset: str = 'FD001',
             max_rul=None,
             validation_rate=0.2,
@@ -41,6 +42,7 @@ class PyclusDataset:
             dataset_root=dataset_root,
             sub_dataset=sub_dataset,
             sequence_len=1,
+            seed=seed,
             max_rul=max_rul,
             return_sequence_label=True,
             norm_type=None,
