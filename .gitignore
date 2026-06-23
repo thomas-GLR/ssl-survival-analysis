@@ -1,5 +1,4 @@
 /data/
 /.idea
-/pyclus/
-/C_MAPSS/scripts/checkpoints/
-/C_MAPSS/scripts/lightning_logs/
+/C_MAPSS/checkpoints/
+/C_MAPSS/results/
