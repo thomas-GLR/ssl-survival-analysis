@@ -1,10 +1,9 @@
 import torch
 
 from C_MAPSS.lightning.UnsupervisedPretrainingModule import UnsupervisedPretrainingModule
-from C_MAPSS.lightning.mixins import DataHparamsMixin
 
 
-class MetricPretrainingModule(UnsupervisedPretrainingModule, DataHparamsMixin):
+class MetricPretrainingModule(UnsupervisedPretrainingModule):
     def __init__(
         self,
         in_channels,
@@ -40,7 +39,7 @@ class MetricPretrainingModule(UnsupervisedPretrainingModule, DataHparamsMixin):
         return pred_distances
 
     def _get_losses(self, batch):
-        anchors, queries, true_distances, domain_labels = batch
+        anchors, queries, true_distances = batch
         anchor_embeddings, query_embeddings = self._get_anchor_query_embeddings(
             anchors, queries
         )

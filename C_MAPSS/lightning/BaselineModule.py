@@ -9,24 +9,40 @@ from models.self_supervised.base.Encoder import Encoder
 
 class BaselineModule(pl.LightningModule, LoadEncoderMixin, DataHparamsMixin):
     def __init__(
-        self,
-        encoder: Encoder,
-        in_channels: int,
-        seq_len: int,
-        latent_dim: int,
-        lr: float,
+            self,
+            in_channels: int,
+            seq_len: int,
+            latent_dim: int,
+            base_filters: int,
+            kernel_size: int,
+            num_layers: int,
+            dropout: float,
+            lr: float,
     ):
         super().__init__()
 
         self.in_channels = in_channels
         self.seq_len = seq_len
         self.latent_dim = latent_dim
+        self.base_filters = base_filters
+        self.kernel_size = kernel_size
+        self.num_layers = num_layers
+        self.dropout = dropout
+
         self.lr = lr
 
-        self.encoder = encoder
-        self.regressor = BaselineRegressor(latent_dim)
+        self.encoder = Encoder(
+            in_channels=self.in_channels,
+            base_filters=self.base_filters,
+            kernel_size=self.kernel_size,
+            num_layers=self.num_layers,
+            latent_dim=self.latent_dim,
+            seq_len=self.seq_len,
+            dropout=self.dropout,
+            norm_outputs=False,
+        )
 
-        self.criterion_regression = metrics.RMSELoss()
+        self.regressor = BaselineRegressor(latent_dim)
 
         self.regression_metrics = metrics.RMSELoss()
 
@@ -54,7 +70,7 @@ class BaselineModule(pl.LightningModule, LoadEncoderMixin, DataHparamsMixin):
     def training_step(self, batch, batch_idx):
         source, source_labels = batch
         predictions = self(source)
-        loss = self.criterion_regression(predictions, source_labels)
+        loss = self.regression_metrics(predictions, source_labels)
 
         self.log("train/regression_loss", loss)
 

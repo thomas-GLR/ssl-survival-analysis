@@ -63,10 +63,13 @@ used; the paper's default ('linear') only relies on cycle-index
 differences and is unaffected.
 """
 
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Any
 
 import numpy as np
 import torch
+from numpy import dtype, ndarray, signedinteger
+from numpy._typing import _64Bit
+from torch import Tensor
 from torch.utils.data import DataLoader, IterableDataset, TensorDataset
 
 from C_MAPSS.dataset.CMAPSSDataset import CMAPSSDataset
@@ -88,7 +91,6 @@ class SiamesePairDataset(IterableDataset):
             self,
             run_features: List[torch.Tensor],
             run_targets: List[torch.Tensor],
-            run_domains: np.ndarray,
             max_rul: float,
             num_samples: int,
             min_distance: int,
@@ -100,8 +102,6 @@ class SiamesePairDataset(IterableDataset):
             (n_windows_in_run, n_features, window_size) (channel-first).
         :param run_targets: one tensor per engine run, each of shape
             (n_windows_in_run,), the RUL label of every window.
-        :param run_domains: array of shape (n_runs,), domain label of
-            every run (0 = "broken"/censored domain, 1 = "fail" domain).
         :param max_rul: RUL clipping value, used to normalize the
             anchor/query distance to [0, 1].
         :param num_samples: number of pairs sampled per epoch.
@@ -118,9 +118,6 @@ class SiamesePairDataset(IterableDataset):
         long_enough = [len(features) > min_distance for features in run_features]
         self._features = [f for f, keep in zip(run_features, long_enough) if keep]
         self._labels = [t for t, keep in zip(run_targets, long_enough) if keep]
-        self._run_domain_idx = np.asarray(
-            [d for d, keep in zip(run_domains, long_enough) if keep]
-        )
 
         if len(self._features) == 0:
             raise ValueError(
@@ -161,7 +158,7 @@ class SiamesePairDataset(IterableDataset):
 
         return self
 
-    def __next__(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __next__(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self._current_iteration < self.num_samples:
             self._current_iteration += 1
             pair_idx = self._get_pair_func()
@@ -169,9 +166,8 @@ class SiamesePairDataset(IterableDataset):
         else:
             raise StopIteration
 
-    def _get_pair_idx(self) -> Tuple[torch.Tensor, int, int, int, int]:
+    def _get_pair_idx(self) -> tuple[Tensor, signedinteger[_64Bit], ndarray, ndarray]:
         chosen_run_idx = self._rng.integers(0, len(self._features))
-        domain_label = self._run_domain_idx[chosen_run_idx]
         chosen_run = self._features[chosen_run_idx]
 
         run_length = chosen_run.shape[0]
@@ -180,11 +176,10 @@ class SiamesePairDataset(IterableDataset):
         query_idx = self._rng.integers(low=anchor_idx + self.min_distance, high=end_idx)
         distance = query_idx - anchor_idx
 
-        return chosen_run, anchor_idx, query_idx, distance, domain_label
+        return chosen_run, anchor_idx, query_idx, distance
 
-    def _get_pair_idx_piecewise(self) -> Tuple[torch.Tensor, int, int, int, int]:
+    def _get_pair_idx_piecewise(self) -> Tuple[Tensor, signedinteger[_64Bit], ndarray, ndarray]:
         chosen_run_idx = self._rng.integers(0, len(self._features))
-        domain_label = self._run_domain_idx[chosen_run_idx]
         chosen_run = self._features[chosen_run_idx]
 
         run_length = chosen_run.shape[0]
@@ -196,11 +191,10 @@ class SiamesePairDataset(IterableDataset):
         query_idx = self._rng.integers(low=anchor_idx + self.min_distance, high=end_idx)
         distance = query_idx - anchor_idx if anchor_idx > middle_idx else 0
 
-        return chosen_run, anchor_idx, query_idx, distance, domain_label
+        return chosen_run, anchor_idx, query_idx, distance
 
-    def _get_labeled_pair_idx(self) -> Tuple[torch.Tensor, int, int, int, int]:
+    def _get_labeled_pair_idx(self) -> Tuple[torch.Tensor, int, int, int]:
         chosen_run_idx = self._rng.integers(0, len(self._features))
-        domain_label = self._run_domain_idx[chosen_run_idx]
         chosen_run = self._features[chosen_run_idx]
         chosen_labels = self._labels[chosen_run_idx]
 
@@ -210,7 +204,7 @@ class SiamesePairDataset(IterableDataset):
         # RUL label difference is the negative of the time-step difference.
         distance = chosen_labels[anchor_idx] - chosen_labels[query_idx]
 
-        return chosen_run, anchor_idx, query_idx, distance, domain_label
+        return chosen_run, anchor_idx, query_idx, distance
 
     def _build_pair(
             self,
@@ -218,15 +212,13 @@ class SiamesePairDataset(IterableDataset):
             anchor_idx: int,
             query_idx: int,
             distance: Union[int, float, torch.Tensor],
-            domain_label: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         anchor = run[anchor_idx]
         query = run[query_idx]
-        domain_label = torch.tensor(domain_label, dtype=torch.float)
         distance = torch.as_tensor(distance, dtype=torch.float) / self._max_rul
         distance = torch.clamp_max(distance, max=1)  # max distance is max_rul
 
-        return anchor, query, distance, domain_label
+        return anchor, query, distance
 
 
 class SiameseDataset:
@@ -277,10 +269,14 @@ class SiameseDataset:
             max_rul: int = 125,
             min_distance: int = 1,
             feature_select: Optional[List[str]] = None,
+            exclude_cols: Optional[List[str]] = None,
             norm_type: str = "-1-1",
             cluster_operations: bool = False,
             norm_by_operations: bool = False,
             validation_rate: float = 0.2,
+            use_only_final_on_test=True,
+            use_max_rul_on_test=False,
+            use_max_rul_on_valid=True,
             percent_of_censored_data: float = 0.5,
             percent_of_broken_data: Optional[float] = None,
             distance_mode: str = "linear",
@@ -288,7 +284,7 @@ class SiameseDataset:
             num_val_samples: int = 25000,
             batch_size: int = 64,
             num_workers: int = 0,
-    ) -> Tuple[DataLoader, DataLoader, DataLoader, CMAPSSDataset]:
+    ) -> Tuple[DataLoader, DataLoader]:
         """
         Build the data loaders needed to pretrain a siamese network with
         the self-supervised pairwise-distance pretext task from:
@@ -354,7 +350,7 @@ class SiameseDataset:
 
         window_size = window_size or cls.WINDOW_SIZES[sub_dataset]
         # feature_select = list(feature_select) if feature_select is not None else cls.default_feature_cols()
-        feature_select = list(feature_select) if feature_select else None
+        feature_select = list(feature_select) if feature_select else []
 
         # --- Step 1: run the project's own preprocessing pipeline ---------------
         # This applies normalization, max_rul clipping, optional operating-
@@ -371,19 +367,24 @@ class SiameseDataset:
             cluster_operations=cluster_operations,
             norm_by_operations=norm_by_operations,
             include_cols=feature_select,
+            exclude_cols=exclude_cols,
+            return_id=False,
             validation_rate=validation_rate,
+            use_only_final_on_test=use_only_final_on_test,
+            use_max_rul_on_test=use_max_rul_on_test,
+            use_max_rul_on_valid=use_max_rul_on_valid,
             percent_of_censored_data=percent_of_censored_data,
             percent_of_broken_data=percent_of_broken_data,
         )
 
         # --- Step 2: regroup windows by run and recover the domain label --------
         # from the 'is_censored' flag CMAPSSDataset attached to every row.
-        train_features, train_targets, train_domains = cls._group_windows_by_run_with_domain(train_dataset)
-        val_features, val_targets, val_domains = cls._group_windows_by_run_with_domain(valid_dataset)
+        train_features, train_targets = cls._group_windows_by_run(train_dataset)
+        val_features, val_targets = cls._group_windows_by_run(valid_dataset)
 
         # --- Step 3: paired (siamese) datasets -----------------------------------
         train_pairs = SiamesePairDataset(
-            train_features, train_targets, train_domains,
+            train_features, train_targets,
             max_rul=max_rul,
             num_samples=num_samples,
             min_distance=min_distance,
@@ -391,7 +392,7 @@ class SiameseDataset:
             mode=distance_mode,
         )
         val_pairs = SiamesePairDataset(
-            val_features, val_targets, val_domains,
+            val_features, val_targets,
             max_rul=max_rul,
             num_samples=num_val_samples,
             min_distance=1,
@@ -406,21 +407,16 @@ class SiameseDataset:
             val_pairs, batch_size=batch_size, pin_memory=True, num_workers=num_workers
         )
 
-        # --- Step 4: plain supervised val loader on the "broken" domain ---------
-        # Used in the paper to track downstream RUL performance while
-        # pretraining the siamese network.
-        source_val_loader = cls._build_source_val_loader(valid_dataset, batch_size, num_workers)
-
-        return train_pair_loader, val_pair_loader, source_val_loader, test_dataset
+        return train_pair_loader, val_pair_loader
 
     # ============================================================================
     # INTERNAL HELPERS
     # ============================================================================
 
     @staticmethod
-    def _group_windows_by_run_with_domain(
+    def _group_windows_by_run(
             dataset: CMAPSSDataset,
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], np.ndarray]:
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
         Re-group the flat array of windows produced by
         `CMAPSSDataset._gen_sequence()` back into one array per engine run,
@@ -439,7 +435,7 @@ class SiameseDataset:
             run_features[i] is a tensor of shape (n_windows_in_run,
             n_features, window_size) (channel-first, as expected by the
             paper's CNN encoders); run_targets[i] has shape
-            (n_windows_in_run,); run_domains has shape (n_runs,).
+            (n_windows_in_run,).
         """
         if not dataset.has_gen_sequence:
             raise RuntimeError(
@@ -455,26 +451,16 @@ class SiameseDataset:
                 "SiameseDataset.from_cmapss()."
             )
 
-        # 'is_censored' is constant within a unit, so the first row of each
-        # id gives the right value.
-        censored_by_id = dataset.df.groupby("id")["is_censored"].first()
-
         run_ids = np.unique(dataset.id_array)
-        run_features, run_targets, run_domains = [], [], []
+        run_features, run_targets = [], []
         for run_id in run_ids:
             run_mask = dataset.id_array == run_id
             run_features.append(dataset.sequence_array[run_mask])
             run_targets.append(dataset.label_array[run_mask])
 
-            is_censored = bool(censored_by_id.loc[run_id])
-            # Matches the original PairedCMAPSS convention: the "broken"
-            # (not observed to failure) domain is labeled 0, the "fail"
-            # (observed to failure) domain is labeled 1.
-            run_domains.append(0 if is_censored else 1)
-
         run_features, run_targets = SiameseDataset._to_tensor(run_features, run_targets)
 
-        return run_features, run_targets, np.array(run_domains)
+        return run_features, run_targets
 
     @staticmethod
     def _to_tensor(

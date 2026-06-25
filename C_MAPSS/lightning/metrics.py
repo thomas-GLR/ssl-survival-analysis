@@ -11,21 +11,19 @@ class RMSELoss(Metric):
 
         self.add_state("losses", default=[], dist_reduce_fx=None)
         self.add_state("sizes", default=[], dist_reduce_fx=None)
-        self.add_state("sample_counter", default=torch.tensor(0), dist_reduce_fx=None)
 
     def update(self, inputs: torch.Tensor, targets: torch.Tensor):
         summed_square = nn.functional.mse_loss(inputs, targets, reduction="sum")
         batch_size = inputs.shape[0]
 
-        self.losses[self.sample_counter] = summed_square
-        self.sizes[self.sample_counter] = batch_size
-        self.sample_counter.add_(1)
+        self.losses.append(summed_square)
+        self.sizes.append(torch.tensor(batch_size, dtype=torch.float))
 
     def compute(self) -> torch.Tensor:
-        if self.sample_counter == 0:
+        if len(self.losses) == 0:
             raise RuntimeError("RMSE metric was not used. Computation impossible.")
-        summed_squares = self.losses[: self.sample_counter]
-        batch_sizes = self.sizes[: self.sample_counter]
+        summed_squares = torch.stack(self.losses)
+        batch_sizes = torch.stack(self.sizes)
         rmse = torch.sqrt(summed_squares.sum() / batch_sizes.sum())
 
         return rmse
@@ -44,48 +42,24 @@ class SimpleMetric(Metric):
 
         self.add_state("losses", default=[], dist_reduce_fx=None)
         self.add_state("sizes", default=[], dist_reduce_fx=None)
-        self.add_state("sample_counter", default=torch.tensor(0), dist_reduce_fx=None)
 
     def update(self, loss: torch.Tensor, batch_size: int):
-        self.losses[self.sample_counter] = loss
-        self.sizes[self.sample_counter] = batch_size
-        self.sample_counter.add_(1)
+        self.losses.append(loss)
+        self.sizes.append(torch.tensor(batch_size, dtype=torch.float))
 
     def compute(self) -> torch.Tensor:
-        if self.sample_counter == 0:
-            raise RuntimeError("RMSE metric was not used. Computation impossible.")
+        if len(self.losses) == 0:
+            raise RuntimeError("Metric was not updated. Computation impossible.")
         if self.reduction == "mean":
-            loss = self._weighted_mean()
-        else:
-            loss = self._sum()
-
-        return loss
+            return self._weighted_mean()
+        return self._sum()
 
     def _weighted_mean(self):
-        weights = self.sizes[: self.sample_counter]
+        losses = torch.stack(self.losses)
+        weights = torch.stack(self.sizes)
         weights = weights / weights.sum()
-        loss = self.losses[: self.sample_counter]
-        loss = torch.sum(loss * weights)
-
-        return loss
+        return torch.sum(losses * weights)
 
     def _sum(self):
-        loss = self.losses[: self.sample_counter]
-        loss = torch.sum(loss)
-
-        return loss
-
-
-class RULScore:
-    def __init__(self, pos_factor=10, neg_factor=-13):
-        self.pos_factor = pos_factor
-        self.neg_factor = neg_factor
-
-    def __call__(self, inputs, targets):
-        dist = inputs - targets
-        for i, d in enumerate(dist):
-            dist[i] = (d / self.neg_factor) if d < 0 else (d / self.pos_factor)
-        dist = torch.exp(dist) - 1
-        score = dist.sum()
-
-        return score
+        losses = torch.stack(self.losses)
+        return torch.sum(losses)

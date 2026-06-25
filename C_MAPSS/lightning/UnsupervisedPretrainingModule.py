@@ -37,7 +37,6 @@ class UnsupervisedPretrainingModule(pl.LightningModule, ABC):
 
         self.criterion_regression = nn.MSELoss()
         self.regression_metric = metrics.SimpleMetric()
-        self.rmse_loss_metric = metrics.RMSELoss()
 
     def _get_encoder(self):
         return Encoder(
@@ -68,20 +67,16 @@ class UnsupervisedPretrainingModule(pl.LightningModule, ABC):
 
     def _reset_all_metrics(self):
         self.regression_metric.reset()
-        self.rmse_loss_metric.reset()
 
     def validation_step(self, batch, batch_idx):
         regression_loss = self._get_losses(batch)
         batch_size = batch[0].shape[0]
         self.regression_metric.update(regression_loss, batch_size)
-        self.rmse_loss_metric.update(regression_loss, batch_size)
 
     def on_validation_epoch_end(self):
         regression_loss = self.regression_metric.compute()
-        rmse_loss = self.rmse_loss_metric.compute()
 
         self.log("val/regression_loss", regression_loss)
-        self.log("val/rmse_loss", rmse_loss)
 
     @abstractmethod
     def _get_losses(self, batch) -> torch.Tensor:

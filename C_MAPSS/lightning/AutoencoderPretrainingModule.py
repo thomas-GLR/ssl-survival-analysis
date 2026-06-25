@@ -1,11 +1,10 @@
 import torch
 
-from C_MAPSS.lightning import UnsupervisedPretrainingModule
-from C_MAPSS.lightning.mixins import DataHparamsMixin
+from C_MAPSS.lightning.UnsupervisedPretrainingModule import UnsupervisedPretrainingModule
 from models.self_supervised.base.Decoder import Decoder
 
 
-class AutoencoderPretrainingModule(UnsupervisedPretrainingModule, DataHparamsMixin):
+class AutoencoderPretrainingModule(UnsupervisedPretrainingModule):
     def __init__(
         self,
         in_channels,
@@ -49,7 +48,7 @@ class AutoencoderPretrainingModule(UnsupervisedPretrainingModule, DataHparamsMix
         return outputs
 
     def _get_losses(self, batch):
-        anchors, queries, true_distances, domain_labels = batch
+        anchors, queries, true_distances = batch
         combined = torch.cat([anchors, queries])
 
         embeddings = self.encoder(combined)
