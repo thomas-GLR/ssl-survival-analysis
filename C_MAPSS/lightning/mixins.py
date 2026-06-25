@@ -7,14 +7,11 @@ class DataHparamsMixin:
 
 
 class LoadEncoderMixin:
-    def load_encoder(self, checkpoint_path: str, load_disc=False):
+    def load_encoder(self, checkpoint_path: str):
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
         encoder_state = self._extract_state_dict(checkpoint, model="encoder")
         self.encoder.load_state_dict(encoder_state)
-        if load_disc:
-            disc_state = self._extract_state_dict(checkpoint, model="domain_disc")
-            self.domain_disc.load_state_dict(disc_state)
 
         self.hparams["pretrained_checkpoint"] = checkpoint_path
         self.encoder.norm_outputs = True

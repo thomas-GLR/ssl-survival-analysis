@@ -2,11 +2,11 @@ import pytorch_lightning as pl
 from torch import accelerator
 from torch.utils.data import DataLoader
 
-from C_MAPSS.lightning.pretraining import UnsupervisedPretraining
-from C_MAPSS.lightning.autoencoder import AutoencoderPretraining
+from C_MAPSS.lightning.MetricPretrainingModule import MetricPretrainingModule
+from C_MAPSS.lightning.AutoencoderPretrainingModule import AutoencoderPretrainingModule
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from dataset.SiamesedDataset import SiameseDataset
-from C_MAPSS.lightning.baseline import Baseline
+from C_MAPSS.lightning.BaselineModule import BaselineModule
 
 
 def train_self_supervised(
@@ -141,7 +141,7 @@ def build_pretraining(
     trainer = build_trainer(mode, device, max_epochs)
 
     if mode == 'metric':
-        model = UnsupervisedPretraining(
+        model = MetricPretrainingModule(
             in_channels=in_channels,
             seq_len=seq_len,
             num_layers=num_layers,
@@ -156,7 +156,7 @@ def build_pretraining(
             weight_decay=weight_decay,
         )
     elif mode == "autoencoder":
-        model = AutoencoderPretraining(
+        model = AutoencoderPretrainingModule(
             in_channels=in_channels,
             seq_len=seq_len,
             num_layers=num_layers,
@@ -249,7 +249,7 @@ def build_baseline(
 ) -> tuple[pl.Trainer, pl.LightningModule]:
     trainer = build_trainer("baseline", device, max_epochs)
 
-    model = Baseline(
+    model = BaselineModule(
         in_channels,
         seq_len,
         num_layers,
