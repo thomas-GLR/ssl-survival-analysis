@@ -1,0 +1,20 @@
+# To run the training container, use the following command:
+#   docker compose --profile train --env-file .env.train pull
+#   docker compose --profile train --env-file .env.train up
+
+services:
+  train:
+    image: guitix/cmapss-train:dev-4721e346
+    profiles: [train]
+    env_file:
+      - .env.train
+    environment:
+      DATA_DIR: /workspace/data/CMAPSSData
+      RESULT_DIR: /workspace/outputs
+      CHECKPOINT_DIR: /workspace/checkpoints
+      CONFIG_DIR: /workspace/config
+    volumes:
+      - ${DATA_DIR_HOST:-./data/C_MAPSS}:/workspace/data/CMAPSSData:ro
+      - ${RESULT_DIR_HOST:-./outputs}:/workspace/outputs
+      - ${CHECKPOINT_DIR_HOST:-./checkpoints}:/workspace/checkpoints
+      - ${CONFIG_DIR_HOST:-./C_MAPSS/config}:/workspace/config

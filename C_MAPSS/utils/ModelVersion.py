@@ -10,3 +10,4 @@ class ModelVersion(Enum):
     PYCLUS = "pyclus"
     COPROG = "coprog"
     CNN = "cnn"
+    CO_TRAINING_ENSEMBLE = "co_training_ensemble"

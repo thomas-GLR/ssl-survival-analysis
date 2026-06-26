@@ -222,7 +222,8 @@ def _parse_args() -> argparse.Namespace:
             "rsf",
             "pyclus",
             "coprog",
-            "cnn"
+            "cnn",
+            "co_training_ensemble"
         ],
         help="The model to train",
     )

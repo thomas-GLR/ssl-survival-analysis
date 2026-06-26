@@ -8,7 +8,8 @@ from C_MAPSS.utils import (utils_transformer_lstm,
                            utils_pyclus,
                            utils_coprog,
                            utils_random_survival_forest,
-                           utils_self_supervised)
+                           utils_self_supervised,
+                           utils_cotraining_ensemble)
 from C_MAPSS.utils.ModelVersion import ModelVersion
 from constants import necessary_keys_cmapss
 
@@ -86,6 +87,8 @@ def get_train_model_method(model_version: ModelVersion) -> Callable:
             return utils_coprog.train_model
         case ModelVersion.CNN:
             return utils_transformer_lstm.train_model
+        case ModelVersion.CO_TRAINING_ENSEMBLE:
+            return utils_cotraining_ensemble.train_model
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
@@ -108,6 +111,8 @@ def get_necessary_dataset_keys(model_version: ModelVersion) -> list[str]:
             return necessary_keys_cmapss.NECESSARY_DATASET_COPROG_KEYS
         case ModelVersion.CNN:
             return necessary_keys_cmapss.NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+        case ModelVersion.CO_TRAINING_ENSEMBLE:
+            return necessary_keys_cmapss.NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
@@ -130,6 +135,8 @@ def get_necessary_model_keys(model_version: ModelVersion) -> list[str]:
             return necessary_keys_cmapss.NECESSARY_COPROG_KEYS
         case ModelVersion.CNN:
             return necessary_keys_cmapss.NECESSARY_CNN_KEYS
+        case ModelVersion.CO_TRAINING_ENSEMBLE:
+            return necessary_keys_cmapss.NECESSARY_CO_TRAINING_ENSEMBLE_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
