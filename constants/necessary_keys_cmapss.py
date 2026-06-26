@@ -37,6 +37,8 @@ NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
 NECESSARY_DATASET_PYCLUS_KEYS = NECESSARY_DATASET_RSF_KEYS
 
+NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+
 # =======================================================
 # MODEL
 # =======================================================
@@ -129,4 +131,31 @@ NECESSARY_CNN_KEYS = [
     "lr",
     "patience",
     "max_epochs",
+]
+
+NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
+    "sequence_len",
+    "coprog_iterations",
+    "coprog_suspension_pool_size",
+    "is_fine_tuning_during_finding_best_suspension_data",
+    "is_fine_tuning_for_last_step",
+    "selection_mode_str",
+    "max_epochs",
+    "patiences",
+    "batchs_size",
+    "lr",
+    "shuffle_dataloaders",
+    "fine_tune_lr_factor",
+    "forgetting_warning_tolerance",
+    "hidden_dim_lstm",
+    "lstm_num_layers_lstm",
+    "lstm_dropout_lstm",
+    "fc_layer_dim_lstm",
+    "fc_dropout_lstm",
+    "transformer_encoder_head_num_transformer_features",
+    "fc_layer_dim_transformer_features",
+    "fc_dropout_transformer_features",
+    "transformer_encoder_head_num_transformer_time_series",
+    "fc_layer_dim_transformer_time_series",
+    "fc_dropout_transformer_time_series",
 ]
