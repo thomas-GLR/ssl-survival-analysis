@@ -13,16 +13,17 @@ from C_MAPSS.lightning.BaselineModule import BaselineModule
 from C_MAPSS.lightning.MetricPretrainingModule import MetricPretrainingModule
 from dataset.SiamesedDataset import SiameseDataset
 from utils.utils import cmapss_score
+from utils import utils_cmapss
 
 
 def train_self_supervised(
         checkpoints_path: str,
-        model_name: str,  # metric or autoencoder
+        results_path: str,
+        model_version: str,  # metric or autoencoder
         # Dataset params
         dataset_root: str,
-        seed: int | None,
         sub_dataset: str,
-        sequence_len: int,
+        seed: int | None,
         max_rul: int,
         return_sequence_label: bool,
         norm_type: str,
@@ -39,7 +40,7 @@ def train_self_supervised(
         percent_of_censored_data: float,
 
         # Pretrain model parameters
-        in_channels: int,
+        sequence_len: int,
         pretraining_lr: float,
         dropout: float,
         num_layers: int = 6,
@@ -60,51 +61,24 @@ def train_self_supervised(
         device: str | None=None,
         datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 ) -> tuple[float, float]:
-    assert os.path.exists(checkpoints_path), f"{checkpoints_path} does not exist"
+    utils_cmapss.assert_data_is_valid(
+        checkpoints_path=checkpoints_path,
+        results_path=results_path,
+        dataset_root=dataset_root,
+        sub_dataset=sub_dataset,
+    )
 
     device = device or 'cuda' if torch.cuda.is_available() else 'cpu'
 
     broken_percentage = 0. if percent_of_broken_data is None else percent_of_broken_data
 
-    folder_for_current_pretraining = f"/pre-trained-model-{model_name}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
-    folder_for_current_training = f"/model-baseline-with-{model_name}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
+    folder_for_current_pretraining = f"/pre-trained-model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
+    folder_for_current_training = f"/model-baseline-with-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
 
     pretraining_checkpoints_path = f"{checkpoints_path}/{folder_for_current_pretraining}"
     training_checkpoints_path = f"{checkpoints_path}/{folder_for_current_training}"
 
     # First we will pretrain the unsupervised model
-    trainer = build_trainer(
-        checkpoints_path=pretraining_checkpoints_path,
-        device=device,
-        max_epochs=max_epochs,
-        patience=patience
-    )
-
-    pretraining_model_parameters = {
-        'in_channels': in_channels,
-        'seq_len': sequence_len,
-        'num_layers': num_layers,
-        'kernel_size': kernel_size,
-        'base_filters': base_filters,
-        'latent_dim': latent_dim,
-        'dropout': dropout,
-        'lr': pretraining_lr,
-        'weight_decay': weight_decay,
-    }
-
-    print(f"Creating the pre-trained model with parameters : {pretraining_model_parameters}")
-
-    if model_name == 'metric':
-        model = MetricPretrainingModule(
-            **pretraining_model_parameters
-        )
-    elif model_name == "autoencoder":
-        model = AutoencoderPretrainingModule(
-            **pretraining_model_parameters
-        )
-    else:
-        raise ValueError(f"Unrecognized pre-training mode {model_name}.")
-
     dataset_params = {
         'dataset_root': dataset_root,
         'sub_dataset': sub_dataset,
@@ -145,28 +119,6 @@ def train_self_supervised(
         percent_of_censored_data=percent_of_censored_data,
         batch_size=batch_size_pretraining,
         seed=seed
-    )
-
-    print("Training pre-trained model")
-
-    trainer.fit(model, train_dataloaders=train_pair_loader, val_dataloaders=val_pair_loader)
-
-    print("Creating baseline model...")
-
-    trainer, baseline = build_baseline(
-        checkpoints_path=training_checkpoints_path,
-        in_channels=in_channels,
-        seq_len=sequence_len,
-        device=device,
-        checkpoint_path=trainer.checkpoint_callback.best_model_path,
-        latent_dim=latent_dim_baseline,
-        base_filters=base_filters,
-        kernel_size=kernel_size,
-        num_layers=num_layers,
-        dropout=dropout,
-        lr=lr_baseline,
-        max_epochs=max_epochs_baseline,
-        patience=patience,
     )
 
     baseline_dataset_params = {
@@ -211,6 +163,62 @@ def train_self_supervised(
         percent_of_broken_data=percent_of_broken_data,
         percent_of_censored_data=percent_of_censored_data,
         seed=seed,
+    )
+
+    in_channels = len(train_dataset.feature_cols)
+
+    trainer = build_trainer(
+        checkpoints_path=pretraining_checkpoints_path,
+        device=device,
+        max_epochs=max_epochs,
+        patience=patience
+    )
+
+    pretraining_model_parameters = {
+        'in_channels': in_channels,
+        'seq_len': sequence_len,
+        'num_layers': num_layers,
+        'kernel_size': kernel_size,
+        'base_filters': base_filters,
+        'latent_dim': latent_dim,
+        'dropout': dropout,
+        'lr': pretraining_lr,
+        'weight_decay': weight_decay,
+    }
+
+    print(f"Creating the pre-trained model with parameters : {pretraining_model_parameters}")
+
+    if model_version == 'metric':
+        model = MetricPretrainingModule(
+            **pretraining_model_parameters
+        )
+    elif model_version == "autoencoder":
+        model = AutoencoderPretrainingModule(
+            **pretraining_model_parameters
+        )
+    else:
+        raise ValueError(f"Unrecognized pre-training mode {model_version}.")
+
+    print("Training pre-trained model")
+
+    trainer.fit(model, train_dataloaders=train_pair_loader, val_dataloaders=val_pair_loader)
+
+    print("Creating baseline model...")
+
+    trainer, baseline = build_baseline(
+        checkpoints_path=training_checkpoints_path,
+        in_channels=in_channels,
+        seq_len=sequence_len,
+        device=device,
+        checkpoint_path=trainer.checkpoint_callback.best_model_path,
+        latent_dim=latent_dim_baseline,
+        base_filters=base_filters,
+        kernel_size=kernel_size,
+        num_layers=num_layers,
+        dropout=dropout,
+        lr=lr_baseline,
+        max_epochs=max_epochs_baseline,
+        patience=patience,
     )
 
     train_loader = train_dataset.get_data_loader_without_censored_data(batch_size_baseline, is_model_cnn=True)

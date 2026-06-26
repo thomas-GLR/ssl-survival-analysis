@@ -1,3 +1,5 @@
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
@@ -34,6 +36,8 @@ class PyclusDataset:
             sub_dataset: str = 'FD001',
             max_rul=None,
             norm_type=None,
+            include_cols: Optional[list[str]]=None,
+            exclude_cols: Optional[list[str]]=None,
             cluster_operations=False,
             norm_by_operations=False,
             validation_rate=0.2,
@@ -56,8 +60,8 @@ class PyclusDataset:
             norm_type=norm_type,
             cluster_operations=cluster_operations,
             norm_by_operations=norm_by_operations,
-            include_cols=None,
-            exclude_cols=None,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
             return_id=True,
             validation_rate=validation_rate,
             use_only_final_on_test=False,

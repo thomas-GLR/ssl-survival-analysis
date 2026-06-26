@@ -5,10 +5,10 @@ C_MAPSS_DIR = "../../data/C_MAPSS"
 
 
 if __name__ == '__main__':
-    n_estimators = [100]# [100,200,300,400]
-    max_depth = [5]# [5,15,30,100,250]
-    min_samples_split = [10]# [10,15,20,30,50]
-    min_samples_leaf = [5]# [5,10,20]
+    n_estimators = [100,200,300,400]
+    max_depth = [5,15,30,100,250]
+    min_samples_split = [10,15,20,30,50]
+    min_samples_leaf = [5,10,20]
     cv_for_grid_search = 5
     dataset_root = C_MAPSS_DIR
     sub_dataset = "FD001"

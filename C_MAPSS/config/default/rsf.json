@@ -1,0 +1,90 @@
+{
+  "FD001": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "use_max_rul_on_test": false,
+      "use_max_rul_on_valid": true,
+      "summarize_features": true
+    },
+    "model_params": {
+      "n_estimators": [100,200,300,400],
+      "max_depth": [5,15,30,100,250],
+      "min_samples_split":  [10,15,20,30,50],
+      "min_samples_leaf": [5,10,20],
+      "cv_for_grid_search":  5,
+      "variance_warning_threshold": 0.05
+    }
+  },
+  "FD002": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "use_max_rul_on_test": false,
+      "use_max_rul_on_valid": true,
+      "summarize_features": true
+    },
+    "model_params": {
+      "n_estimators": [100,200,300,400],
+      "max_depth": [5,15,30,100,250],
+      "min_samples_split":  [10,15,20,30,50],
+      "min_samples_leaf": [5,10,20],
+      "cv_for_grid_search":  5,
+      "variance_warning_threshold": 0.05
+    }
+  },
+  "FD003": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "use_max_rul_on_test": false,
+      "use_max_rul_on_valid": true,
+      "summarize_features": true
+    },
+    "model_params": {
+      "n_estimators": [100,200,300,400],
+      "max_depth": [5,15,30,100,250],
+      "min_samples_split":  [10,15,20,30,50],
+      "min_samples_leaf": [5,10,20],
+      "cv_for_grid_search":  5,
+      "variance_warning_threshold": 0.05
+    }
+  },
+  "FD004": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "use_max_rul_on_test": false,
+      "use_max_rul_on_valid": true,
+      "summarize_features": true
+    },
+    "model_params": {
+      "n_estimators": [100,200,300,400],
+      "max_depth": [5,15,30,100,250],
+      "min_samples_split":  [10,15,20,30,50],
+      "min_samples_leaf": [5,10,20],
+      "cv_for_grid_search":  5,
+      "variance_warning_threshold": 0.05
+    }
+  }
+}

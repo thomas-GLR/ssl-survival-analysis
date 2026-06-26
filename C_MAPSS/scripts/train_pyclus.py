@@ -32,7 +32,7 @@ if __name__ == "__main__":
         use_max_rul_on_valid=use_max_rul_on_valid,
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
-        random_state=random_state,
+        seed=random_state,
         cv_for_grid_search=cv_for_grid_search,
         min_leaf_size=min_leaf_size,
         n_trees=n_trees,

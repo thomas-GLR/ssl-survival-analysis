@@ -1,0 +1,111 @@
+# =======================================================
+# DATASET
+# =======================================================
+
+NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
+    "seed",
+    "max_rul",
+    "return_sequence_label",
+    "norm_type",
+    "cluster_operations",
+    "norm_by_operations",
+    "include_cols",
+    "exclude_cols",
+    "return_id",
+    "validation_rate",
+    "use_only_final_on_test",
+    "use_max_rul_on_test",
+    "use_max_rul_on_valid",
+]
+
+NECESSARY_DATASET_SELF_SUPERVISED_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+
+NECESSARY_DATASET_RSF_KEYS = [
+    "seed",
+    "max_rul",
+    "norm_type",
+    "cluster_operations",
+    "norm_by_operations",
+    "include_cols",
+    "exclude_cols",
+    "use_max_rul_on_test",
+    "use_max_rul_on_valid",
+    "summarize_features",
+]
+
+NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+
+# =======================================================
+# MODEL
+# =======================================================
+
+NECESSARY_TRANSFORMER_KEYS = [
+    "sequence_len",
+    "transformer_encoder_head_num",
+    "hidden_dim",
+    "lstm_num_layers",
+    "lstm_dropout",
+    "fc_layer_dim",
+    "fc_dropout",
+    "batch_size",
+    "lr",
+    "patience",
+    "max_epochs",
+]
+
+NECESSARY_LSTM_KEYS = [
+    "sequence_len",
+    "hidden_dim",
+    "lstm_num_layers",
+    "lstm_dropout",
+    "fc_layer_dim",
+    "fc_dropout",
+    "batch_size",
+    "lr",
+    "patience",
+    "max_epochs",
+]
+
+NECESSARY_SELF_SUPERVISED_KEYS = [
+    "sequence_len",
+    "pretraining_lr",
+    "dropout",
+    "num_layers",
+    "kernel_size",
+    "base_filters",
+    "latent_dim",
+    "weight_decay",
+    "max_epochs",
+    "patience",
+    "batch_size_pretraining",
+    "latent_dim_baseline",
+    "lr_baseline",
+    "max_epochs_baseline",
+    "batch_size_baseline",
+]
+
+NECESSARY_RSF_KEYS = [
+    "n_estimators",
+    "max_depth",
+    "min_samples_split",
+    "min_samples_leaf",
+    "cv_for_grid_search",
+    "variance_warning_threshold",
+]
+
+NECESSARY_COPROG_KEYS = [
+    "sequence_len",
+    "lstm_num_layers",
+    "hidden_dim",
+    "lstm_dropout",
+    "fc_layer_dim",
+    "fc_dropout",
+    "lr_first_model",
+    "lr_second_model",
+    "epochs_first_model",
+    "epochs_second_model",
+    "batch_size_first_model",
+    "batch_size_second_model",
+    "coprog_iterations",
+    "coprog_suspension_pool_size",
+]

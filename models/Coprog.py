@@ -190,8 +190,8 @@ class Coprog:
 
                     hj_prime = self._train_fun(
                         copy.deepcopy(self.first_model),
-                        x1,
-                        y1,
+                        x_aug,
+                        y_aug,
                         training_params[j]["lr"],
                         training_params[j]["batch_size"],
                         training_params[j]["epochs"],

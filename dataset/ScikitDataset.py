@@ -1,3 +1,5 @@
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 from numpy import ndarray
@@ -36,6 +38,8 @@ class ScikitDataset:
             max_rul: int,
             seed: int | None,
             summarize_features: bool,
+            include_cols: Optional[list[str]],
+            exclude_cols: Optional[list[str]],
             norm_type="z-score",
             cluster_operations=True,
             norm_by_operations=True,
@@ -54,8 +58,8 @@ class ScikitDataset:
             norm_type=norm_type,
             cluster_operations=cluster_operations,
             norm_by_operations=norm_by_operations,
-            include_cols=None,
-            exclude_cols=None,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
             return_id=True,
             validation_rate=0.,
             use_only_final_on_test=False,

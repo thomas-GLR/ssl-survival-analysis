@@ -1,4 +1,4 @@
-from utils import utils_cmapss
+from C_MAPSS.utils import utils_cmapss
 from utils.ModelVersion import ModelVersion
 
 if __name__ == '__main__':
@@ -14,12 +14,13 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         "--device",
+        default="cpu",
         choices=["cpu", "cuda"],
         help="device type",
     )
     parser.add_argument(
         "--model-version",
-        default="lstm",
+        required=True,
         choices=[
             "transformer",
             "lstm",

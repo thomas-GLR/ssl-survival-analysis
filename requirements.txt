@@ -1,0 +1,14 @@
+torch~=2.12.0
+torchmetrics~=1.9.0
+pytorch-lightning~=2.6.5
+numpy~=2.4.6
+PyTorch-ProbGraph~=0.0.1
+pandas~=2.3.3
+tqdm~=4.68.2
+pyclus~=1.0.2
+joblib~=1.5.3
+scikit-learn~=1.8.0
+matplotlib~=3.10.9
+sequitur~=1.2.4
+lifelines~=0.30.3
+mistune~=3.2.1

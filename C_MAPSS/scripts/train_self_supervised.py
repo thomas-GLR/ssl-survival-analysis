@@ -55,7 +55,7 @@ if __name__ == '__main__':
 
     rmse, score = train_self_supervised(
         checkpoints_path=checkpoints_path,
-        model_name=model_name,
+        model_version=model_name,
         #=#,
         dataset_root=dataset_root,
         seed=seed,

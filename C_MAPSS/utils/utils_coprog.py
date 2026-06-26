@@ -1,14 +1,20 @@
+import os
+from datetime import datetime
+
 import torch
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
-
 from C_MAPSS.models import CNN1D, Simple_LSTM
+from C_MAPSS.utils import utils_cmapss
 from models import Coprog
 from utils.utils import cmapss_score
 
 
 def train_model(
     checkpoints_path: str,
+    results_path: str,
+    model_version: str,
+    device: str | None,
     # Model params
     lstm_num_layers: int,
     hidden_dim: int,
@@ -43,7 +49,29 @@ def train_model(
     use_max_rul_on_valid: bool=True,
     percent_of_broken_data: float | None=None,
     percent_of_censored_data: float=0.9,
+        datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
+    utils_cmapss.assert_data_is_valid(
+        checkpoints_path=checkpoints_path,
+        results_path=results_path,
+        dataset_root=dataset_root,
+        sub_dataset=sub_dataset,
+    )
+
+    device = device or 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    broken_percentage = percent_of_broken_data if percent_of_broken_data is not None else 0.0
+    folder_for_current_training = (
+        f"model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/"
+        f"censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
+    )
+
+    final_checkpoints_path = os.path.join(checkpoints_path, folder_for_current_training)
+    os.makedirs(final_checkpoints_path, exist_ok=True)
+
+    final_results_path = os.path.join(results_path, folder_for_current_training)
+    os.makedirs(final_results_path, exist_ok=True)
+
     print("Loading datasets...")
 
     train_dataset, test_dataset, _ = CMAPSSLoader.get_datasets(
@@ -115,16 +143,13 @@ def train_model(
 
     print("Saving first and second trained models...")
 
-    torch.save(coprog.first_model, f"{checkpoints_path}/coprog_{sub_dataset}_cnn.pth")
-    torch.save(coprog.second_model, f"{checkpoints_path}/coprog_{sub_dataset}_lstm.pth")
+    torch.save(coprog.first_model, f"{final_checkpoints_path}/coprog_{model_version}.pth")
+    torch.save(coprog.second_model, f"{final_checkpoints_path}/coprog_{model_version}.pth")
 
     y_hat = coprog.predict(features_tensor)
 
-    print(y_hat)
-    print(targets_tensor.flatten())
-
     rmse = torch.sqrt(torch.mean((targets_tensor - y_hat) ** 2))
-    score = cmapss_score(y_hat, targets_tensor)
+    score = cmapss_score(y_hat.cpu().detach().numpy().flatten(), targets_tensor.cpu().detach().numpy().flatten())
 
     print(f"Test RMSE: {rmse}")
     print(f"Score: {score}")
