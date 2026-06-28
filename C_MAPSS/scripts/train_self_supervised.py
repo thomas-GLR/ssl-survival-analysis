@@ -1,4 +1,4 @@
-from utils.utils_self_supervised import train_self_supervised
+from C_MAPSS.utils.utils_self_supervised import train_self_supervised
 
 C_MAPSS_DIR = "../../data/C_MAPSS"
 

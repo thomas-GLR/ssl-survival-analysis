@@ -1,0 +1,60 @@
+# .dockerignore
+# ──────────────────────────────────────────────────────────────────────────────
+# Files and directories excluded from the Docker build context.
+# These are mounted as volumes at runtime instead of being baked into the image.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Datasets (mounted as read-only volume at /data) ───────────────────────────
+data/
+
+# ── Runtime outputs (mounted as volumes at /outputs, /checkpoints) ────────────
+outputs/
+checkpoints/
+lightning_logs/
+mlruns/
+C_MAPSS/checkpoints/
+C_MAPSS/results/
+
+# ── Optuna databases ──────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.*.example        # keep example files (no secrets inside)
+
+# ── Jupyter notebooks (optional — remove this line if you want them) ──────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

@@ -189,7 +189,7 @@ class Coprog:
                     y_aug = torch.cat([yj, lu_p_reshaped], dim=0)
 
                     hj_prime = self._train_fun(
-                        copy.deepcopy(self.first_model),
+                        copy.deepcopy(model_j),
                         x_aug,
                         y_aug,
                         training_params[j]["lr"],

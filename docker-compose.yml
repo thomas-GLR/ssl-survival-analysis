@@ -1,0 +1,61 @@
+# docker-compose.yml
+# ──────────────────────────────────────────────────────────────────────────────
+# HPO service under the "hpo" profile.
+#
+# If you already have a docker-compose.yml for the rest of the project,
+# add the hpo service block below and merge the volumes section.
+#
+# ── Local usage ───────────────────────────────────────────────────────────────
+#   # Start with values from .env.hpo (REQUIRED for volume paths and HPO knobs)
+#   docker compose --profile hpo --env-file .env.hpo up
+#
+#   # Override model/subset inline
+#   MODEL=lstm SUBSET=FD001 docker compose --profile hpo --env-file .env.hpo up
+#
+#   # Pass explicit CLI args (ignores env-var mode)
+#   docker compose --profile hpo --env-file .env.hpo run --rm hpo transformer_lstm --subset FD001 --n_trials 30
+#
+# ── RunPod ────────────────────────────────────────────────────────────────────
+#   See .env.hpo.example → section "RunPod with network volume"
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  hpo:
+    build:
+      context: .
+      dockerfile: Dockerfile.hpo
+    image: guitix/cmapss-hpo:dev-6ad5d5ec
+    profiles: [hpo]
+
+    # Load optional override file first, then inline env below
+    env_file:
+      - path: .env.hpo
+        required: false               # .env.hpo is optional
+
+    environment:
+      # ── HPO knobs — come from env_file (.env.hpo); inline overrides still work ──
+      # e.g.  MODEL=cnn1d docker compose --profile hpo up
+
+      # ── Paths inside the container (fixed — host side is controlled by volumes) ──
+      DATA_DIR:        /data/CMAPSSData
+      OUTPUT_DIR:      /outputs
+      CHECKPOINT_DIR:  /checkpoints
+
+      # ── Optional: explicit Optuna storage URL ─────────────────────────────
+      # Uncomment to use a PostgreSQL DB instead of SQLite (required for n_jobs > 1)
+      # STORAGE: postgresql://optuna:password@db:5432/optuna
+
+    volumes:
+      # Host path vars default to local subdirectories for development.
+      # On RunPod, override them in .env.hpo to point to your network volume.
+      #
+      #   DATA_DIR_HOST=/runpod-volume/data/CMAPSSData
+      #   OUTPUT_DIR_HOST=/runpod-volume/outputs
+      #   CHECKPOINT_DIR_HOST=/runpod-volume/checkpoints
+
+      - ${DATA_DIR_HOST:-./data/CMAPSSData}:/data/CMAPSSData:ro   # read-only input
+      - ${OUTPUT_DIR_HOST:-./outputs}:/outputs                     # Optuna DB + results
+      - ${CHECKPOINT_DIR_HOST:-./checkpoints}:/checkpoints         # Lightning checkpoints
+
+    # Restart policy — useful for long RunPod runs that may get preempted
+    restart: "no"                     # change to "on-failure" if needed

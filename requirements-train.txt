@@ -1,0 +1,5 @@
+matplotlib~=3.10.9
+sequitur~=1.2.4
+PyTorch-ProbGraph~=0.0.1
+scikit-survival
+tqdm~=4.68.2

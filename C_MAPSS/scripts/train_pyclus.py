@@ -1,4 +1,4 @@
-from utils.utils_pyclus import train_model
+from C_MAPSS.utils.utils_pyclus import train_model
 
 C_MAPSS_DIR = "../../data/C_MAPSS"
 

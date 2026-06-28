@@ -1,4 +1,4 @@
-from utils.utils_random_survival_forest import train_model
+from C_MAPSS.utils.utils_random_survival_forest import train_model
 
 
 C_MAPSS_DIR = "../../data/C_MAPSS"

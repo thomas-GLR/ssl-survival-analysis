@@ -3,7 +3,7 @@ from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from models import Coprog
 import torch
 
-from utils.utils import cmapss_score
+from C_MAPSS.utils import utils_cmapss
 
 C_MAPSS_DIR = "../../data/C_MAPSS"
 CHECKPOINTS_DIR = "../checkpoints"
@@ -147,4 +147,4 @@ if __name__ == "__main__":
     rmse = torch.sqrt(torch.mean((targets_tensor - y_hat) ** 2))
 
     print(f"Test RMSE: {rmse}")
-    print(f"Score: {cmapss_score(y_hat, targets_tensor)}")
+    print(f"Score: {utils_cmapss.cmapss_score(y_hat, targets_tensor)}")

@@ -1,9 +1,18 @@
+import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torchmetrics.functional import mean_squared_error
-from utils import utils
+
+
+def _cmapss_score(predict: np.ndarray, label: np.ndarray) -> float:
+    a1 = 13
+    a2 = 10
+    error = predict - label
+    pos_e = np.exp(-error[error < 0] / a1) - 1
+    neg_e = np.exp(error[error >= 0] / a2) - 1
+    return sum(pos_e) + sum(neg_e)
 
 
 class TransformerLstmModule(pl.LightningModule):
@@ -57,7 +66,7 @@ class TransformerLstmModule(pl.LightningModule):
 
         np_outputs, np_targets = outputs.cpu().numpy(), targets.cpu().numpy()
 
-        score = utils.cmapss_score(np_outputs, np_targets)
+        score = _cmapss_score(np_outputs, np_targets)
 
         self.test_step_outputs.clear()
         self.test_step_targets.clear()

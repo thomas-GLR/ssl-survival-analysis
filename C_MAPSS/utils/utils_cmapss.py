@@ -3,16 +3,17 @@ import os
 from datetime import datetime
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 
 from constants import necessary_keys_cmapss
 from constants import results_columns
-from utils import (utils_transformer_lstm,
+from C_MAPSS.utils import (utils_transformer_lstm,
                    utils_pyclus,
                    utils_coprog,
                    utils_random_survival_forest,
                    utils_self_supervised)
-from utils.ModelVersion import ModelVersion
+from C_MAPSS.utils.ModelVersion import ModelVersion
 
 
 def reproduce_result(
@@ -281,3 +282,12 @@ def assert_data_is_valid(
 
     assert sub_dataset in ['FD001', 'FD002', 'FD003',
                            'FD004'], f"Sub dataset must be one of ['FD001', 'FD002', 'FD003', 'FD004'] and not {sub_dataset}"
+
+
+def cmapss_score(predict: np.ndarray, label: np.ndarray) -> float:
+    a1 = 13
+    a2 = 10
+    error = predict - label
+    pos_e = np.exp(-error[error < 0] / a1) - 1
+    neg_e = np.exp(error[error >= 0] / a2) - 1
+    return sum(pos_e) + sum(neg_e)

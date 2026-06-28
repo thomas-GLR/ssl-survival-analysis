@@ -280,6 +280,8 @@ class CMAPSSDataset(Dataset):
             batch_size: int,
             shuffle: bool=False,
             is_model_cnn: bool=False,
+            num_workers=0,
+            pin_memory=False
     ) -> DataLoader:
         # Identify ids marked as censored in the DataFrame
         censored_ids = self.df[self.df['is_censored'] == 1]['id'].unique()
@@ -305,7 +307,7 @@ class CMAPSSDataset(Dataset):
 
         dataset = TensorDataset(features_uncensored, targets_uncensored)
 
-        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory)
 
 
     def count_rul(self):

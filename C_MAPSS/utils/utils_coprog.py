@@ -7,7 +7,7 @@ from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from C_MAPSS.models import CNN1D, Simple_LSTM
 from C_MAPSS.utils import utils_cmapss
 from models import Coprog
-from utils.utils import cmapss_score
+from C_MAPSS.utils import utils_cmapss
 
 
 def train_model(
@@ -149,7 +149,7 @@ def train_model(
     y_hat = coprog.predict(features_tensor)
 
     rmse = torch.sqrt(torch.mean((targets_tensor - y_hat) ** 2))
-    score = cmapss_score(y_hat.cpu().detach().numpy().flatten(), targets_tensor.cpu().detach().numpy().flatten())
+    score = utils_cmapss.cmapss_score(y_hat.cpu().detach().numpy().flatten(), targets_tensor.cpu().detach().numpy().flatten())
 
     print(f"Test RMSE: {rmse}")
     print(f"Score: {score}")

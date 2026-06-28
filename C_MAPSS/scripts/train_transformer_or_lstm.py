@@ -1,5 +1,5 @@
-from utils import utils_cmapss
-from utils.ModelVersion import ModelVersion
+from C_MAPSS.utils import utils_cmapss
+from C_MAPSS.utils.ModelVersion import ModelVersion
 
 if __name__ == '__main__':
     import argparse

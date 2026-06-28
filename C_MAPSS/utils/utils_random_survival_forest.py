@@ -10,8 +10,7 @@ from sklearn.model_selection import GridSearchCV, StratifiedKFold, cross_val_sco
 from sksurv.ensemble import RandomSurvivalForest
 
 from dataset.ScikitDataset import ScikitDataset
-from utils import utils_cmapss
-from utils.utils import cmapss_score
+from C_MAPSS.utils import utils_cmapss
 
 
 def train_model(
@@ -165,7 +164,7 @@ def train_model(
     predicted_ruls = np.array(predicted_total_times) - test_Y['Time']
 
     rmse = float(np.sqrt(mean_squared_error(test_dataset.rul, predicted_ruls)))
-    score = float(cmapss_score(predicted_ruls, test_dataset.rul))
+    score = float(utils_cmapss.cmapss_score(predicted_ruls, test_dataset.rul))
 
     print(f'Test RMSE for {sub_dataset}: {rmse}')
     print(f'Score for {sub_dataset}: {score}')

@@ -1,5 +1,5 @@
-from datetime import datetime
 import os
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -8,13 +8,11 @@ import torch
 from torch.serialization import add_safe_globals
 from torch.utils.data import DataLoader
 
-import constants.results_columns as results_columns
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from C_MAPSS.lightning.TransformerLstmModule import TransformerLstmModule
 from C_MAPSS.models.Simple_LSTM import Simple_LSTM
 from C_MAPSS.models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
-from utils import utils_cmapss
-from utils.utils import cmapss_score
+from C_MAPSS.utils import utils_cmapss
 
 # For PyTorch 2.6+
 # We indicate to PyTorch that these classes are "safe" when loading checkpoints
@@ -274,6 +272,6 @@ def _generate_and_save_model_prediction(
     targets_tensor = torch.Tensor(targets)
 
     rmse = torch.sqrt(torch.mean((targets_tensor - predictions_tensor) ** 2))
-    score = cmapss_score(np.array(predictions), np.array(targets))
+    score = utils_cmapss.cmapss_score(np.array(predictions), np.array(targets))
 
     return rmse.item(), score

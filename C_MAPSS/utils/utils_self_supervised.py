@@ -12,8 +12,7 @@ from C_MAPSS.lightning.AutoencoderPretrainingModule import AutoencoderPretrainin
 from C_MAPSS.lightning.BaselineModule import BaselineModule
 from C_MAPSS.lightning.MetricPretrainingModule import MetricPretrainingModule
 from dataset.SiamesedDataset import SiameseDataset
-from utils.utils import cmapss_score
-from utils import utils_cmapss
+from C_MAPSS.utils import utils_cmapss
 
 
 def train_self_supervised(
@@ -248,7 +247,7 @@ def train_self_supervised(
     targets_tensor = torch.Tensor(targets)
 
     rmse = torch.sqrt(torch.mean((targets_tensor - predictions_tensor) ** 2))
-    score = cmapss_score(np.array(predictions), np.array(targets))
+    score = utils_cmapss.cmapss_score(np.array(predictions), np.array(targets))
 
     return rmse.item(), score
 

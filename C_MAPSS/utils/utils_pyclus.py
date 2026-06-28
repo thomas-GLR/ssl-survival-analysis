@@ -8,7 +8,7 @@ from sklearn.model_selection import ParameterGrid, StratifiedKFold
 
 from dataset.PyclusDataset import PyclusDataset
 from models import SslPCT
-from utils.utils import cmapss_score
+from C_MAPSS.utils import utils_cmapss
 
 
 def train_model(
@@ -114,7 +114,7 @@ def train_model(
     )
 
     rmse = float(np.sqrt(np.mean((y_true_rul - y_pred_rul) ** 2)))
-    score = float(cmapss_score(y_pred_rul, y_true_rul))
+    score = float(utils_cmapss.cmapss_score(y_pred_rul, y_true_rul))
 
     print(f"Test RMSE: {rmse}")
     print(f"Score: {score}")
