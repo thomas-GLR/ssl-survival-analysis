@@ -24,10 +24,15 @@ class CoTrainingEnsemble_v2:
             self,
             models: list[nn.Module],
             weights: list[float] | None = None,
+            verbose: int = 0,
     ):
         """
         :param models: list[nn.Module]
             The models that will be used in the co-training ensemble.
+        :param weights: list[float] | None
+            Optional pre-defined weights for each model.
+        :param verbose: int
+            Verbosity level. 0 = silent, 1 = key decisions, 2 = full per-candidate details.
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
@@ -39,6 +44,11 @@ class CoTrainingEnsemble_v2:
         self.batchs_size = None
         self.shuffle_dataloaders = None
         self.weights = weights
+        self.verbose = verbose
+
+    def _log(self, level: int, message: str) -> None:
+        if self.verbose >= level:
+            print(message)
 
     def setup_training(
             self,
@@ -124,6 +134,13 @@ class CoTrainingEnsemble_v2:
         """
         self._check_if_training_is_possible()
 
+        total_suspension_units = len(torch.unique(suspension_ids))
+        self._log(1, f"[CoTraining] Starting training | models: {self.number_of_models} | "
+                     f"failure samples: {len(failure_data)} | "
+                     f"censored units: {total_suspension_units} | "
+                     f"max iterations: {iterations} | pool size: {suspension_pool_size} | "
+                     f"selection: {selection_mode.name}")
+
         models_datasets = []
         h: list[LightningModule] = []
 
@@ -137,6 +154,7 @@ class CoTrainingEnsemble_v2:
 
             models_datasets.append((x_i, y_i))
 
+            self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure samples...")
             h_j = self._train_fun(
                 model=copy.deepcopy(self.lightning_modules[j]),
                 model_index=j,
@@ -146,15 +164,22 @@ class CoTrainingEnsemble_v2:
 
             h.append(h_j)
 
+        self._log(1, f"[CoTraining] Initial training done.")
+
         remaining_suspension_ids = torch.unique(suspension_ids)
 
         for i in range(iterations):
             if len(remaining_suspension_ids) == 0:
+                self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
                 break
 
             pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
             shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
             pool_ids = shuffled_ids[:pool_size]  # U'
+
+            self._log(1, f"[CoTraining] --- Iteration {i + 1}/{iterations} | "
+                         f"remaining censored units: {len(remaining_suspension_ids)} | "
+                         f"pool: {pool_ids.tolist()} ---")
 
             # Phase 1 — for each model j, predict pseudo-labels and compute delta for every
             # unit in the pool. Results are stored in an OrderedDict (sorted by delta desc)
@@ -167,7 +192,9 @@ class CoTrainingEnsemble_v2:
                 xj, yj = models_datasets[j]
                 candidates = []
 
-                for unit_id in pool_ids:
+                self._log(2, f"[CoTraining]   Model {j}: evaluating {pool_size} candidates...")
+
+                for unit_idx, unit_id in enumerate(pool_ids):
                     mask = (suspension_ids == unit_id)
                     xu = suspension_data[mask]
 
@@ -194,12 +221,18 @@ class CoTrainingEnsemble_v2:
 
                     delta = self._confidence_measure(xj, yj, hj, hj_prime)
                     candidates.append((unit_id, xu, lu_p, delta))
+                    self._log(2, f"[CoTraining]     candidate {unit_idx + 1}/{len(pool_ids)} unit {unit_id.item()}: delta = {delta:.4f}")
 
                 candidates.sort(key=lambda e: e[3], reverse=True)
                 all_preds[j] = OrderedDict(
                     (uid.item(), (uid, xu, lu_p, delta))
                     for uid, xu, lu_p, delta in candidates
                 )
+
+                if self.verbose >= 2:
+                    ranking = [(uid.item(), d) for uid, _, _, d in candidates]
+                    self._log(2, f"[CoTraining]   Model {j} candidate ranking (best first): "
+                                 f"{[(uid, round(d, 4)) for uid, d in ranking]}")
 
             # Phase 2 — for each model k, pick the best available candidate using the
             # selection mode. When a candidate is chosen it is removed from every model's
@@ -222,6 +255,8 @@ class CoTrainingEnsemble_v2:
 
                 if censored_data_selected[k] is not None:
                     selected_id = censored_data_selected[k][0].item()
+                    self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} "
+                                 f"(mode: {selection_mode.name})")
 
                     # Remove the selected unit from every model's candidate map so it
                     # cannot be assigned to another model in this iteration.
@@ -231,8 +266,12 @@ class CoTrainingEnsemble_v2:
                     remaining_suspension_ids = remaining_suspension_ids[
                         remaining_suspension_ids != censored_data_selected[k][0]
                         ]
+                else:
+                    self._log(1, f"[CoTraining]   Model {k}: no unit selected (no positive delta found).")
 
             if all(x is None for x in censored_data_selected):
+                self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: "
+                             f"no model found a beneficial censored unit.")
                 break
 
             for j in range(self.number_of_models):
@@ -246,6 +285,10 @@ class CoTrainingEnsemble_v2:
                     yj = torch.cat([yj, lu2_reshaped], dim=0)
 
                     models_datasets[j] = (xj, yj)
+
+                    self._log(1, f"[CoTraining]   Retraining model {j} | "
+                                 f"dataset size: {len(xj)} samples "
+                                 f"({'fine-tune' if is_fine_tuning_for_last_step else 'from scratch'})")
 
                     if is_fine_tuning_for_last_step:
                         h[j] = self._fine_tune_fun(
@@ -262,6 +305,7 @@ class CoTrainingEnsemble_v2:
                             y=yj,
                         )
 
+        self._log(1, f"[CoTraining] Training complete.")
         self.lightning_modules = h
 
     def predict(self, x: torch.Tensor) -> torch.Tensor:
@@ -506,6 +550,9 @@ class CoTrainingEnsemble_v2:
             pred = self._predict(model, x_test)
             scores.append(criteria_callback(pred, target))
 
+        self._log(1, f"[CoTraining] Calculating weights (mode={mode}) | "
+                     f"scores per model: {[round(s, 4) for s in scores]}")
+
         if mode == "min":
             if any(s == 0 for s in scores):
                 raise ValueError(
@@ -518,3 +565,6 @@ class CoTrainingEnsemble_v2:
             if total == 0:
                 raise ValueError(f"The sum of scores from all models is zero, cannot calculate weights : {scores}")
             self.weights = [s / total for s in scores]
+
+        self._log(1, f"[CoTraining] Weights assigned: "
+                     f"{[f'model {j}={round(w, 4)}' for j, w in enumerate(self.weights)]}")

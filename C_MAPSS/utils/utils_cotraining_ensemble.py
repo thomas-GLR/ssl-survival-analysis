@@ -101,6 +101,7 @@ def train_model(
 
     cotraining_ensemble = CoTrainingEnsemble_v2(
         models=models,
+        verbose=2
     )
 
     models_number = len(models)
@@ -110,20 +111,11 @@ def train_model(
 
     lightning_modules = [TransformerLstmModule(lr=0.001, model=model) for model in models]
 
-    trainer_params = {
-        "max_epochs": 3,
-        "accelerator": "auto",
-        "enable_progress_bar": False,
-        "enable_model_summary": False,
-        "enable_checkpointing": False,
-        "enable_autolog_hparams": False,
-    }
+    def make_trainer() -> Trainer:
+        return Trainer(max_epochs=3, accelerator="auto", logger=False, enable_progress_bar=False,
+                       enable_model_summary=False)
 
-    trainer_factories = [
-        lambda: Trainer(**trainer_params),
-        lambda: Trainer(**trainer_params),
-        lambda: Trainer(**trainer_params),
-    ]
+    trainer_factories = [make_trainer] * models_number
 
     cotraining_ensemble.setup_training(
         lightning_modules=lightning_modules,
@@ -176,7 +168,7 @@ def cmapss_score(predict: torch.Tensor, label: torch.Tensor) -> float:
 if __name__ == "__main__":
     train_model(
         coprog_iterations=2,
-        coprog_suspension_pool_size=25,
+        coprog_suspension_pool_size=5,
         dataset_root="../../data/C_MAPSS",
         seed=42,
         sub_dataset="FD001",
