@@ -1,0 +1,48 @@
+# Dockerfile.train
+# ──────────────────────────────────────────────────────────────────────────────
+# Train image — PyTorch Lightning on CUDA.
+# Compatible with RunPod GPU pods and standard docker-compose.
+#
+# Volume mount points expected at runtime:
+#   /data/CMAPSSData  ← dataset files       (read-only)
+#   /outputs          ← results  (read-write)
+#   /checkpoints      ← Lightning ckpt files (read-write)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# syntax=docker/dockerfile:1
+
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+LABEL maintainer="thomas_glr"
+LABEL description="CMAPSS Train — PyTorch Lightning"
+
+# Runtime system deps (sqlite3 CLI for inspecting the Optuna DB)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        sqlite3 \
+        curl
+
+WORKDIR /app
+
+COPY requirements.txt requirements-train.txt ./
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+        -r requirements.txt \
+        -r requirements-train.txt
+
+# ── Project source ────────────────────────────────────────────────────────────
+COPY . .
+
+# ── Python path ───────────────────────────────────────────────────────────────
+ENV PYTHONPATH=/app
+
+# ── Volume mount points ───────────────────────────────────────────────────────
+RUN mkdir -p /data/CMAPSSData /outputs /checkpoints
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+COPY docker/hpo_entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

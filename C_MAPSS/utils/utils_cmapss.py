@@ -22,7 +22,7 @@ def reproduce_result(
         results_path: str,
         dataset_root: str,
         model_version: ModelVersion,
-        device: str,
+        device: str | None,
         benchmark_version: str = "default",
 ) -> None:
     """

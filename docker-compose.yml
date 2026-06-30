@@ -59,3 +59,30 @@ services:
 
     # Restart policy — useful for long RunPod runs that may get preempted
     restart: "no"                     # change to "on-failure" if needed
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    image: guitix/cmapss-dev:dev-6ad5d5ec
+    profiles: [train]
+
+    # Load optional override file first, then inline env below
+    env_file:
+      - path: .env.train
+        required: false               # .env.train is optional
+
+    environment:
+      # ── Paths inside the container (fixed — host side is controlled by volumes) ──
+      DATA_DIR:        /data/CMAPSSData
+      RESULT_DIR:      /outputs
+      CHECKPOINT_DIR:  /checkpoints
+      CONFIG_DIR:      /config
+
+    volumes:
+      - ${DATA_DIR_HOST:-./data/C_MAPSS}:/data/CMAPSSData:ro  # read-only input
+      - ${RESULT_DIR_HOST:-./outputs}:/outputs                # Results
+      - ${CHECKPOINT_DIR_HOST:-./checkpoints}:/checkpoints    # Lightning checkpoints
+      - ${CONFIG_DIR_HOST:-./C_MAPSS/config}:/config          # Config checkpoints
+
+    # Restart policy — useful for long RunPod runs that may get preempted
+    restart: "no"                     # change to "on-failure" if needed

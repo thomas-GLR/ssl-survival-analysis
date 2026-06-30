@@ -3,6 +3,6 @@
 /C_MAPSS/checkpoints/
 /C_MAPSS/results/
 .env
-.env.hpo
+.env.*
 /outputs
 /checkpoints

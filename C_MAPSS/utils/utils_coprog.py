@@ -49,7 +49,7 @@ def train_model(
     use_max_rul_on_valid: bool=True,
     percent_of_broken_data: float | None=None,
     percent_of_censored_data: float=0.9,
-        datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+    datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
     utils_cmapss.assert_data_is_valid(
         checkpoints_path=checkpoints_path,
