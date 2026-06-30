@@ -2,7 +2,6 @@ import copy
 from collections import OrderedDict
 from typing import Callable
 
-import numpy as np
 import torch
 import torch.nn as nn
 from enum import Enum
@@ -199,21 +198,16 @@ class CoTrainingEnsemble_v2:
             # Phase 2 — for each model k, pick the best available candidate using the
             # selection mode. When a candidate is chosen it is removed from every model's
             # map so no other model k can reuse the same suspension unit.
-            pi, delta_optimals = self._build_pi_delta_from_preds(all_preds)
             censored_data_selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [
                 None for _ in range(self.number_of_models)
             ]
 
             for k in range(self.number_of_models):
-                if not any(x is not None for x in delta_optimals):
-                    break
-
                 match selection_mode:
                     case SelectionMode.VOTING:
                         censored_data_selected[k] = self._voting_censored_data_selection(
-                            delta_optimals=list(delta_optimals),
-                            delta_optimal_index_to_exclude=k,
-                            pi=list(pi),
+                            all_preds=all_preds,
+                            model_index_to_exclude=k,
                         )
                     case SelectionMode.EVIDENCE:
                         censored_data_selected[k] = self._evidential_censored_data_selection()
@@ -227,9 +221,6 @@ class CoTrainingEnsemble_v2:
                     # cannot be assigned to another model in this iteration.
                     for j in range(self.number_of_models):
                         all_preds[j].pop(selected_id, None)
-
-                    # Rebuild pi / delta_optimals from what remains.
-                    pi, delta_optimals = self._build_pi_delta_from_preds(all_preds)
 
                     remaining_suspension_ids = remaining_suspension_ids[
                         remaining_suspension_ids != censored_data_selected[k][0]
@@ -264,38 +255,6 @@ class CoTrainingEnsemble_v2:
                             x=xj,
                             y=yj,
                         )
-
-    def _build_pi_delta_from_preds(
-            self,
-            all_preds: dict[int, OrderedDict],
-    ) -> tuple[list, list]:
-        r"""Build pi and delta_optimals from the precomputed candidate maps.
-
-        For each model j the best available candidate (highest delta > 0) is the
-        first entry of its OrderedDict, since the dict is kept sorted descending
-        by delta.
-
-        Args:
-            all_preds: mapping from model index to an OrderedDict of
-                ``{unit_id_int: (unit_id_tensor, xu, lu_p, delta)}``.
-
-        Returns:
-            pi: list of ``(unit_id, xu, lu_p)`` or ``None`` per model.
-            delta_optimals: list of ``float`` or ``None`` per model.
-        """
-        pi: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [
-            None for _ in range(self.number_of_models)
-        ]
-        delta_optimals: list[float | None] = [None for _ in range(self.number_of_models)]
-
-        for j, candidates in all_preds.items():
-            for uid_int, (unit_id, xu, lu_p, delta) in candidates.items():
-                if delta > 0:
-                    pi[j] = (unit_id, xu, lu_p)
-                    delta_optimals[j] = delta
-                    break  # OrderedDict is sorted desc, so first positive is the best
-
-        return pi, delta_optimals
 
     def _train_fun(
             self,
@@ -411,45 +370,67 @@ class CoTrainingEnsemble_v2:
 
     def _voting_censored_data_selection(
             self,
-            delta_optimals: list[float | None],
-            delta_optimal_index_to_exclude: int,
-            pi: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None],
+            all_preds: dict[int, OrderedDict],
+            model_index_to_exclude: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        r"""Select the censored unit that best improves the ensemble on average.
+
+        For each candidate unit u, the average delta is computed over all models
+        j ≠ k (including negative deltas, which penalise units that hurt some
+        models). The unit with the highest average delta is selected, provided
+        that average is strictly positive.
+
+        The pseudo-label assigned to model k is the prediction made by the model
+        j ≠ k that achieved the highest individual delta for the selected unit
+        (i.e. the most confident predictor for that specific unit).
+
+        Args:
+            all_preds: mapping from model index j to an OrderedDict of
+                ``{unit_id_int: (unit_id_tensor, xu, lu_p, delta)}``.
+            model_index_to_exclude: index k of the model being updated — its
+                own predictions are excluded from both the average and the
+                pseudo-label selection.
+
+        Returns:
+            ``(unit_id, xu, lu_p)`` for the selected unit, or ``None`` if no
+            unit has a strictly positive average delta.
         """
-        Select a censored data.
+        # Collect every unit_id that at least one non-excluded model has scored.
+        all_unit_ids: set[int] = {
+            uid
+            for j, preds in all_preds.items()
+            if j != model_index_to_exclude
+            for uid in preds
+        }
 
-        :param delta_optimals: list[float | None]
-            A set of the best delta for each model. The list will be change if a delta optimal is selected.
-        :param delta_optimal_index_to_exclude: int
-            The delta index to exclude from the set of best delta for each model
-        :param pi: list[tuple[int, torch.Tensor, torch.Tensor] | None]
-            A set containing all the best censored data with their pseudo-label.
-             The list will be change if a delta optimal is selected.
-        :return: tuple[torch.Tensor, torch.Tensor]
-            The censored data that has been selected
-        """
-        # We don't wan't that delta_optimal_index_to_exclude contribute to the sum
-        delta_optimals_prime = [0.0 if i == delta_optimal_index_to_exclude else delta for i, delta in
-                                enumerate(delta_optimals)]
+        best_avg_delta = 0.0  # strictly > 0 required to accept a candidate
+        best_unit_id_int: int | None = None
 
-        sum_delta_optimals = np.sum([0.0 if delta is None else delta for delta in delta_optimals_prime])
+        for unit_id_int in all_unit_ids:
+            deltas = [
+                all_preds[j][unit_id_int][3]
+                for j in all_preds
+                if j != model_index_to_exclude and unit_id_int in all_preds[j]
+            ]
+            if not deltas:
+                continue
+            avg_delta = sum(deltas) / len(deltas)
+            if avg_delta > best_avg_delta:
+                best_avg_delta = avg_delta
+                best_unit_id_int = unit_id_int
 
-        # TODO need to set the seed in before starting the train algorithm
-        r = np.random.random()
+        if best_unit_id_int is None:
+            return None
 
-        total_percentage = 0.
+        # Among models j ≠ k, pick the one with the highest individual delta
+        # for this unit — its prediction is the most reliable pseudo-label.
+        best_j = max(
+            (j for j in all_preds if j != model_index_to_exclude and best_unit_id_int in all_preds[j]),
+            key=lambda j: all_preds[j][best_unit_id_int][3],
+        )
 
-        if sum_delta_optimals > 0:
-            for j in range(self.number_of_models):
-                if delta_optimals_prime[j] is not None and j != delta_optimal_index_to_exclude:
-                    total_percentage += delta_optimals_prime[j] / sum_delta_optimals
-                    if r <= total_percentage:
-                        selected_censored_data = pi[j]
-                        delta_optimals[j] = None
-                        pi[j] = None
-                        return selected_censored_data
-
-        return None
+        unit_id, xu, lu_p, _ = all_preds[best_j][best_unit_id_int]
+        return unit_id, xu, lu_p
 
     def _evidential_censored_data_selection(self):
         raise NotImplementedError("Evidential censored data selection is not implemented yet.")
