@@ -12,7 +12,7 @@
       "return_id": false,
       "validation_rate":  0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test":  false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -24,13 +24,13 @@
       "base_filters": 16,
       "latent_dim":  64,
       "weight_decay": 0.0,
-      "max_epochs":  100,
+      "max_epochs":  2,
       "patience": 50,
-      "batch_size_pretraining": 64,
+      "batch_size_pretraining": 256,
       "latent_dim_baseline": 64,
       "lr_baseline":  0.01,
-      "max_epochs_baseline": 100,
-      "batch_size_baseline":  64
+      "max_epochs_baseline": 2,
+      "batch_size_baseline":  256
     }
   },
   "FD002": {
@@ -46,7 +46,7 @@
       "return_id": false,
       "validation_rate":  0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test":  false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -58,13 +58,13 @@
       "base_filters": 16,
       "latent_dim":  64,
       "weight_decay": 0.0,
-      "max_epochs":  100,
+      "max_epochs":  2,
       "patience": 50,
-      "batch_size_pretraining": 64,
+      "batch_size_pretraining": 256,
       "latent_dim_baseline": 64,
       "lr_baseline":  0.01,
-      "max_epochs_baseline": 100,
-      "batch_size_baseline":  64
+      "max_epochs_baseline": 2,
+      "batch_size_baseline":  256
     }
   },
   "FD003": {
@@ -80,7 +80,7 @@
       "return_id": false,
       "validation_rate":  0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test":  false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -92,13 +92,13 @@
       "base_filters": 16,
       "latent_dim":  64,
       "weight_decay": 0.0,
-      "max_epochs":  100,
+      "max_epochs":  2,
       "patience": 50,
-      "batch_size_pretraining": 64,
+      "batch_size_pretraining": 256,
       "latent_dim_baseline": 64,
       "lr_baseline":  0.01,
-      "max_epochs_baseline": 100,
-      "batch_size_baseline":  64
+      "max_epochs_baseline": 2,
+      "batch_size_baseline":  256
     }
   },
   "FD004": {
@@ -114,7 +114,7 @@
       "return_id": false,
       "validation_rate":  0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test":  false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -126,13 +126,13 @@
       "base_filters": 16,
       "latent_dim":  64,
       "weight_decay": 0.0,
-      "max_epochs":  100,
+      "max_epochs":  2,
       "patience": 50,
-      "batch_size_pretraining": 64,
+      "batch_size_pretraining": 256,
       "latent_dim_baseline": 64,
       "lr_baseline":  0.01,
-      "max_epochs_baseline": 100,
-      "batch_size_baseline":  64
+      "max_epochs_baseline": 2,
+      "batch_size_baseline":  256
     }
   }
 }

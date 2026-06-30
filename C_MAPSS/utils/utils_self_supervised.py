@@ -71,8 +71,8 @@ def train_self_supervised(
 
     broken_percentage = 0. if percent_of_broken_data is None else percent_of_broken_data
 
-    folder_for_current_pretraining = f"/pre-trained-model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
-    folder_for_current_training = f"/model-baseline-with-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
+    folder_for_current_pretraining = f"pre-trained-model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
+    folder_for_current_training = f"model-baseline-with-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
 
     pretraining_checkpoints_path = f"{checkpoints_path}/{folder_for_current_pretraining}"
     training_checkpoints_path = f"{checkpoints_path}/{folder_for_current_training}"

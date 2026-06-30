@@ -49,3 +49,7 @@ fi
 
 echo "▶ python run_hpo.py ${ARGS[*]}"
 exec python run_hpo.py "${ARGS[@]}"
+
+# 3. Keep the container alive for debugging/inspection
+echo "Python script finished. Keeping the pod alive..."
+sleep infinity

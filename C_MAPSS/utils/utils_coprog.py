@@ -60,17 +60,15 @@ def train_model(
 
     device = device or 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    broken_percentage = percent_of_broken_data if percent_of_broken_data is not None else 0.0
-    folder_for_current_training = (
-        f"model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/"
-        f"censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
+    final_checkpoints_path, final_results_path = utils_cmapss.create_and_get_checkpoints_results_path(
+        percent_of_censored_data=percent_of_censored_data,
+        percent_of_broken_data=percent_of_broken_data,
+        model_version=model_version,
+        sub_dataset=sub_dataset,
+        datetime_for_folders=datetime_for_folders,
+        checkpoints_path=checkpoints_path,
+        results_path=results_path,
     )
-
-    final_checkpoints_path = os.path.join(checkpoints_path, folder_for_current_training)
-    os.makedirs(final_checkpoints_path, exist_ok=True)
-
-    final_results_path = os.path.join(results_path, folder_for_current_training)
-    os.makedirs(final_results_path, exist_ok=True)
 
     print("Loading datasets...")
 
@@ -128,6 +126,7 @@ def train_model(
         batch_size_first_model=batch_size_first_model,
         batch_size_second_model=batch_size_second_model,
         verbose=1,
+        device=device,
     )
 
     print(f"Training Coprog model...")

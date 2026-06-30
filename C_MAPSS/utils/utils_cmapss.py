@@ -9,10 +9,10 @@ import pandas as pd
 from constants import necessary_keys_cmapss
 from constants import results_columns
 from C_MAPSS.utils import (utils_transformer_lstm,
-                   utils_pyclus,
-                   utils_coprog,
-                   utils_random_survival_forest,
-                   utils_self_supervised)
+                           utils_pyclus,
+                           utils_coprog,
+                           utils_random_survival_forest,
+                           utils_self_supervised)
 from C_MAPSS.utils.ModelVersion import ModelVersion
 
 
@@ -124,14 +124,14 @@ def reproduce_result(
             print(
                 f"Saving intermediate result for sub dataset {sub_dataset} and censored percentage : {censored_percentage}...")
             secure_save_for_censored_percentage.to_csv(
-                f"{results_path}/secure_{sub_dataset}_censored_{censored_percentage:.2f}_{model_version.value}_benchmark_{benchmark_version}_results_turbofan.csv",
+                f"{results_path}/secure_{sub_dataset}_censored_{censored_percentage:.2f}_{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
                 index=False)
 
         secure_save_for_sub_dataset = pd.DataFrame(secure_save_for_sub_dataset_rows, columns=columns)
 
         print(f"Saving intermediate result for sub dataset {sub_dataset}...")
         secure_save_for_sub_dataset.to_csv(
-            f"{results_path}/secure_{sub_dataset}_{model_version.value}_benchmark_{benchmark_version}_results_turbofan.csv",
+            f"{results_path}/secure_{sub_dataset}_{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
             index=False)
 
     df_results = pd.DataFrame(rows, columns=columns)
@@ -140,7 +140,7 @@ def reproduce_result(
 
     print("Saving results...")
 
-    df_results.to_csv(f"{results_path}/{model_version.value}_benchmark_{benchmark_version}_results_turbofan.csv",
+    df_results.to_csv(f"{results_path}/{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
                       index=False)
 
 
@@ -282,6 +282,31 @@ def assert_data_is_valid(
 
     assert sub_dataset in ['FD001', 'FD002', 'FD003',
                            'FD004'], f"Sub dataset must be one of ['FD001', 'FD002', 'FD003', 'FD004'] and not {sub_dataset}"
+
+
+def create_and_get_checkpoints_results_path(
+        percent_of_censored_data: float,
+        percent_of_broken_data: float | None,
+        model_version: str,
+        sub_dataset: str,
+        datetime_for_folders: str,
+        checkpoints_path: str,
+        results_path: str,
+) -> tuple[str, str]:
+    broken_percentage = percent_of_broken_data if percent_of_broken_data is not None else 0.0
+
+    folder_for_current_training = (
+        f"model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/"
+        f"censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
+    )
+
+    final_checkpoints_path = os.path.join(checkpoints_path, folder_for_current_training)
+    os.makedirs(final_checkpoints_path, exist_ok=True)
+
+    final_results_path = os.path.join(results_path, folder_for_current_training)
+    os.makedirs(final_results_path, exist_ok=True)
+
+    return final_checkpoints_path, final_results_path
 
 
 def cmapss_score(predict: np.ndarray, label: np.ndarray) -> float:

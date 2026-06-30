@@ -1,0 +1,8 @@
+{
+  "broken_percentage": [0.4, 0.5],
+  "censored_percentage": [0.6, 0.5],
+  "cmapss_files": [
+    "FD001",
+    "FD003"
+  ]
+}

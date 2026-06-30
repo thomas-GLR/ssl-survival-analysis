@@ -12,7 +12,7 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -25,7 +25,7 @@
       "batch_size": 128,
       "lr": 0.0002,
       "patience": 50,
-      "max_epochs": 500
+      "max_epochs": 2
     }
   },
   "FD002": {
@@ -41,7 +41,7 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -54,7 +54,7 @@
       "batch_size": 128,
       "lr": 0.0002,
       "patience": 50,
-      "max_epochs": 500
+      "max_epochs": 2
     }
   },
   "FD003": {
@@ -70,7 +70,7 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -83,7 +83,7 @@
       "batch_size": 128,
       "lr": 0.0002,
       "patience": 50,
-      "max_epochs": 500
+      "max_epochs": 2
     }
   },
   "FD004": {
@@ -99,7 +99,7 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -112,7 +112,7 @@
       "batch_size": 128,
       "lr": 0.0002,
       "patience": 50,
-      "max_epochs": 500
+      "max_epochs": 2
     }
   }
 }

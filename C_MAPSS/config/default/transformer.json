@@ -12,7 +12,7 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": false,
+      "use_max_rul_on_test":  true,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -42,7 +42,7 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": false,
+      "use_max_rul_on_test":  true,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -72,7 +72,7 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": false,
+      "use_max_rul_on_test":  true,
       "use_max_rul_on_valid": true
     },
     "model_params": {
@@ -102,7 +102,7 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": false,
+      "use_max_rul_on_test":  true,
       "use_max_rul_on_valid": true
     },
     "model_params": {

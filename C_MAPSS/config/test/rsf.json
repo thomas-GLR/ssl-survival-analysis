@@ -8,7 +8,7 @@
       "norm_by_operations": true,
       "include_cols": [],
       "exclude_cols": [],
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true,
       "summarize_features": true
     },
@@ -30,7 +30,7 @@
       "norm_by_operations": true,
       "include_cols": [],
       "exclude_cols": [],
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true,
       "summarize_features": true
     },
@@ -52,7 +52,7 @@
       "norm_by_operations": true,
       "include_cols": [],
       "exclude_cols": [],
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true,
       "summarize_features": true
     },
@@ -74,7 +74,7 @@
       "norm_by_operations": true,
       "include_cols": [],
       "exclude_cols": [],
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true,
       "summarize_features": true
     },

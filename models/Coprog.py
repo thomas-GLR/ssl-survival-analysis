@@ -45,7 +45,7 @@ class Coprog:
             epochs_second_model: int = 20,
             batch_size_first_model: int = 32,
             batch_size_second_model: int = 32,
-            device: torch.device | None = None,
+            device: str | None = None,
             shuffle_dataloader: bool = False,
             verbose: int = 0,
             first_and_second_model_already_trained: bool = False

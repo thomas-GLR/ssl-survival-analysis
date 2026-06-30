@@ -66,17 +66,17 @@ def train_model(
 
     device = device or 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    checkpoints_path, results_path = utils_cmapss.create_and_get_checkpoints_results_path(
+        percent_of_censored_data=percent_of_censored_data,
+        percent_of_broken_data=percent_of_broken_data,
+        model_version=model_version,
+        sub_dataset=sub_dataset,
+        datetime_for_folders=datetime_for_folders,
+        checkpoints_path=checkpoints_path,
+        results_path=results_path,
+    )
+
     scores = pd.DataFrame(columns=['train_rmse', 'val_rmse', 'test_rmse', 'test_score'])
-
-    broken_percentage = 0. if percent_of_broken_data is None else percent_of_broken_data
-
-    folder_for_current_training = f"/model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
-
-    checkpoints_path = f'{checkpoints_path}/{folder_for_current_training}'
-    results_path = f'{results_path}/{folder_for_current_training}'
-
-    if not os.path.exists(results_path):
-        os.makedirs(results_path)
 
     dataset_kwargs = {
         'dataset_root': dataset_root,

@@ -12,20 +12,21 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
       "sequence_len": 60,
+      "transformer_encoder_head_num": 10,
       "hidden_dim": 128,
-      "lstm_num_layers": 3,
-      "lstm_dropout": 0.2,
-      "fc_layer_dim": 128,
-      "fc_dropout": 0.5,
+      "lstm_num_layers": 1,
+      "lstm_dropout": 0.3,
+      "fc_layer_dim": 32,
+      "fc_dropout": 0.4,
       "batch_size": 128,
       "lr": 0.0002,
       "patience": 50,
-      "max_epochs": 500
+      "max_epochs": 2
     }
   },
   "FD002": {
@@ -41,20 +42,21 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
       "sequence_len": 60,
+      "transformer_encoder_head_num": 10,
       "hidden_dim": 128,
-      "lstm_num_layers": 3,
-      "lstm_dropout": 0.2,
-      "fc_layer_dim": 128,
-      "fc_dropout": 0.5,
+      "lstm_num_layers": 1,
+      "lstm_dropout": 0.3,
+      "fc_layer_dim": 32,
+      "fc_dropout": 0.4,
       "batch_size": 128,
       "lr": 0.0002,
       "patience": 50,
-      "max_epochs": 500
+      "max_epochs": 2
     }
   },
   "FD003": {
@@ -70,20 +72,21 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
       "sequence_len": 60,
+      "transformer_encoder_head_num": 10,
       "hidden_dim": 128,
-      "lstm_num_layers": 3,
-      "lstm_dropout": 0.2,
-      "fc_layer_dim": 128,
-      "fc_dropout": 0.5,
+      "lstm_num_layers": 1,
+      "lstm_dropout": 0.3,
+      "fc_layer_dim": 32,
+      "fc_dropout": 0.4,
       "batch_size": 128,
       "lr": 0.0002,
       "patience": 50,
-      "max_epochs": 500
+      "max_epochs": 2
     }
   },
   "FD004": {
@@ -99,20 +102,21 @@
       "return_id": false,
       "validation_rate": 0.2,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test": true,
+      "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
       "sequence_len": 60,
+      "transformer_encoder_head_num": 10,
       "hidden_dim": 128,
-      "lstm_num_layers": 3,
-      "lstm_dropout": 0.2,
-      "fc_layer_dim": 128,
-      "fc_dropout": 0.5,
+      "lstm_num_layers": 1,
+      "lstm_dropout": 0.3,
+      "fc_layer_dim": 32,
+      "fc_dropout": 0.4,
       "batch_size": 128,
       "lr": 0.0002,
       "patience": 50,
-      "max_epochs": 500
+      "max_epochs": 2
     }
   }
 }

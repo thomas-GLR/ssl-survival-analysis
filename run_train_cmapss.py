@@ -14,7 +14,8 @@ import argparse
 import logging
 import os
 
-from utils import utils_cmapss
+from C_MAPSS.utils import utils_cmapss
+from C_MAPSS.utils.ModelVersion import ModelVersion
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +88,18 @@ def main() -> None:
     os.makedirs(args.checkpoints_path, exist_ok=True)
 
     logger.info(
-        "Training started — model=%s  subset=%s  device=%s  benchmark_version=%s",
-        args.model, args.subset, args.device, args.benchmark_version,
+        "Training started — model=%s  device=%s  benchmark_version=%s",
+        args.model_version, args.device, args.benchmark_version,
     )
+
+    model_version = ModelVersion(args.model_version)
 
     utils_cmapss.reproduce_result(
         config_path=args.config_path,
         checkpoints_path=args.checkpoints_path,
         results_path=args.results_path,
         dataset_root=args.dataset_root,
-        model_version=args.model_version,
+        model_version=model_version,
         device=args.device,
         benchmark_version=args.benchmark_version,
     )
