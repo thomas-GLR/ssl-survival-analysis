@@ -215,6 +215,12 @@ def get_dataloaders(
 # Objective function (closure)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _metric_from_trainer(trainer: pl.Trainer, key: str) -> float:
+    """Safely extract a scalar metric logged by the Lightning module after fit."""
+    val = trainer.callback_metrics.get(key, float("inf"))
+    return val.item() if hasattr(val, "item") else float(val)
+
+
 def _make_objective(
     model_name: str,
     subset: str,
@@ -282,17 +288,26 @@ def _make_objective(
         # ── Training ──────────────────────────────────────────────────────
         trainer.fit(module, train_dl, val_dl)
 
-        # ── Final evaluation on the test set ──────────────────────────────
+        # ── Validation metrics — used as optimisation objectives ───────────
+        # These are computed on units held out from training so the sampler
+        # never sees the test set during the search.
+        val_rmse  = _metric_from_trainer(trainer, "val_rmse")
+        val_score = _metric_from_trainer(trainer, "val_score")
+
+        # ── Test metrics — stored for post-hoc analysis only ──────────────
+        # NOT returned as objectives. Call final_test_evaluation() once after
+        # study.optimize() to get an honest test score.
         results    = trainer.test(module, test_dl, verbose=False)[0]
         test_rmse  = results.get("test_rmse",  float("inf"))
         test_score = results.get("test_score", float("inf"))
 
-        # Always store both metrics for later inspection
+        trial.set_user_attr("val_rmse",   val_rmse)
+        trial.set_user_attr("val_score",  val_score)
         trial.set_user_attr("test_rmse",  test_rmse)
         trial.set_user_attr("test_score", test_score)
 
-        # Optuna expects a tuple for multi-objective, a scalar for single-objective
-        return (test_rmse, test_score) if multi_objective else test_rmse
+        # Optimise on the validation set — the sampler never sees test metrics
+        return (val_rmse, val_score) if multi_objective else val_rmse
 
     return objective
 
@@ -439,7 +454,7 @@ def best_params(study: optuna.Study) -> dict:
     """
     if len(study.directions) == 1:
         t = study.best_trial
-        logger.info("Best trial #%d | RMSE=%.4f | params=%s",
+        logger.info("Best trial #%d | val_RMSE=%.4f | params=%s",
                     t.number, t.value, t.params)
         return t.params
 
@@ -462,10 +477,73 @@ def best_params(study: optuna.Study) -> dict:
 
     chosen = min(pareto, key=_harmonic)
     logger.info(
-        "Best balanced trial #%d | RMSE=%.4f | Score=%.4f | params=%s",
+        "Best balanced trial #%d | val_RMSE=%.4f | val_Score=%.4f | params=%s",
         chosen.number, chosen.values[0], chosen.values[1], chosen.params,
     )
     return chosen.params
+
+
+def final_test_evaluation(
+    study: optuna.Study,
+    model_name: str,
+    subset: str,
+    *,
+    data_dir: str = "data/CMAPSSData",
+    max_epochs: Optional[int] = None,
+) -> dict:
+    """
+    Retrain the best hyperparameter configuration from scratch and evaluate
+    on the test set exactly once.
+
+    This is the only correct way to report test scores: call it once after
+    ``study.optimize()`` finishes. Never evaluate the test set inside the
+    objective — that inflates scores by letting the sampler indirectly peek
+    at test performance across many trials.
+
+    Args:
+        study:       A completed Optuna study.
+        model_name:  Registered model name (same as passed to run_search).
+        subset:      CMAPSS subset (e.g. "FD001").
+        data_dir:    Root directory of CMAPSS data files.
+        max_epochs:  Override epoch count (uses best trial value if None).
+
+    Returns:
+        dict with "test_rmse" and "test_score".
+    """
+    from optuna.trial import FixedTrial
+
+    params     = best_params(study)
+    builder    = _MODEL_REGISTRY[model_name]
+    input_size = CMAPSS_INPUT_SIZES[subset]
+
+    # FixedTrial routes every trial.suggest_* call back to the stored best
+    # values without touching the study.
+    net        = builder(FixedTrial(params), input_size, output_size=1)
+    seq_len    = params.get("sequence_len", 32)
+    lr         = params["lr"]
+    batch_size = params["batch_size"]
+    epochs     = max_epochs if max_epochs is not None else params["max_epochs"]
+
+    module = TransformerLstmModule(lr=lr, model=net)
+    train_dl, val_dl, test_dl = get_dataloaders(subset, batch_size, seq_len, data_dir)
+
+    trainer = pl.Trainer(
+        max_epochs=epochs,
+        accelerator="auto",
+        enable_progress_bar=True,
+        enable_model_summary=False,
+        logger=False,
+    )
+    trainer.fit(module, train_dl, val_dl)
+    results = trainer.test(module, test_dl, verbose=True)[0]
+
+    logger.info(
+        "Final test | subset=%s | test_RMSE=%.4f | test_Score=%.4f",
+        subset,
+        results.get("test_rmse", float("nan")),
+        results.get("test_score", float("nan")),
+    )
+    return results
 
 
 def summary_table(studies: Dict[str, optuna.Study]) -> None:
@@ -473,21 +551,26 @@ def summary_table(studies: Dict[str, optuna.Study]) -> None:
     Print a summary table of the best results per subset.
     Useful after run_all_subsets().
     """
-    header = f"{'Subset':<8} {'RMSE':>10} {'Score':>12} {'Trial':>7}"
+    header = f"{'Subset':<8} {'val_RMSE':>10} {'val_Score':>12} {'test_RMSE':>10} {'test_Score':>12} {'Trial':>7}"
     logger.info("\n" + "=" * len(header))
-    logger.info("SUMMARY")
+    logger.info("SUMMARY  (val = HPO objective  |  test = post-hoc, from final_test_evaluation)")
     logger.info(header)
     logger.info("-" * len(header))
     for subset, study in studies.items():
         if len(study.directions) > 1:
             params = best_params(study)
             t = next(t for t in study.best_trials if t.params == params)
-            rmse, score = t.values
+            val_rmse, val_score = t.values
         else:
             t = study.best_trial
-            rmse  = t.user_attrs.get("test_rmse", t.value)
-            score = t.user_attrs.get("test_score", float("nan"))
-        logger.info(f"{subset:<8} {rmse:>10.4f} {score:>12.4f} {t.number:>7d}")
+            val_rmse  = t.user_attrs.get("val_rmse",  t.value)
+            val_score = t.user_attrs.get("val_score", float("nan"))
+        test_rmse  = t.user_attrs.get("test_rmse",  float("nan"))
+        test_score = t.user_attrs.get("test_score", float("nan"))
+        logger.info(
+            f"{subset:<8} {val_rmse:>10.4f} {val_score:>12.4f}"
+            f" {test_rmse:>10.4f} {test_score:>12.4f} {t.number:>7d}"
+        )
     logger.info("=" * len(header))
 
 
@@ -519,8 +602,12 @@ def save_study_results(
     for t in completed:
         row = {"trial": t.number}
         row.update(t.params)
-        row["test_rmse"]  = t.user_attrs.get("test_rmse",  t.values[0] if t.values else float("nan"))
-        row["test_score"] = t.user_attrs.get("test_score", t.values[1] if t.values and len(t.values) > 1 else float("nan"))
+        # t.values holds the optimisation objectives (val metrics)
+        row["val_rmse"]   = t.user_attrs.get("val_rmse",  t.values[0] if t.values else float("nan"))
+        row["val_score"]  = t.user_attrs.get("val_score", t.values[1] if t.values and len(t.values) > 1 else float("nan"))
+        # test metrics are stored only as user_attrs, never used as objectives
+        row["test_rmse"]  = t.user_attrs.get("test_rmse",  float("nan"))
+        row["test_score"] = t.user_attrs.get("test_score", float("nan"))
         rows.append(row)
 
     trials_path = os.path.join(output_dir, f"{model_name}_{subset}_trials.csv")
@@ -555,11 +642,18 @@ def save_all_studies_results(
         try:
             params = best_params(study)
             t = next(t for t in study.best_trials if t.params == params)
-            rmse  = t.values[0]
-            score = t.values[1] if len(t.values) > 1 else t.user_attrs.get("test_score", float("nan"))
+            val_rmse  = t.values[0] if t.values else float("nan")
+            val_score = t.values[1] if t.values and len(t.values) > 1 else t.user_attrs.get("val_score", float("nan"))
         except (RuntimeError, StopIteration):
-            rmse = score = float("nan")
-        rows.append({"subset": subset, "test_rmse": rmse, "test_score": score})
+            val_rmse = val_score = float("nan")
+            t = None
+        test_rmse  = t.user_attrs.get("test_rmse",  float("nan")) if t is not None else float("nan")
+        test_score = t.user_attrs.get("test_score", float("nan")) if t is not None else float("nan")
+        rows.append({
+            "subset": subset,
+            "val_rmse": val_rmse, "val_score": val_score,
+            "test_rmse": test_rmse, "test_score": test_score,
+        })
 
     if rows:
         summary_path = os.path.join(output_dir, f"{model_name}_summary.csv")
@@ -578,13 +672,13 @@ def _log_results(study: optuna.Study, name: str, multi: bool) -> None:
         logger.info("Pareto front (%d trials):", len(study.best_trials))
         for t in study.best_trials:
             logger.info(
-                "  #%d  RMSE=%.4f  Score=%.4f  params=%s",
+                "  #%d  val_RMSE=%.4f  val_Score=%.4f  params=%s",
                 t.number, t.values[0], t.values[1], t.params,
             )
     else:
         bt = study.best_trial
         logger.info(
-            "Best trial #%d  RMSE=%.4f  params=%s",
+            "Best trial #%d  val_RMSE=%.4f  params=%s",
             bt.number, bt.value, bt.params,
         )
 
@@ -635,6 +729,17 @@ if __name__ == "__main__":
     if args.subset.lower() == "all":
         all_studies = run_all_subsets(args.model, **search_kwargs)
         summary_table(all_studies)
+        for subset, study in all_studies.items():
+            final_test_evaluation(
+                study, args.model, subset,
+                data_dir=args.data_dir,
+                max_epochs=args.max_epochs,
+            )
     else:
         s = run_search(args.model, args.subset, **search_kwargs)
         print("\nBest hyperparameters:", best_params(s))
+        final_test_evaluation(
+            s, args.model, args.subset,
+            data_dir=args.data_dir,
+            max_epochs=args.max_epochs,
+        )

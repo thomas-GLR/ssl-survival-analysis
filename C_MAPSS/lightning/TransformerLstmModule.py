@@ -26,8 +26,8 @@ class TransformerLstmModule(pl.LightningModule):
         self.save_hyperparameters(ignore=['model'])
         self.net = model
         self.lr = lr
-        self.validation_step_losses = []
-        self.validation_step_lengths = []
+        self.validation_step_outputs = []
+        self.validation_step_targets = []
         self.test_step_outputs = []
         self.test_step_targets = []
 
@@ -43,10 +43,9 @@ class TransformerLstmModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        x = self.net(x)
-        loss = F.mse_loss(x, y, reduction='sum')
-        self.validation_step_losses.append(loss)
-        self.validation_step_lengths.append(len(y))
+        preds = self.net(x)
+        self.validation_step_outputs.extend(preds.detach())
+        self.validation_step_targets.extend(y.detach())
 
     def test_step(self, batch, batch_idx, reduction='sum'):
         x, y = batch
@@ -74,15 +73,18 @@ class TransformerLstmModule(pl.LightningModule):
         self.log('test_score', score)
 
     def on_validation_epoch_end(self):
-        # Calculate the average loss
-        mse = torch.sum(torch.tensor(self.validation_step_losses)) / torch.sum(torch.tensor(self.validation_step_lengths))
-        rmse = torch.sqrt(mse)
-        # Clear the lists
-        self.validation_step_losses.clear()
-        self.validation_step_lengths.clear()
-        # Log the results
-        self.log('val_loss', mse, prog_bar=True)
+        outputs = torch.stack(self.validation_step_outputs)
+        targets = torch.stack(self.validation_step_targets)
+
+        rmse = mean_squared_error(outputs, targets, squared=False)
+        score = _cmapss_score(outputs.cpu().numpy().flatten(), targets.cpu().numpy().flatten())
+
+        self.validation_step_outputs.clear()
+        self.validation_step_targets.clear()
+
+        self.log('val_loss', rmse ** 2, prog_bar=True)
         self.log('val_rmse', rmse)
+        self.log('val_score', score)
 
 
     def configure_optimizers(self):
