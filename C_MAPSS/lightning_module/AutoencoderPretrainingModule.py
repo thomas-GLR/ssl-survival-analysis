@@ -1,6 +1,6 @@
 import torch
 
-from C_MAPSS.lightning.UnsupervisedPretrainingModule import UnsupervisedPretrainingModule
+from C_MAPSS.lightning_module.UnsupervisedPretrainingModule import UnsupervisedPretrainingModule
 from models.self_supervised.base.Decoder import Decoder
 
 

@@ -36,8 +36,9 @@ from typing import Callable, Dict, Optional, Tuple
 import pandas as pd
 
 import optuna
+from lightning import Trainer
 
-from C_MAPSS.lightning.TransformerLstmModule import TransformerLstmModule
+from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
 
 # optuna-integration >= 3.0 ships as a separate package
 # try:
@@ -45,7 +46,6 @@ from C_MAPSS.lightning.TransformerLstmModule import TransformerLstmModule
 # except ImportError:
 from optuna_integration.pytorch_lightning import PyTorchLightningPruningCallback
 
-import pytorch_lightning as pl
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
@@ -215,7 +215,7 @@ def get_dataloaders(
 # Objective function (closure)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _metric_from_trainer(trainer: pl.Trainer, key: str) -> float:
+def _metric_from_trainer(trainer: Trainer, key: str) -> float:
     """Safely extract a scalar metric logged by the Lightning module after fit."""
     val = trainer.callback_metrics.get(key, float("inf"))
     return val.item() if hasattr(val, "item") else float(val)
@@ -276,7 +276,7 @@ def _make_objective(
             )
 
         # ── Trainer ───────────────────────────────────────────────────────
-        trainer = pl.Trainer(
+        trainer = Trainer(
             max_epochs=epochs,
             accelerator="auto",
             enable_progress_bar=False,
@@ -527,7 +527,7 @@ def final_test_evaluation(
     module = TransformerLstmModule(lr=lr, model=net)
     train_dl, val_dl, test_dl = get_dataloaders(subset, batch_size, seq_len, data_dir)
 
-    trainer = pl.Trainer(
+    trainer = Trainer(
         max_epochs=epochs,
         accelerator="auto",
         enable_progress_bar=True,

@@ -1,13 +1,13 @@
-import pytorch_lightning as pl
 import torch
+from lightning import LightningModule
 
-from C_MAPSS.lightning import metrics
-from C_MAPSS.lightning.mixins import LoadEncoderMixin, DataHparamsMixin
+from C_MAPSS.lightning_module import metrics
+from C_MAPSS.lightning_module.mixins import LoadEncoderMixin, DataHparamsMixin
 from models.self_supervised.base.BaselineRegressor import BaselineRegressor
 from models.self_supervised.base.Encoder import Encoder
 
 
-class BaselineModule(pl.LightningModule, LoadEncoderMixin, DataHparamsMixin):
+class BaselineModule(LightningModule, LoadEncoderMixin, DataHparamsMixin):
     def __init__(
             self,
             in_channels: int,

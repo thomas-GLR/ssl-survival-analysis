@@ -1,14 +1,14 @@
 from abc import abstractmethod, ABC
 
-import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+from lightning import LightningModule
 
-from C_MAPSS.lightning import metrics
+from C_MAPSS.lightning_module import metrics
 from models.self_supervised.base.Encoder import Encoder
 
 
-class UnsupervisedPretrainingModule(pl.LightningModule, ABC):
+class UnsupervisedPretrainingModule(LightningModule, ABC):
     def __init__(
         self,
         in_channels,

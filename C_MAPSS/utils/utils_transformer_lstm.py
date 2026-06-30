@@ -3,13 +3,14 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import pytorch_lightning as pl
 import torch
+from lightning import Trainer, LightningModule
+from lightning.pytorch import callbacks
 from torch.serialization import add_safe_globals
 from torch.utils.data import DataLoader
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
-from C_MAPSS.lightning.TransformerLstmModule import TransformerLstmModule
+from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
 from C_MAPSS.models.Simple_LSTM import Simple_LSTM
 from C_MAPSS.models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
 from C_MAPSS.utils import utils_cmapss
@@ -157,7 +158,7 @@ def train_model(
         model=model
     )
 
-    early_stop_callback = pl.callbacks.early_stopping.EarlyStopping(
+    early_stop_callback = callbacks.early_stopping.EarlyStopping(
         monitor='val_loss',
         min_delta=0.00,
         patience=patience,
@@ -165,7 +166,7 @@ def train_model(
         mode='min'
     )
 
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+    checkpoint_callback = callbacks.ModelCheckpoint(
         dirpath=checkpoints_path,
         monitor='val_loss',
         filename='checkpoint-{epoch:02d}-{val_rmse:.4f}',
@@ -173,7 +174,7 @@ def train_model(
         mode='min',
     )
 
-    trainer = pl.Trainer(
+    trainer = Trainer(
         default_root_dir=checkpoints_path,
         accelerator=device,
         max_epochs=max_epochs,
@@ -231,7 +232,7 @@ def train_model(
 def _generate_and_save_model_prediction(
         loader: DataLoader,
         device: str,
-        module: pl.LightningModule,
+        module: LightningModule,
         model_version: str,
         prediction_type: str,
         results_path: str,

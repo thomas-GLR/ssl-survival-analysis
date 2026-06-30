@@ -3,14 +3,15 @@ from datetime import datetime
 from typing import Optional
 
 import numpy as np
-import pytorch_lightning as pl
 import torch
+from lightning import Trainer, LightningModule
+from lightning.pytorch import callbacks
 from torch.utils.data import DataLoader
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
-from C_MAPSS.lightning.AutoencoderPretrainingModule import AutoencoderPretrainingModule
-from C_MAPSS.lightning.BaselineModule import BaselineModule
-from C_MAPSS.lightning.MetricPretrainingModule import MetricPretrainingModule
+from C_MAPSS.lightning_module.AutoencoderPretrainingModule import AutoencoderPretrainingModule
+from C_MAPSS.lightning_module.BaselineModule import BaselineModule
+from C_MAPSS.lightning_module.MetricPretrainingModule import MetricPretrainingModule
 from dataset.SiamesedDataset import SiameseDataset
 from C_MAPSS.utils import utils_cmapss
 
@@ -256,8 +257,8 @@ def build_trainer(
         device: str,
         max_epochs: int,
         patience: int
-) -> pl.Trainer:
-    early_stop_callback = pl.callbacks.early_stopping.EarlyStopping(
+) -> Trainer:
+    early_stop_callback = callbacks.early_stopping.EarlyStopping(
         monitor='val/regression_loss',
         min_delta=0.00,
         patience=patience,
@@ -265,7 +266,7 @@ def build_trainer(
         mode='min'
     )
 
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+    checkpoint_callback = callbacks.ModelCheckpoint(
         dirpath=checkpoints_path,
         monitor='val/regression_loss',
         filename='checkpoint-{epoch:02d}-{val_regression_loss:.4f}',
@@ -273,7 +274,7 @@ def build_trainer(
         mode='min',
     )
 
-    return pl.Trainer(
+    return Trainer(
         default_root_dir=checkpoints_path,
         accelerator=device,
         max_epochs=max_epochs,
@@ -345,7 +346,7 @@ def build_baseline(
         lr: float,
         max_epochs: int,
         patience: int,
-) -> tuple[pl.Trainer, pl.LightningModule]:
+) -> tuple[Trainer, LightningModule]:
     trainer = build_trainer(
         checkpoints_path=checkpoints_path,
         device=device,
