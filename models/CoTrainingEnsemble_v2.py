@@ -23,17 +23,22 @@ class CoTrainingEnsemble_v2:
     def __init__(
             self,
             models: list[nn.Module],
+            weights: list[float] | None = None,
     ):
         """
         :param models: list[nn.Module]
             The models that will be used in the co-training ensemble.
         """
+        if weights is not None and len(models) != len(weights):
+            raise ValueError("The number of weights must be the same as the number of models.")
+
         self.models = models
         self.number_of_models = len(self.models)
         self.lightning_modules = None
         self.trainer_factories = None
         self.batchs_size = None
         self.shuffle_dataloaders = None
+        self.weights = weights
 
     def setup_training(
             self,
@@ -66,7 +71,8 @@ class CoTrainingEnsemble_v2:
                 len(trainer_factories) != len(self.models) or
                 len(shuffle_dataloaders) != len(self.models) or
                 len(batchs_size) != len(self.models)):
-            raise ValueError("The number of lightning modules and trainers must be the same as the number of models.")
+            raise ValueError(
+                f"The number of lightning modules (size={len(lightning_modules)}), trainers (size={len(trainer_factories)}), shuffle_dataloaders (size={len(shuffle_dataloaders)}), batchs_size (size={len(batchs_size)}) must be the same as the number of models.")
 
         self.lightning_modules = lightning_modules
         self.trainer_factories = trainer_factories
@@ -119,7 +125,7 @@ class CoTrainingEnsemble_v2:
         self._check_if_training_is_possible()
 
         models_datasets = []
-        h = []
+        h: list[LightningModule] = []
 
         for j in range(self.number_of_models):
             x_i, y_i = failure_data, failure_label
@@ -224,7 +230,7 @@ class CoTrainingEnsemble_v2:
 
                     remaining_suspension_ids = remaining_suspension_ids[
                         remaining_suspension_ids != censored_data_selected[k][0]
-                    ]
+                        ]
 
             if all(x is None for x in censored_data_selected):
                 break
@@ -255,6 +261,36 @@ class CoTrainingEnsemble_v2:
                             x=xj,
                             y=yj,
                         )
+
+        self.lightning_modules = h
+
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Ensemble prediction: L^P = w1*h1(x) + w2*h2(x) + ...
+
+        :param x: Shape (N, *feature_dims) for multiple samples, or (*feature_dims,) for a single sample.
+
+        :return Tensor of shape (N, *output_dims) for multiple samples, or (*output_dims,) for a single sample.
+        """
+        if self.weights is None:
+            raise ValueError(
+                "Weights are not provided. Provide them when instanciate the class or train the ensemble first.")
+
+        single_sample = x.dim() == 1
+        if single_sample:
+            x = x.unsqueeze(0)
+
+        weighted_preds = []
+        for j, model in enumerate(self.lightning_modules):
+            pred = self._predict(model, x)  # shape (N, *output_dims)
+            weighted_preds.append(pred * self.weights[j])
+
+        result = torch.stack(weighted_preds, dim=0).sum(dim=0)  # shape (N, *output_dims)
+
+        if single_sample:
+            result = result.squeeze(0)
+
+        return result
 
     def _train_fun(
             self,
@@ -441,3 +477,44 @@ class CoTrainingEnsemble_v2:
                 or self.batchs_size is None
                 or self.shuffle_dataloaders is None):
             raise ValueError("You need to call setup_training before calling train.")
+
+    def calculate_weights(
+            self,
+            x_test: torch.Tensor,
+            target: torch.Tensor,
+            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            mode: str,
+    ):
+        """
+
+        Args:
+            x_test:
+            target:
+            criteria_callback:
+            mode: value can be "min" or "max".
+                "min" mean that more the score is little more the model is good.
+                "max" mean that more the score is high more the model is good.
+
+        Returns:
+
+        """
+        if mode not in ["min", "max"]:
+            raise ValueError("Mode must be either 'min' or 'max'.")
+
+        scores = []
+        for model in self.lightning_modules:
+            pred = self._predict(model, x_test)
+            scores.append(criteria_callback(pred, target))
+
+        if mode == "min":
+            if any(s == 0 for s in scores):
+                raise ValueError(
+                    "At least one model has a score of zero in 'min' mode, inverse weighting is undefined.")
+            inv_scores = [1.0 / s for s in scores]
+            total = sum(inv_scores)
+            self.weights = [inv_s / total for inv_s in inv_scores]
+        else:
+            total = sum(scores)
+            if total == 0:
+                raise ValueError(f"The sum of scores from all models is zero, cannot calculate weights : {scores}")
+            self.weights = [s / total for s in scores]
