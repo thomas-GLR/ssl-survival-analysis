@@ -43,6 +43,7 @@ RUN mkdir -p /workspace/data/CMAPSSData /workspace/outputs /workspace/checkpoint
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 COPY docker/hpo_entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Strip Windows CRLF (\r\n → \n) so the shebang is valid on Linux
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

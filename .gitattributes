@@ -1,0 +1,4 @@
+# Shell scripts must use LF so the shebang line is valid inside Linux containers.
+# Without this, Windows Git (core.autocrlf=true) checks out .sh files with CRLF,
+# causing "exec /entrypoint.sh: no such file or directory" at container startup.
+*.sh text eol=lf

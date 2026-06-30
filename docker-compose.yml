@@ -37,9 +37,9 @@ services:
       # e.g.  MODEL=cnn1d docker compose --profile hpo up
 
       # ── Paths inside the container (fixed — host side is controlled by volumes) ──
-      DATA_DIR:        /data/CMAPSSData
-      OUTPUT_DIR:      /outputs
-      CHECKPOINT_DIR:  /checkpoints
+      DATA_DIR:        /workspace/data/CMAPSSData
+      OUTPUT_DIR:      /workspace/outputs
+      CHECKPOINT_DIR:  /workspace/checkpoints
 
       # ── Optional: explicit Optuna storage URL ─────────────────────────────
       # Uncomment to use a PostgreSQL DB instead of SQLite (required for n_jobs > 1)
@@ -53,9 +53,9 @@ services:
       #   OUTPUT_DIR_HOST=/runpod-volume/outputs
       #   CHECKPOINT_DIR_HOST=/runpod-volume/checkpoints
 
-      - ${DATA_DIR_HOST:-./data/CMAPSSData}:/data/CMAPSSData:ro   # read-only input
-      - ${OUTPUT_DIR_HOST:-./outputs}:/outputs                     # Optuna DB + results
-      - ${CHECKPOINT_DIR_HOST:-./checkpoints}:/checkpoints         # Lightning checkpoints
+      - ${DATA_DIR_HOST:-./data/CMAPSSData}:/workspace/data/CMAPSSData:ro   # read-only input
+      - ${OUTPUT_DIR_HOST:-./outputs}:/workspace/outputs                     # Optuna DB + results
+      - ${CHECKPOINT_DIR_HOST:-./checkpoints}:/workspace/checkpoints         # Lightning checkpoints
 
     # Restart policy — useful for long RunPod runs that may get preempted
     restart: "no"                     # change to "on-failure" if needed

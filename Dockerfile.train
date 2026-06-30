@@ -42,7 +42,8 @@ ENV PYTHONPATH=/app
 RUN mkdir -p /data/CMAPSSData /outputs /checkpoints
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
-COPY docker/hpo_entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY docker/train_entrypoint.sh /entrypoint.sh
+# Strip Windows CRLF (\r\n → \n) so the shebang is valid on Linux
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
