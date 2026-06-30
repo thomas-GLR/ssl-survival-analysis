@@ -1,4 +1,5 @@
 import copy
+from collections import OrderedDict
 from typing import Callable
 
 import numpy as np
@@ -150,85 +151,89 @@ class CoTrainingEnsemble_v2:
             shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
             pool_ids = shuffled_ids[:pool_size]  # U'
 
-            pi: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [None for _ in
-                                                                                range(self.number_of_models)]
-            delta_optimals: list[float | None] = [None for _ in range(self.number_of_models)]
-            censored_data_selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [None for _ in range(
-                self.number_of_models)]
+            # Phase 1 — for each model j, predict pseudo-labels and compute delta for every
+            # unit in the pool. Results are stored in an OrderedDict (sorted by delta desc)
+            # so the best candidate is always first.
+            # Structure: all_preds[j] = OrderedDict{ unit_id_int -> (unit_id, xu, lu_p, delta) }
+            all_preds: dict[int, OrderedDict] = {}
+
+            for j in range(self.number_of_models):
+                hj = h[j]
+                xj, yj = models_datasets[j]
+                candidates = []
+
+                for unit_id in pool_ids:
+                    mask = (suspension_ids == unit_id)
+                    xu = suspension_data[mask]
+
+                    lu_p = self._predict(hj, xu)
+
+                    x_augmented = torch.cat([xj, xu], dim=0)
+                    lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
+                    y_augmented = torch.cat([yj, lu_p_reshaped], dim=0)
+
+                    if is_fine_tuning_during_finding_best_suspension_data:
+                        hj_prime = self._fine_tune_fun(
+                            model=copy.deepcopy(hj),
+                            model_index=j,
+                            x=x_augmented,
+                            y=y_augmented,
+                        )
+                    else:
+                        hj_prime = self._train_fun(
+                            model=copy.deepcopy(self.lightning_modules[j]),
+                            model_index=j,
+                            x=x_augmented,
+                            y=y_augmented,
+                        )
+
+                    delta = self._confidence_measure(xj, yj, hj, hj_prime)
+                    candidates.append((unit_id, xu, lu_p, delta))
+
+                candidates.sort(key=lambda e: e[3], reverse=True)
+                all_preds[j] = OrderedDict(
+                    (uid.item(), (uid, xu, lu_p, delta))
+                    for uid, xu, lu_p, delta in candidates
+                )
+
+            # Phase 2 — for each model k, pick the best available candidate using the
+            # selection mode. When a candidate is chosen it is removed from every model's
+            # map so no other model k can reuse the same suspension unit.
+            pi, delta_optimals = self._build_pi_delta_from_preds(all_preds)
+            censored_data_selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [
+                None for _ in range(self.number_of_models)
+            ]
 
             for k in range(self.number_of_models):
-                for j in range(self.number_of_models):
-                    hj = h[j]
-                    xj, yj = models_datasets[j]
+                if not any(x is not None for x in delta_optimals):
+                    break
 
-                    best_delta = 0.0
-                    best_unit_id: torch.Tensor | None = None
-                    best_xu: torch.Tensor | None = None
-                    best_label: torch.Tensor | None = None
+                match selection_mode:
+                    case SelectionMode.VOTING:
+                        censored_data_selected[k] = self._voting_censored_data_selection(
+                            delta_optimals=list(delta_optimals),
+                            delta_optimal_index_to_exclude=k,
+                            pi=list(pi),
+                        )
+                    case SelectionMode.EVIDENCE:
+                        censored_data_selected[k] = self._evidential_censored_data_selection()
+                    case _:
+                        raise ValueError(f"Unknown selection mode: {selection_mode.name}")
 
-                    if k != j and pi[j] is None:
-                        for unit_id in pool_ids:
-                            # Extract all sequences for this specific unit
-                            mask = (suspension_ids == unit_id)
-                            xu = suspension_data[mask]  # Shape: (N_u, *dims)
+                if censored_data_selected[k] is not None:
+                    selected_id = censored_data_selected[k][0].item()
 
-                            lu_p = self._predict(hj, xu)
+                    # Remove the selected unit from every model's candidate map so it
+                    # cannot be assigned to another model in this iteration.
+                    for j in range(self.number_of_models):
+                        all_preds[j].pop(selected_id, None)
 
-                            x_augmented = torch.cat([xj, xu], dim=0)
-                            lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
-                            y_augmented = torch.cat([yj, lu_p_reshaped], dim=0)
+                    # Rebuild pi / delta_optimals from what remains.
+                    pi, delta_optimals = self._build_pi_delta_from_preds(all_preds)
 
-                            if is_fine_tuning_during_finding_best_suspension_data:
-                                hj_prime = self._fine_tune_fun(
-                                    model=copy.deepcopy(hj),
-                                    model_index=j,
-                                    x=x_augmented,
-                                    y=y_augmented,
-                                )
-                            else:
-                                hj_prime = self._train_fun(
-                                    model=copy.deepcopy(self.lightning_modules[j]),
-                                    model_index=j,
-                                    x=x_augmented,
-                                    y=y_augmented,
-                                )
-
-                            delta = self._confidence_measure(xj, yj, hj, hj_prime)
-
-                            if delta > best_delta:
-                                best_delta = delta
-                                best_unit_id = unit_id
-                                best_xu = xu
-                                best_label = lu_p
-
-                        if best_unit_id is not None and best_delta > 0:
-                            # Line 12 – X*_j = argmax Δ;  L*_j = h_j(X*_j)
-                            # Line 13 – π_j = {(X*_j, L*_j)};  U' = U' \ π_j
-                            pi[j] = (best_unit_id, best_xu, best_label)
-                            delta_optimals[j] = best_delta
-                        else:
-                            pi[j] = None  # Line 15
-                            delta_optimals[j] = None
-
-                if any(x is not None for x in delta_optimals):
-                    match selection_mode:
-                        case SelectionMode.VOTING:
-                            censored_data_selected[k] = self._voting_censored_data_selection(
-                                delta_optimals=delta_optimals,
-                                delta_optimal_index_to_exclude=k,
-                                pi=pi,
-                            )
-                        case SelectionMode.EVIDENCE:
-                            censored_data_selected[k] = self._evidential_censored_data_selection(
-
-                            )
-                        case _:
-                            raise ValueError(f"Unknown selection mode: {selection_mode.name}")
-
-                    if censored_data_selected[k] is not None:
-                        selected_id = censored_data_selected[k][0].item()
-
-                        remaining_suspension_ids = remaining_suspension_ids[remaining_suspension_ids != selected_id]
+                    remaining_suspension_ids = remaining_suspension_ids[
+                        remaining_suspension_ids != censored_data_selected[k][0]
+                    ]
 
             if all(x is None for x in censored_data_selected):
                 break
@@ -259,6 +264,38 @@ class CoTrainingEnsemble_v2:
                             x=xj,
                             y=yj,
                         )
+
+    def _build_pi_delta_from_preds(
+            self,
+            all_preds: dict[int, OrderedDict],
+    ) -> tuple[list, list]:
+        r"""Build pi and delta_optimals from the precomputed candidate maps.
+
+        For each model j the best available candidate (highest delta > 0) is the
+        first entry of its OrderedDict, since the dict is kept sorted descending
+        by delta.
+
+        Args:
+            all_preds: mapping from model index to an OrderedDict of
+                ``{unit_id_int: (unit_id_tensor, xu, lu_p, delta)}``.
+
+        Returns:
+            pi: list of ``(unit_id, xu, lu_p)`` or ``None`` per model.
+            delta_optimals: list of ``float`` or ``None`` per model.
+        """
+        pi: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [
+            None for _ in range(self.number_of_models)
+        ]
+        delta_optimals: list[float | None] = [None for _ in range(self.number_of_models)]
+
+        for j, candidates in all_preds.items():
+            for uid_int, (unit_id, xu, lu_p, delta) in candidates.items():
+                if delta > 0:
+                    pi[j] = (unit_id, xu, lu_p)
+                    delta_optimals[j] = delta
+                    break  # OrderedDict is sorted desc, so first positive is the best
+
+        return pi, delta_optimals
 
     def _train_fun(
             self,
