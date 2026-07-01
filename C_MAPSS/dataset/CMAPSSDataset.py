@@ -370,6 +370,12 @@ class CMAPSSDataset(Dataset):
         norm_cols = self.feature_cols
         norm_type = self.norm_type
         norm_by_operations = self.norm_by_operations
+        # Some CMAPSS sensor columns (e.g. s18/s19 on FD002/FD004) are read as
+        # int64 since every raw value happens to be a whole number. Normalized
+        # values are always floats, so cast up front instead of triggering
+        # pandas' "incompatible dtype" FutureWarning on every assignment below
+        # (silent upcast today, a hard error in pandas 3.x).
+        df[norm_cols] = df[norm_cols].astype(np.float64)
         if self.norm_params is None:
             self.norm_params = self._gen_norm_params(norm_type, norm_by_operations)
         norm_params = self.norm_params
