@@ -73,9 +73,12 @@ def reproduce_result(
         secure_save_for_sub_dataset_rows = []
 
         for censored_percentage in censored_percentages:
-            secure_save_for_censored_percentage_rows = []
+            # secure_save_for_censored_percentage_rows = []
 
-            for broken_percentage in broken_percentages:
+            # We don't wan't to iterate for no reason when censored == 0.0
+            broken_percentages_tmp = [0.0] if censored_percentage == 0.0 else broken_percentages
+
+            for broken_percentage in broken_percentages_tmp:
                 print(
                     f"Training model {model_version.value} for the sub dataset : {sub_dataset}, censored percentage : {censored_percentage} and broken percentage : {broken_percentage}")
 
@@ -115,17 +118,17 @@ def reproduce_result(
                 }
 
                 rows.append(new_dataframe_row)
-                secure_save_for_censored_percentage_rows.append(new_dataframe_row)
+                # secure_save_for_censored_percentage_rows.append(new_dataframe_row)
                 secure_save_for_sub_dataset_rows.append(new_dataframe_row)
 
-            secure_save_for_censored_percentage = pd.DataFrame(secure_save_for_censored_percentage_rows,
-                                                               columns=columns)
+            # secure_save_for_censored_percentage = pd.DataFrame(secure_save_for_censored_percentage_rows,
+            #                                                    columns=columns)
 
-            print(
-                f"Saving intermediate result for sub dataset {sub_dataset} and censored percentage : {censored_percentage}...")
-            secure_save_for_censored_percentage.to_csv(
-                f"{results_path}/secure_{sub_dataset}_censored_{censored_percentage:.2f}_{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
-                index=False)
+            # print(
+            #     f"Saving intermediate result for sub dataset {sub_dataset} and censored percentage : {censored_percentage}...")
+            # secure_save_for_censored_percentage.to_csv(
+            #     f"{results_path}/secure_{sub_dataset}_censored_{censored_percentage:.2f}_{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
+            #     index=False)
 
         secure_save_for_sub_dataset = pd.DataFrame(secure_save_for_sub_dataset_rows, columns=columns)
 

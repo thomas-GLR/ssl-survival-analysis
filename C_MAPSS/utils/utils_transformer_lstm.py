@@ -126,7 +126,7 @@ def train_model(
     feature_num = len(train_dataset.feature_cols)
 
     # As the models can only handle supervised learning we need to filtered censored data
-    train_loader = train_dataset.get_data_loader_without_censored_data(batch_size=batch_size)
+    train_loader = train_dataset.get_data_loader_without_censored_data(batch_size=batch_size, shuffle=True)
     test_loader = test_dataset.get_data_loader_without_censored_data(batch_size=batch_size)
     valid_loader = valid_dataset.get_data_loader_without_censored_data(
         batch_size=batch_size) if valid_dataset is not None else None
