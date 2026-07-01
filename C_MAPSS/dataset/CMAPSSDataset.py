@@ -323,8 +323,8 @@ class CMAPSSDataset(Dataset):
             'real_rul': rul_array
         })
         df = pd.merge(df, rul_df)
-        df['real_rul'] = df.apply(lambda x: x['rul'] - x['time'], axis=1)
-        df['rul'] = df.apply(lambda x: max_rul if max_rul < x['real_rul'] else x['real_rul'], axis=1)
+        df['real_rul'] = df['rul'] - df['time']
+        df['rul'] = np.minimum(max_rul, df['real_rul'])
 
         # For the censored data we can't calculate the RUL as we don't know when the event occurs
         df.loc[df['is_censored'] == 1, ['rul', 'real_rul']] = np.nan
@@ -384,54 +384,58 @@ class CMAPSSDataset(Dataset):
         self.has_normalization = True
 
     def _min_max_normalization(self, cols, norm_params, min_norm, max_norm):
+        # Vectorised over all columns (and, in the 3D case, computes the op_type
+        # mask once per operation instead of once per column). The previous
+        # implementation recomputed `df['op_type'] == op` for every single
+        # column (n_ops * n_cols boolean scans over the whole DataFrame),
+        # which dominated dataset-build time on FD002/FD004.
         df = self.df
 
         if len(norm_params.shape) == 2:
-            for col_i, col in enumerate(cols):
-                min_v, max_v = norm_params[col_i]
-                if max_v == min_v:
-                    df[col] = (min_norm + max_norm) / 2  # median
-                else:
-                    df[col] = (((max_norm - min_norm) * (df[col].values - min_v)) / (max_v - min_v)) + min_norm
+            min_v = norm_params[:, 0]
+            max_v = norm_params[:, 1]
+            denom = max_v - min_v
+            constant_cols = denom == 0
+            denom_safe = np.where(constant_cols, 1.0, denom)
+            scaled = (((max_norm - min_norm) * (df[cols].to_numpy() - min_v)) / denom_safe) + min_norm
+            scaled[:, constant_cols] = (min_norm + max_norm) / 2  # median
+            df[cols] = scaled
         elif len(norm_params.shape) == 3:
             op_list = df['op_type'].unique()
             op_list.sort()
             for op_i, op in enumerate(op_list):
-                for col_i, col in enumerate(cols):
-                    min_v, max_v = norm_params[op_i, col_i]
-                    if max_v == min_v:
-                        df.loc[df['op_type'] == op, col] = (min_norm + max_norm) / 2  # median
-                    else:
-                        values = df[df['op_type'] == op][col].values
-                        df.loc[df['op_type'] == op, col] = (((max_norm - min_norm) * (values - min_v)) / (
-                                max_v - min_v)) + min_norm
-
+                mask = (df['op_type'] == op).to_numpy()
+                min_v = norm_params[op_i, :, 0]
+                max_v = norm_params[op_i, :, 1]
+                denom = max_v - min_v
+                constant_cols = denom == 0
+                denom_safe = np.where(constant_cols, 1.0, denom)
+                scaled = (((max_norm - min_norm) * (df.loc[mask, cols].to_numpy() - min_v)) / denom_safe) + min_norm
+                scaled[:, constant_cols] = (min_norm + max_norm) / 2  # median
+                df.loc[mask, cols] = scaled
         else:
             raise ValueError('norm_params shape error')
         return df
 
     def _z_score_normalization(self, cols, norm_params):
+        # See _min_max_normalization: vectorised over all columns, op_type mask
+        # computed once per operation instead of once per column.
         df = self.df
 
         if len(norm_params.shape) == 2:
-            for col_i, col in enumerate(cols):
-                mean, standard = norm_params[col_i]
-                values = df[col].values
-                values = values - mean
-                if standard != 0:
-                    values = values / standard
-                df[col] = values
+            mean = norm_params[:, 0]
+            standard = norm_params[:, 1]
+            standard_safe = np.where(standard == 0, 1.0, standard)
+            df[cols] = (df[cols].to_numpy() - mean) / standard_safe
         elif len(norm_params.shape) == 3:
             op_list = df['op_type'].unique()
             op_list.sort()
             for op_i, op in enumerate(op_list):
-                for col_i, col in enumerate(cols):
-                    mean, standard = norm_params[op_i, col_i]
-                    values = df[df['op_type'] == op][col].values
-                    values = (values - mean)
-                    if standard != 0:
-                        values = values / standard
-                    df.loc[df['op_type'] == op, col] = values
+                mask = (df['op_type'] == op).to_numpy()
+                mean = norm_params[op_i, :, 0]
+                standard = norm_params[op_i, :, 1]
+                standard_safe = np.where(standard == 0, 1.0, standard)
+                df.loc[mask, cols] = (df.loc[mask, cols].to_numpy() - mean) / standard_safe
         else:
             raise ValueError('norm_params shape error')
         return df

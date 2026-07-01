@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from functools import lru_cache
 from typing import Callable, Dict, Optional, Tuple
 
 import pandas as pd
@@ -169,19 +170,22 @@ CMAPSS_INPUT_SIZES: Dict[str, int] = {
 }
 
 
-def get_dataloaders(
-    subset: str,
-    batch_size: int,
-    sequence_len: int,
-    data_dir: str,
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
+@lru_cache(maxsize=None)
+def _build_datasets_cached(subset: str, sequence_len: int, data_dir: str):
     """
-    Build train / val / test DataLoaders for a CMAPSS subset.
-    *** Replace this function body with your own dataset logic. ***
+    Build (train, test, valid) CMAPSSDataset objects for a (subset, sequence_len)
+    pair, cached across trials.
+
+    Everything these datasets depend on (seed, normalization, clustering, RUL,
+    windowing) is fixed except `subset` and `sequence_len` — batch_size only
+    affects the DataLoader built on top, not the dataset itself. Without this
+    cache, an HPO run rebuilds the full dataset (parsing + KMeans + normalization
+    + windowing) from scratch on every single trial, which dominates wall-clock
+    time for FD002/FD004 (measured ~5.6s/build vs ~1.3s for FD001).
     """
     from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 
-    train_dataset, test_dataset, valid_dataset = CMAPSSLoader.get_datasets(
+    return CMAPSSLoader.get_datasets(
         dataset_root=data_dir,
         sub_dataset=subset,
         sequence_len=sequence_len,
@@ -200,6 +204,21 @@ def get_dataloaders(
         use_max_rul_on_valid=True,
         percent_of_broken_data=None,
         percent_of_censored_data=0.,
+    )
+
+
+def get_dataloaders(
+    subset: str,
+    batch_size: int,
+    sequence_len: int,
+    data_dir: str,
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Build train / val / test DataLoaders for a CMAPSS subset.
+    *** Replace this function body with your own dataset logic. ***
+    """
+    train_dataset, test_dataset, valid_dataset = _build_datasets_cached(
+        subset, sequence_len, data_dir
     )
 
     # num_workers=0: the underlying dataset is a TensorDataset already fully
