@@ -51,6 +51,7 @@ def train_self_supervised(
         max_epochs: int = 100,
         patience: int = 50,
         batch_size_pretraining: int = 64,
+        min_distance: int = 1,
 
         # Baseline parameters
         latent_dim_baseline=64,
@@ -118,7 +119,8 @@ def train_self_supervised(
         percent_of_broken_data=percent_of_broken_data,
         percent_of_censored_data=percent_of_censored_data,
         batch_size=batch_size_pretraining,
-        seed=seed
+        seed=seed,
+        min_distance=min_distance,
     )
 
     baseline_dataset_params = {
@@ -305,6 +307,7 @@ def get_pair_loader_for_pretraining(
         use_max_rul_on_valid: bool,
         validation_rate: float,
         batch_size: int,
+        min_distance: int,
 ) -> tuple[DataLoader, DataLoader]:
     return SiameseDataset.from_cmapss(
         dataset_root=dataset_root,
@@ -313,7 +316,7 @@ def get_pair_loader_for_pretraining(
         seed=seed,
         num_samples=25000,
         max_rul=max_rul,
-        min_distance=1,
+        min_distance=min_distance,
         percent_of_broken_data=percent_of_broken_data,
         percent_of_censored_data=percent_of_censored_data,
         use_only_final_on_test=use_only_final_on_test,

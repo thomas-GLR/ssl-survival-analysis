@@ -1,4 +1,5 @@
 import copy
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -27,18 +28,12 @@ class Coprog:
     :param batch_size: Mini-batch size for TrainFun (default 32).
     :param device: torch.device to run on (default: cuda if available, else cpu).
     :param shuffle_dataloader: if set to True it will shuffle the data during the training otherwise no. Default = False
-    :param verbose: the print level :
-        - 0 mean no print
-        - 1 mean print information on the training process
-        - 2 mean debugging the training process
     """
 
     def __init__(
             self,
             first_model: nn.Module,
             second_model: nn.Module,
-            w1: float = 0.5,
-            w2: float = 0.5,
             lr_first_model: float = 1e-3,
             lr_second_model: float = 1e-3,
             epochs_first_model: int = 20,
@@ -56,8 +51,8 @@ class Coprog:
         self.first_model = first_model.to(self.device)
         self.second_model = second_model.to(self.device)
 
-        self.w1 = w1
-        self.w2 = w2
+        self.w1 = None
+        self.w2 = None
 
         self.lr_first_model = lr_first_model
         self.lr_second_model = lr_second_model
@@ -72,6 +67,10 @@ class Coprog:
         # Trained models (set after calling .train())
         self._h1: nn.Module | None = self.first_model if first_and_second_model_already_trained else None
         self._h2: nn.Module | None = self.second_model if first_and_second_model_already_trained else None
+
+    def _log(self, level: int, message: str) -> None:
+        if self.verbose >= level:
+            print(message)
 
     def train(
             self,
@@ -96,14 +95,17 @@ class Coprog:
         suspension_data = suspension_data.to(self.device)
         suspension_ids = suspension_ids.to(self.device)
 
+        total_suspension_units = len(torch.unique(suspension_ids))
+        self._log(1, f"[Coprog] Starting training | failure samples: {len(failure_data)} | "
+                     f"censored units: {total_suspension_units} | "
+                     f"max iterations: {iterations} | pool size: {suspension_pool_size}")
+
         # Line 1 – L1 = L2 = L  (we split L into two views)
         x1, y1 = failure_data, failure_label
         x2, y2 = failure_data, failure_label
 
-        if self.verbose > 0:
-            print("Training first and second model with labeled data...")
-
         # Line 2 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
+        self._log(1, f"[Coprog] Initial training of h1 on {len(x1)} failure samples...")
         h1 = self._train_fun(
             copy.deepcopy(self.first_model),
             x1,
@@ -113,6 +115,7 @@ class Coprog:
             self.epochs_first_model,
             "h1",
         )
+        self._log(1, f"[Coprog] Initial training of h2 on {len(x2)} failure samples...")
         h2 = self._train_fun(
             copy.deepcopy(self.second_model),
             x2,
@@ -122,6 +125,7 @@ class Coprog:
             self.epochs_second_model,
             "h2"
         )
+        self._log(1, f"[Coprog] Initial training done.")
 
         remaining_suspension_ids = torch.unique(suspension_ids)# remaining_suspension = suspension_data.clone()
 
@@ -129,17 +133,19 @@ class Coprog:
 
         # Line 3 – Repeat for T times
         for i in range(iterations):
-            if self.verbose > 0:
-                print(f"Iterations {i + 1}/{iterations}")
 
             # Line 4 – Create pool U' of u suspension units
             if len(remaining_suspension_ids) == 0:
-                if self.verbose > 0:
-                    print("\tNo more remaining suspension, stopping the iterations...")
+                self._log(1, f"[Coprog] Early stop at iteration {i}: no remaining censored units.")
                 break
+
             pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
             shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
             pool_ids = shuffled_ids[:pool_size] # U'
+
+            self._log(1, f"[Coprog] --- Iteration {i + 1}/{iterations} | "
+                         f"remaining censored units: {len(remaining_suspension_ids)} | "
+                         f"pool: {pool_ids.tolist()} ---")
 
             pi = [None, None]  # π1, π2
 
@@ -165,10 +171,9 @@ class Coprog:
                 best_xu: torch.Tensor | None = None
                 best_label: torch.Tensor | None = None
 
-                if self.verbose > 0:
-                    print("\tIterating over the suspension pool...")
+                self._log(2, f"[Coprog]   Model h{j + 1}: evaluating {len(pool_ids)} candidates...")
 
-                for unit_id in tqdm(iterable=pool_ids, disable=self.verbose != 1, desc="\tSuspension pool iterator"):
+                for candidate_idx, unit_id in enumerate(pool_ids):
                     # Extract all sequences for this specific unit
                     mask = (suspension_ids == unit_id)
                     xu = suspension_data[mask]  # Shape: (N_u, *dims)
@@ -176,15 +181,10 @@ class Coprog:
                     # Line 7 – pseudo-label from current model j
                     lu_p = self._predict(hj, xu)  # L^P_u
 
-                    if self.verbose > 1:
-                        print(f"\tThe prediction for the current xu is lu_p with the shape : {lu_p.size()}")
-
                     # Line 8 – train a temporary model h'j
                     model_j = copy.deepcopy(self.first_model if j == 0 else self.second_model)
                     x_aug = torch.cat([xj, xu], dim=0)
 
-                    if self.verbose > 1:
-                        print(f"\tConcatenate yj with lu_p with the respective shape of {yj.size()} {lu_p.size()}")
                     lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
                     y_aug = torch.cat([yj, lu_p_reshaped], dim=0)
 
@@ -201,6 +201,9 @@ class Coprog:
                     # Line 9 – Δ_{j, X_u} = MSE(hj, L) – MSE(h'j, L)
                     delta = self._confidence_measure(xj, yj, hj, hj_prime)
 
+                    self._log(2, f"[Coprog]     candidate {candidate_idx + 1}/{len(pool_ids)} "
+                                 f"unit {unit_id.item()}: delta = {delta:.4f}")
+
                     if delta > best_delta:
                         best_delta = delta
                         best_unit_id = unit_id
@@ -214,21 +217,22 @@ class Coprog:
                     pi[j] = (best_unit_id, best_xu, best_label)
                     # Remove selected sample from U'
                     pool_ids = pool_ids[pool_ids != best_unit_id]
+                    self._log(1, f"[Coprog]   Model h{j + 1}: selected unit {best_unit_id.item()} "
+                                 f"(delta = {best_delta:.4f})")
                 else:
                     pi[j] = None  # Line 15
+                    self._log(1, f"[Coprog]   Model h{j + 1}: no unit selected (no positive delta found).")
 
             # Line 17 – end for j
 
             # Line 18 – if π1 == ∅ && π2 == ∅  exit
             if pi[0] is None and pi[1] is None:
-                if self.verbose > 0:
-                    print("\tNo beneficial samples found by either model, stopping the iterations...")
+                self._log(1, f"[Coprog] Early stop at iteration {i + 1}: "
+                             f"no model found a beneficial censored unit.")
                 break
 
             # Line 19 – L1 = L1 ∪ π2;  L2 = L2 ∪ π1   (cross-labelling)
             if pi[1] is not None:
-                if self.verbose > 0:
-                    print(f"\tModel h2 found a beneficial unit ({pi[1][0].item()}), adding it to h1 training set...")
                 _, xu2, lu2 = pi[1]
 
                 lu2_reshaped = lu2.view(-1, y1.shape[1]) if y1.dim() > 1 else lu2.view(-1)
@@ -237,8 +241,6 @@ class Coprog:
                 y1 = torch.cat([y1, lu2_reshaped], dim=0)
 
             if pi[0] is not None:
-                if self.verbose > 0:
-                    print(f"\tModel h1 found a beneficial unit ({pi[0][0].item()}), adding it to h2 training set...")
                 _, xu1, lu1 = pi[0]
 
                 lu1_reshaped = lu1.view(-1, y2.shape[1]) if y2.dim() > 1 else lu1.view(-1)
@@ -254,10 +256,8 @@ class Coprog:
             for s_id in set(selected_ids):
                 remaining_suspension_ids = remaining_suspension_ids[remaining_suspension_ids != s_id]
 
-            if self.verbose > 0:
-                print("\tTraining first and second model with new dataset augmented by unlabeled data...")
-
             # Line 20 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
+            self._log(1, f"[Coprog]   Retraining h1 | dataset size: {len(x1)} samples")
             h1 = self._train_fun(
                 copy.deepcopy(self.first_model),
                 x1,
@@ -267,6 +267,7 @@ class Coprog:
                 self.epochs_first_model,
                 "h1",
             )
+            self._log(1, f"[Coprog]   Retraining h2 | dataset size: {len(x2)} samples")
             h2 = self._train_fun(
                 copy.deepcopy(self.second_model),
                 x2,
@@ -278,8 +279,7 @@ class Coprog:
             )
             number_iterations += 1
 
-        if self.verbose > 0:
-            print(f"Number of iterations: {number_iterations} on {iterations} total iterations.")
+        self._log(1, f"[Coprog] Training complete.")
 
         # Save final trained models
         self._h1 = h1
@@ -296,10 +296,12 @@ class Coprog:
         if self._h1 is None or self._h2 is None:
             raise RuntimeError("Call .train() before .predict().")
 
+        if self.w1 is None or self.w2 is None:
+            raise RuntimeError("Call .calculate_weights() before .predict().")
+
         x = x.to(self.device)
         p1 = self._predict(self._h1, x)
         p2 = self._predict(self._h2, x)
-        # TODO Weight have to change depending on performance of each model
         return self.w1 * p1 + self.w2 * p2
 
     def _train_fun(
@@ -325,13 +327,13 @@ class Coprog:
         dataset = TensorDataset(x, y)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=self.shuffle_dataloader)
 
-        if self.verbose > 1:
-            print(f"\tTraining the model {model_name} for {epochs} epochs...")
+        self._log(2, f"[Coprog]     Training {model_name} | samples: {len(x)} | "
+                     f"epochs: {epochs} | batch_size: {batch_size} | lr: {lr}")
 
         best_loss = 1_000_000
         avg_epochs_loss = 0.
 
-        for epoch in tqdm(iterable=range(epochs), disable=self.verbose < 2, desc="Epochs iterator"):
+        for epoch in range(epochs):
             avg_loss = 0.
 
             for x_batch, y_batch in loader:
@@ -342,16 +344,13 @@ class Coprog:
 
                 avg_loss += loss.item()
 
-            if self.verbose > 2:
-                print(f"\tEpoch {epoch + 1}/{epochs} - Loss : {avg_loss / len(loader)}")
-
             if avg_loss < best_loss:
                 best_loss = (avg_loss / len(loader))
 
             avg_epochs_loss += (avg_loss / len(loader))
 
-        if self.verbose > 1:
-            print(f"\tBest loss for model {model_name} : {best_loss / len(loader)} - Average loss for model {model_name} : {avg_epochs_loss / self.epochs}")
+        self._log(2, f"[Coprog]     {model_name} done | avg loss: {avg_epochs_loss / epochs:.4f} | "
+                     f"best epoch loss: {best_loss:.4f}")
 
         return model
 
@@ -393,3 +392,57 @@ class Coprog:
         mse_aug = ((y_flat - pred_aug) ** 2).sum().item()
 
         return mse_orig - mse_aug  # > 0 means augmented model is better
+
+    def calculate_weights(
+            self,
+            x_test: torch.Tensor,
+            target: torch.Tensor,
+            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            mode: str,
+    ):
+        """
+
+        Args:
+            x_test:
+            target:
+            criteria_callback:
+            mode: value can be "min" or "max".
+                "min" mean that more the score is little more the model is good.
+                "max" mean that more the score is high more the model is good.
+
+        Returns:
+
+        """
+        if mode not in ["min", "max"]:
+            raise ValueError("Mode must be either 'min' or 'max'.")
+
+        if self._h1 is None or self._h2 is None:
+            raise RuntimeError("Call .train() before .calculate_weights().")
+
+        scores = []
+
+        pred_h1 = self._predict(self._h1, x_test)
+        scores.append(criteria_callback(pred_h1, target))
+
+        pred_h2 = self._predict(self._h2, x_test)
+        scores.append(criteria_callback(pred_h2, target))
+
+        self._log(1, f"[Coprog] Calculating weights (mode={mode}) | "
+                     f"scores per model: {[round(s, 4) for s in scores]}")
+
+        if mode == "min":
+            if any(s == 0 for s in scores):
+                raise ValueError(
+                    "At least one model has a score of zero in 'min' mode, inverse weighting is undefined.")
+            inv_scores = [1.0 / s for s in scores]
+            total = sum(inv_scores)
+            weights = [inv_s / total for inv_s in inv_scores]
+        else:
+            total = sum(scores)
+            if total == 0:
+                raise ValueError(f"The sum of scores from all models is zero, cannot calculate weights : {scores}")
+            weights = [s / total for s in scores]
+
+        self.w1, self.w2 = weights
+
+        self._log(1, f"[Coprog] Weights assigned: h1={round(self.w1, 4)}, h2={round(self.w2, 4)}")

@@ -35,6 +35,8 @@ NECESSARY_DATASET_RSF_KEYS = [
 
 NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
+NECESSARY_DATASET_PYCLUS_KEYS = NECESSARY_DATASET_RSF_KEYS
+
 # =======================================================
 # MODEL
 # =======================================================
@@ -82,6 +84,7 @@ NECESSARY_SELF_SUPERVISED_KEYS = [
     "lr_baseline",
     "max_epochs_baseline",
     "batch_size_baseline",
+    "min_distance",
 ]
 
 NECESSARY_RSF_KEYS = [
@@ -108,4 +111,13 @@ NECESSARY_COPROG_KEYS = [
     "batch_size_second_model",
     "coprog_iterations",
     "coprog_suspension_pool_size",
+]
+
+NECESSARY_PYCLUS_KEYS = [
+    "n_trees",
+    "max_depth",
+    "min_leaf_size",
+    "cv_for_grid_search",
+    "pruning_method",
+    "variance_warning_threshold",
 ]

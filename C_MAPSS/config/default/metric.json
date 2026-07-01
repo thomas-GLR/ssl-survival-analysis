@@ -16,8 +16,8 @@
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
-      "pretraining_lr": 0.0002,
+      "sequence_len": 30,
+      "pretraining_lr": 0.00015,
       "dropout":  0.2,
       "num_layers": 6,
       "kernel_size":  3,
@@ -28,9 +28,10 @@
       "patience": 50,
       "batch_size_pretraining": 64,
       "latent_dim_baseline": 64,
-      "lr_baseline":  0.01,
-      "max_epochs_baseline": 100,
-      "batch_size_baseline":  64
+      "lr_baseline":  0.0056,
+      "max_epochs_baseline": 200,
+      "batch_size_baseline":  128,
+      "min_distance": 10
     }
   },
   "FD002": {
@@ -50,9 +51,9 @@
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
-      "pretraining_lr": 0.0002,
-      "dropout":  0.2,
+      "sequence_len": 20,
+      "pretraining_lr": 0.01155,
+      "dropout":  0.4,
       "num_layers": 6,
       "kernel_size":  3,
       "base_filters": 16,
@@ -62,9 +63,10 @@
       "patience": 50,
       "batch_size_pretraining": 64,
       "latent_dim_baseline": 64,
-      "lr_baseline":  0.01,
-      "max_epochs_baseline": 100,
-      "batch_size_baseline":  64
+      "lr_baseline":  0.0903,
+      "max_epochs_baseline": 200,
+      "batch_size_baseline":  512,
+      "min_distance": 15
     }
   },
   "FD003": {
@@ -84,9 +86,9 @@
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
-      "pretraining_lr": 0.0002,
-      "dropout":  0.2,
+      "sequence_len": 30,
+      "pretraining_lr": 0.00615,
+      "dropout":  0.1,
       "num_layers": 6,
       "kernel_size":  3,
       "base_filters": 16,
@@ -96,9 +98,10 @@
       "patience": 50,
       "batch_size_pretraining": 64,
       "latent_dim_baseline": 64,
-      "lr_baseline":  0.01,
-      "max_epochs_baseline": 100,
-      "batch_size_baseline":  64
+      "lr_baseline":  0.095,
+      "max_epochs_baseline": 200,
+      "batch_size_baseline":  64,
+      "min_distance": 15
     }
   },
   "FD004": {
@@ -118,9 +121,9 @@
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
-      "pretraining_lr": 0.0002,
-      "dropout":  0.2,
+      "sequence_len": 15,
+      "pretraining_lr": 0.07455,
+      "dropout":  0.1,
       "num_layers": 6,
       "kernel_size":  3,
       "base_filters": 16,
@@ -130,9 +133,10 @@
       "patience": 50,
       "batch_size_pretraining": 64,
       "latent_dim_baseline": 64,
-      "lr_baseline":  0.01,
-      "max_epochs_baseline": 100,
-      "batch_size_baseline":  64
+      "lr_baseline":  0.06635,
+      "max_epochs_baseline": 200,
+      "batch_size_baseline":  64,
+      "min_distance": 10
     }
   }
 }

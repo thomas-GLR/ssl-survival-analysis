@@ -39,7 +39,18 @@ def train_model(
         variance_warning_threshold: float = 5.0,  # Adjusted scale for RMSE variance
         device: str | None = None,
         datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
-) -> tuple[float, float]:
+) -> tuple[float| None, float| None]:
+    utils_cmapss.assert_data_is_valid(
+        checkpoints_path=checkpoints_path,
+        results_path=results_path,
+        dataset_root=dataset_root,
+        sub_dataset=sub_dataset,
+    )
+
+    if percent_of_censored_data > 0.80:
+        print("There is no enough failure data for rsf on CMAPSS")
+        return None, None
+
     print("Loading dataset...")
 
     train_dataset, test_dataset, _ = PyclusDataset.from_cmapss(

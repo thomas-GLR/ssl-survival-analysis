@@ -1,0 +1,90 @@
+{
+  "FD001": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "use_max_rul_on_test":  true,
+      "use_max_rul_on_valid": true,
+      "summarize_features": true
+    },
+    "model_params": {
+      "n_trees": [50,100,200],
+      "max_depth": [3,5,8,12],
+      "min_leaf_size": [5,10,20],
+      "cv_for_grid_search":  5,
+      "pruning_method": "M5MultiTarget",
+      "variance_warning_threshold": 5.0
+    }
+  },
+  "FD002": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "use_max_rul_on_test":  true,
+      "use_max_rul_on_valid": true,
+      "summarize_features": true
+    },
+    "model_params": {
+      "n_trees": [50,100,200],
+      "max_depth": [3,5,8,12],
+      "min_leaf_size": [10,20,30],
+      "cv_for_grid_search":  5,
+      "pruning_method": "M5MultiTarget",
+      "variance_warning_threshold": 5.0
+    }
+  },
+  "FD003": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "use_max_rul_on_test":  true,
+      "use_max_rul_on_valid": true,
+      "summarize_features": true
+    },
+    "model_params": {
+      "n_trees": [50,100,200],
+      "max_depth": [3,5,8,12],
+      "min_leaf_size": [5,10,20],
+      "cv_for_grid_search":  5,
+      "pruning_method": "M5MultiTarget",
+      "variance_warning_threshold": 5.0
+    }
+  },
+  "FD004": {
+    "dataset_params": {
+      "seed": 42,
+      "max_rul": 125,
+      "norm_type": "z-score",
+      "cluster_operations": true,
+      "norm_by_operations": true,
+      "include_cols": [],
+      "exclude_cols": [],
+      "use_max_rul_on_test":  true,
+      "use_max_rul_on_valid": true,
+      "summarize_features": true
+    },
+    "model_params": {
+      "n_trees": [50,100,200],
+      "max_depth": [3,5,8,12],
+      "min_leaf_size": [10,20,30],
+      "cv_for_grid_search":  5,
+      "pruning_method": "M5MultiTarget",
+      "variance_warning_threshold": 5.0
+    }
+  }
+}

@@ -235,7 +235,7 @@ def _get_necessary_dataset_keys(model_version: ModelVersion) -> list[str]:
         case ModelVersion.RSF:
             return necessary_keys_cmapss.NECESSARY_DATASET_RSF_KEYS
         case ModelVersion.PYCLUS:
-            raise ValueError(f"Need to create necessary dataset keys for {model_version.value}")
+            return necessary_keys_cmapss.NECESSARY_DATASET_PYCLUS_KEYS
         case ModelVersion.COPROG:
             return necessary_keys_cmapss.NECESSARY_DATASET_COPROG_KEYS
         case _:
@@ -255,7 +255,7 @@ def _get_necessary_model_keys(model_version: ModelVersion) -> list[str]:
         case ModelVersion.RSF:
             return necessary_keys_cmapss.NECESSARY_RSF_KEYS
         case ModelVersion.PYCLUS:
-            raise ValueError(f"Need to create necessary model keys for {model_version.value}")
+            return necessary_keys_cmapss.NECESSARY_PYCLUS_KEYS
         case ModelVersion.COPROG:
             return necessary_keys_cmapss.NECESSARY_COPROG_KEYS
         case _:

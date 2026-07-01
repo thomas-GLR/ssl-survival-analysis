@@ -140,6 +140,13 @@ def train_model(
         suspension_pool_size=coprog_suspension_pool_size
     )
 
+    coprog.calculate_weights(
+        x_test=features_tensor,
+        target=targets_tensor,
+        criteria_callback=cmapss_score,
+        mode="min",
+    )
+
     print("Saving first and second trained models...")
 
     torch.save(coprog.first_model, f"{final_checkpoints_path}/coprog_{model_version}.pth")
@@ -154,3 +161,11 @@ def train_model(
     print(f"Score: {score}")
 
     return rmse.item(), score
+
+def cmapss_score(predict: torch.Tensor, label: torch.Tensor) -> float:
+    a1 = 13
+    a2 = 10
+    error = predict - label
+    pos_e = torch.exp(-error[error < 0] / a1) - 1
+    neg_e = torch.exp(error[error >= 0] / a2) - 1
+    return torch.sum(pos_e).item() + torch.sum(neg_e).item()
