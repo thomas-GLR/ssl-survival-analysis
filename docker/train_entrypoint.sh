@@ -27,13 +27,18 @@ OUTPUT_DIR="${RESULT_DIR:-/workspace/outputs}"
 # Ensure output directory exists even if the volume was not pre-populated
 mkdir -p "$OUTPUT_DIR"
 
+CONFIG_DIR="${CONFIG_DIR:-/workspace/config}"
+BENCHMARK_VERSION="${BENCHMARK_VERSION:-default}"
+
+mkdir -p "$CONFIG_DIR/$BENCHMARK_VERSION"
+
 ARGS=(
     --model-version     "${MODEL_VERSION:-lstm}"
-    --config-path       "${CONFIG_DIR:-/workspace/config}"
+    --config-path       "$CONFIG_DIR"
     --checkpoints-path  "${CHECKPOINT_DIR:-/workspace/checkpoints}"
     --results-path      "$OUTPUT_DIR"
     --dataset-root      "${DATA_DIR:-/workspace/data/CMAPSSData}"
-    --benchmark-version "${BENCHMARK_VERSION:-default}"
+    --benchmark-version "$BENCHMARK_VERSION"
 )
 
 echo "▶ python run_train_cmapss.py ${ARGS[*]}"

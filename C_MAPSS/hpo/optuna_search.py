@@ -104,7 +104,7 @@ def _build_lstm(trial: optuna.Trial, input_size: int, output_size: int) -> nn.Mo
     lstm_num_layers = trial.suggest_int("lstm_num_layers", 1, 3)
     lstm_dropout = trial.suggest_float("lstm_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
     fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256])
-    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
+    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1)
     sequence_len = trial.suggest_categorical("sequence_len", [32, 64, 128])
 
     from C_MAPSS.models.Simple_LSTM import Simple_LSTM
@@ -130,7 +130,7 @@ def _build_transformer_lstm(trial: optuna.Trial, input_size: int, output_size: i
     lstm_num_layers = trial.suggest_int("lstm_num_layers", 1, 3)
     lstm_dropout = trial.suggest_float("lstm_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
     fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256])
-    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
+    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1)
 
     from C_MAPSS.models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1  # ← adapt import
     return TransformerEncoder_LSTM_1(

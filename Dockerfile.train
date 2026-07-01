@@ -40,7 +40,7 @@ COPY . .
 ENV PYTHONPATH=/app
 
 # ── Volume mount points ───────────────────────────────────────────────────────
-RUN mkdir -p /data/CMAPSSData /outputs /checkpoints
+RUN mkdir -p /workspace/data/CMAPSSData /workspace/outputs /workspace/checkpoints /workspace/config
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 COPY docker/train_entrypoint.sh /entrypoint.sh

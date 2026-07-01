@@ -1,6 +1,6 @@
 {
-  "broken_percentage": [0.4, 0.6, 0.7, 0.8, 0.9],
-  "censored_percentage": [0.98, 0.9, 0.8, 0.6, 0.0],
+  "broken_percentage": [0.0],
+  "censored_percentage": [0.0],
   "cmapss_files": [
     "FD001",
     "FD002",

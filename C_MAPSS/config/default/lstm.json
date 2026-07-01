@@ -16,9 +16,9 @@
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
+      "sequence_len": 30,
       "hidden_dim": 128,
-      "lstm_num_layers": 3,
+      "lstm_num_layers": 2,
       "lstm_dropout": 0.2,
       "fc_layer_dim": 128,
       "fc_dropout": 0.5,
