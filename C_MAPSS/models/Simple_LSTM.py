@@ -39,10 +39,12 @@ class Simple_LSTM(nn.Module):
         self.lstm_dropout = lstm_dropout
 
         # lstm
+        # batch_first is crucial here because we use data_loaders than put batch in first dimension !!!!!
         self.lstm = nn.LSTM(feature_num,
                             self.lstm_hidden_size,
                             num_layers=self.lstm_num_layers,
-                            dropout=self.lstm_dropout)
+                            dropout=self.lstm_dropout,
+                            batch_first=True)
 
         # fc layers
         self.linear = nn.Sequential(

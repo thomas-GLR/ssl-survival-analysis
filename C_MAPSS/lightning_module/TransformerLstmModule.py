@@ -26,6 +26,8 @@ class TransformerLstmModule(LightningModule):
         self.save_hyperparameters(ignore=['model'])
         self.net = model
         self.lr = lr
+        self.training_step_outputs = []
+        self.training_step_targets = []
         self.validation_step_outputs = []
         self.validation_step_targets = []
         self.test_step_outputs = []
@@ -36,10 +38,22 @@ class TransformerLstmModule(LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        x = self.net(x)
-        loss = F.mse_loss(x, y)
-        self.log('train_rmse', torch.sqrt(loss), prog_bar=True)
+        preds = self.net(x)
+        loss = F.mse_loss(preds, y)
+        self.training_step_outputs.extend(preds.detach())
+        self.training_step_targets.extend(y.detach())
         return loss
+
+    def on_train_epoch_end(self):
+        outputs = torch.stack(self.training_step_outputs)
+        targets = torch.stack(self.training_step_targets)
+
+        rmse = mean_squared_error(outputs, targets, squared=False)
+
+        self.training_step_outputs.clear()
+        self.training_step_targets.clear()
+
+        self.log('train_rmse', rmse, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         x, y = batch

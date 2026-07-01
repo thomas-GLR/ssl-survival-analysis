@@ -41,14 +41,17 @@ class TransformerEncoder_LSTM_1(nn.Module):
 
         self.transformer_encoder_head_num = transformer_encoder_head_num
 
+        # batch_first is crucial here because we use data_loaders than put batch in first dimension !!!!!
         self.transformer_encoder = nn.TransformerEncoderLayer(d_model=self.sequence_len,
                                                               nhead=self.transformer_encoder_head_num,
+                                                              batch_first=True,
                                                               )
         # lstm
         self.lstm = nn.LSTM(feature_num,
                             self.lstm_hidden_size,
                             num_layers=self.lstm_num_layers,
-                            dropout=self.lstm_dropout)
+                            dropout=self.lstm_dropout,
+                            batch_first=True)
 
         # fc layers
         self.linear = nn.Sequential(
