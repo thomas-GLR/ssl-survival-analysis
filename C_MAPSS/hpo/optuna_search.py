@@ -37,6 +37,7 @@ import pandas as pd
 
 import optuna
 from lightning import Trainer
+from lightning.pytorch.callbacks import EarlyStopping
 
 from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
 
@@ -98,13 +99,12 @@ def list_models() -> list[str]:
 
 @register_model("lstm")
 def _build_lstm(trial: optuna.Trial, input_size: int, output_size: int) -> nn.Module:
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
-    lstm_num_layers = trial.suggest_int("lstm_num_layers", 1, 4)
-    # dropout is ignored for a single layer (PyTorch raises a warning otherwise)
-    lstm_dropout = trial.suggest_float("lstm_dropout", 0.0, 0.5, step=0.05) if lstm_num_layers > 1 else 0.0
-    fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256, 512])
-    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.5, step=0.05) if lstm_num_layers > 1 else 0.0
-    sequence_len = trial.suggest_categorical("sequence_len", [32, 64, 128, 256])
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+    lstm_num_layers = trial.suggest_int("lstm_num_layers", 1, 3)
+    lstm_dropout = trial.suggest_float("lstm_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
+    fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256])
+    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
+    sequence_len = trial.suggest_categorical("sequence_len", [32, 64, 128])
 
     from C_MAPSS.models.Simple_LSTM import Simple_LSTM
     return Simple_LSTM(
@@ -122,15 +122,14 @@ def _build_lstm(trial: optuna.Trial, input_size: int, output_size: int) -> nn.Mo
 def _build_transformer_lstm(trial: optuna.Trial, input_size: int, output_size: int) -> nn.Module:
     """Hybrid Transformer encoder + LSTM decoder."""
     # Transformer block
-    sequence_len = trial.suggest_categorical("sequence_len", [32, 64, 128, 256])
-    valid_heads = [h for h in [1, 2, 4, 8, 16] if sequence_len % h == 0]
+    sequence_len = trial.suggest_categorical("sequence_len", [32, 64, 128])
+    valid_heads = [h for h in [1, 2, 4, 8] if sequence_len % h == 0]
     nhead = trial.suggest_categorical("nhead", valid_heads)
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
-    lstm_num_layers = trial.suggest_int("lstm_num_layers", 1, 4)
-    # dropout is ignored for a single layer (PyTorch raises a warning otherwise)
-    lstm_dropout = trial.suggest_float("lstm_dropout", 0.0, 0.5, step=0.05) if lstm_num_layers > 1 else 0.0
-    fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256, 512])
-    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.5, step=0.05) if lstm_num_layers > 1 else 0.0
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+    lstm_num_layers = trial.suggest_int("lstm_num_layers", 1, 3)
+    lstm_dropout = trial.suggest_float("lstm_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
+    fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256])
+    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
 
     from C_MAPSS.models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1  # ← adapt import
     return TransformerEncoder_LSTM_1(
@@ -203,10 +202,17 @@ def get_dataloaders(
         percent_of_censored_data=0.,
     )
 
+    # num_workers=0: the underlying dataset is a TensorDataset already fully
+    # materialised in memory, so worker subprocesses add IPC overhead without
+    # any parallelism benefit. Creating one DataLoader with num_workers>0 per
+    # trial (x3, x n_trials) also leaks worker Process objects across fork()
+    # boundaries, which eventually crashes with "AssertionError: can only
+    # test a child process" once the garbage collector reaps a stale
+    # DataLoader iterator inside a forked worker from a *later* trial.
     return (
-        train_dataset.get_data_loader_without_censored_data(batch_size=batch_size, num_workers=4, pin_memory=True),
-        test_dataset.get_data_loader_without_censored_data(batch_size=batch_size, num_workers=4, pin_memory=True),
-        valid_dataset.get_data_loader_without_censored_data(batch_size=batch_size, num_workers=4, pin_memory=True)
+        train_dataset.get_data_loader_without_censored_data(batch_size=batch_size, num_workers=0, pin_memory=True),
+        test_dataset.get_data_loader_without_censored_data(batch_size=batch_size, num_workers=0, pin_memory=True),
+        valid_dataset.get_data_loader_without_censored_data(batch_size=batch_size, num_workers=0, pin_memory=True)
     )
 
 
@@ -257,8 +263,8 @@ def _make_objective(
 
         # ── Training hyperparameters ───────────────────────────────────────
         lr         = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256])
-        epochs     = trial.suggest_int("max_epochs", 3, max_epochs)
+        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
+        epochs     = max_epochs
 
         module = TransformerLstmModule(lr=lr, model=net)
 
@@ -268,9 +274,12 @@ def _make_objective(
         )
 
         # ── Callbacks ─────────────────────────────────────────────────────
-        callbacks = []
-        if not multi_objective:
-            # Pruning is disabled in multi-objective mode (incompatible with NSGA-II)
+        callbacks = [EarlyStopping(monitor="val_rmse", patience=20, mode="min")]
+        # Guard on actual study directions — not the multi_objective flag — so that
+        # a study loaded from storage with load_if_exists=True (possibly created in a
+        # different mode) never gets a pruning callback that calls trial.report() on
+        # a multi-objective trial (which raises NotImplementedError).
+        if len(trial.study.directions) == 1:
             callbacks.append(
                 PyTorchLightningPruningCallback(trial, monitor="val_rmse")
             )
@@ -367,7 +376,8 @@ def run_search(
     if subset not in CMAPSS_SUBSETS:
         raise ValueError(f"Unknown subset '{subset}'. Choose from {CMAPSS_SUBSETS}.")
 
-    study_name = study_name or f"{model_name}_{subset}"
+    mode_tag   = "single" if not multi_objective else "multi"
+    study_name = study_name or f"{model_name}_{subset}_{mode_tag}"
 
     # ── Sampler & pruner based on the selected mode ────────────────────────
     if multi_objective:

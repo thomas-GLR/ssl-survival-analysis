@@ -17,6 +17,9 @@ import argparse
 import logging
 import os
 
+import torch
+torch.set_float32_matmul_precision('high')
+
 
 from C_MAPSS.hpo.optuna_search import (
     best_params,
