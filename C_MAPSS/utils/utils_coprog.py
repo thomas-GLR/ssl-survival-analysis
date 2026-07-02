@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 
+import pandas as pd
 import torch
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
@@ -159,6 +160,13 @@ def train_model(
 
     print(f"Test RMSE: {rmse}")
     print(f"Score: {score}")
+
+    scores = pd.DataFrame(columns=['test_rmse', 'test_score', 'weight_h2', 'weight_h2'])
+
+    scores.loc[0] = [rmse, score, coprog.w1, coprog.w2]
+
+    # Save the results
+    scores.to_csv(f'{final_results_path}/{model_version}-turbofan-{sub_dataset}.csv', index=False)
 
     return rmse.item(), score
 
