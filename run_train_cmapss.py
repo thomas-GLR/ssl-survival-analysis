@@ -13,11 +13,151 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from datetime import datetime
 
+import numpy as np
+import pandas as pd
+
+from constants import results_columns
 from C_MAPSS.utils import utils_cmapss
 from C_MAPSS.utils.ModelVersion import ModelVersion
+from C_MAPSS.utils.utils_cmapss import (get_necessary_dataset_keys,
+                                        get_necessary_model_keys,
+                                        get_train_model_method, extract_benchmark_information_from_config,
+                                        extract_dataset_params_from_config, extract_model_params_from_config)
 
 logger = logging.getLogger(__name__)
+
+
+def reproduce_result(
+        config_path: str,
+        checkpoints_path: str,
+        results_path: str,
+        dataset_root: str,
+        model_version: ModelVersion,
+        device: str | None,
+        benchmark_version: str = "default",
+) -> None:
+    """
+    Reproduce results for CMAPSS dataset
+
+    Args:
+        config_path: the path for all the config files
+        checkpoints_path: the path to store the checkpoints
+        results_path: the path to store results
+        dataset_root: the path to the dataset folder where all cmapss files are stored
+        model_version: the version of the model
+        device: the device where to run the model
+        benchmark_version: the folder of the version for the benchmark.
+            It enables to run different benchmark configuration
+    """
+    config_path = f"{config_path}/{benchmark_version}"
+    config_benchmark_file_path = f"{config_path}/benchmark.json"
+    config_model_file_path = f"{config_path}/{model_version.value}.json"
+
+    assert os.path.exists(checkpoints_path), f"{checkpoints_path} does not exist."
+    assert os.path.exists(results_path), f"{results_path} does not exist."
+    assert os.path.exists(config_path), f"{config_path} does not exist."
+    assert os.path.exists(dataset_root), f"{dataset_root} does not exist."
+    assert os.path.exists(config_benchmark_file_path), f"{config_benchmark_file_path} does not exist."
+    assert os.path.exists(config_model_file_path), f"{config_model_file_path} does not exist."
+
+    broken_percentages, censored_percentages, cmapss_files = extract_benchmark_information_from_config(
+        config_benchmark_file_path
+    )
+
+    columns = [
+        results_columns.SUB_DATASET,
+        results_columns.CENSORED_PERCENTAGE,
+        results_columns.BROKEN_PERCENTAGE,
+        results_columns.MODEL,
+        results_columns.RMSE,
+        results_columns.SCORE
+    ]
+    rows = []
+
+    necessary_dataset_keys = get_necessary_dataset_keys(model_version)
+    necessary_model_keys = get_necessary_model_keys(model_version)
+    train_model_func = get_train_model_method(model_version)
+
+    benchmark_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    for sub_dataset in cmapss_files:
+        secure_save_for_sub_dataset_rows = []
+
+        for censored_percentage in censored_percentages:
+            # secure_save_for_censored_percentage_rows = []
+
+            # We don't wan't to iterate for no reason when censored == 0.0
+            broken_percentages_tmp = [0.0] if censored_percentage == 0.0 else broken_percentages
+
+            for broken_percentage in broken_percentages_tmp:
+                print(
+                    f"Training model {model_version.value} for the sub dataset : {sub_dataset}, censored percentage : {censored_percentage} and broken percentage : {broken_percentage}")
+
+                dataset_params = extract_dataset_params_from_config(
+                    config_path=config_model_file_path,
+                    sub_dataset=sub_dataset,
+                    necessary_keys=necessary_dataset_keys,
+                )
+
+                model_params = extract_model_params_from_config(
+                    config_model_file_path,
+                    sub_dataset=sub_dataset,
+                    necessary_keys=necessary_model_keys,
+                )
+
+                rmse, score = train_model_func(
+                    checkpoints_path=checkpoints_path,
+                    results_path=results_path,
+                    model_version=model_version.value,
+                    dataset_root=dataset_root,
+                    sub_dataset=sub_dataset,
+                    percent_of_broken_data=broken_percentage,
+                    percent_of_censored_data=censored_percentage,
+                    **dataset_params,
+                    **model_params,
+                    device=device,
+                    datetime_for_folders=benchmark_datetime,
+                )
+
+                new_dataframe_row = {
+                    results_columns.SUB_DATASET: sub_dataset,
+                    results_columns.CENSORED_PERCENTAGE: censored_percentage,
+                    results_columns.BROKEN_PERCENTAGE: broken_percentage,
+                    results_columns.MODEL: model_version.value,
+                    results_columns.RMSE: rmse,
+                    results_columns.SCORE: score,
+                }
+
+                rows.append(new_dataframe_row)
+                # secure_save_for_censored_percentage_rows.append(new_dataframe_row)
+                secure_save_for_sub_dataset_rows.append(new_dataframe_row)
+
+            # secure_save_for_censored_percentage = pd.DataFrame(secure_save_for_censored_percentage_rows,
+            #                                                    columns=columns)
+
+            # print(
+            #     f"Saving intermediate result for sub dataset {sub_dataset} and censored percentage : {censored_percentage}...")
+            # secure_save_for_censored_percentage.to_csv(
+            #     f"{results_path}/secure_{sub_dataset}_censored_{censored_percentage:.2f}_{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
+            #     index=False)
+
+        secure_save_for_sub_dataset = pd.DataFrame(secure_save_for_sub_dataset_rows, columns=columns)
+
+        print(f"Saving intermediate result for sub dataset {sub_dataset}...")
+        secure_save_for_sub_dataset.to_csv(
+            f"{results_path}/secure_{sub_dataset}_{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
+            index=False)
+
+    df_results = pd.DataFrame(rows, columns=columns)
+
+    print(df_results.head())
+
+    print("Saving results...")
+
+    df_results.to_csv(f"{results_path}/{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
+                      index=False)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -94,7 +234,7 @@ def main() -> None:
 
     model_version = ModelVersion(args.model_version)
 
-    utils_cmapss.reproduce_result(
+    reproduce_result(
         config_path=args.config_path,
         checkpoints_path=args.checkpoints_path,
         results_path=args.results_path,

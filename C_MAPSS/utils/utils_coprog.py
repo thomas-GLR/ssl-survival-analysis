@@ -149,8 +149,8 @@ def train_model(
 
     print("Saving first and second trained models...")
 
-    torch.save(coprog.first_model, f"{final_checkpoints_path}/coprog_{model_version}.pth")
-    torch.save(coprog.second_model, f"{final_checkpoints_path}/coprog_{model_version}.pth")
+    torch.save(coprog.first_model, f"{final_checkpoints_path}/coprog_cnn.pth")
+    torch.save(coprog.second_model, f"{final_checkpoints_path}/coprog_lstm.pth")
 
     y_hat = coprog.predict(features_tensor)
 

@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import torch
 from lightning import Trainer, LightningModule
 from lightning.pytorch import callbacks
@@ -78,6 +79,11 @@ def train_self_supervised(
 
     pretraining_checkpoints_path = f"{checkpoints_path}/{folder_for_current_pretraining}"
     training_checkpoints_path = f"{checkpoints_path}/{folder_for_current_training}"
+
+    final_result_path_pretraining = os.path.join(results_path, folder_for_current_pretraining)
+    os.makedirs(final_result_path_pretraining, exist_ok=True)
+    final_result_path_baseline = os.path.join(results_path, folder_for_current_training)
+    os.makedirs(final_result_path_baseline, exist_ok=True)
 
     # First we will pretrain the unsupervised model
     dataset_params = {
@@ -205,6 +211,16 @@ def train_self_supervised(
 
     trainer.fit(model, train_dataloaders=train_pair_loader, val_dataloaders=val_pair_loader)
 
+
+    callbacks_metrics = trainer.callback_metrics
+
+    _print_and_save_results_for_pretraining(
+        results_path=final_result_path_pretraining,
+        model_version=model_version,
+        sub_dataset=sub_dataset,
+        callbacks_metrics=callbacks_metrics,
+    )
+
     print("Creating baseline model...")
 
     trainer, baseline = build_baseline(
@@ -230,20 +246,36 @@ def train_self_supervised(
     print("Training baseline model")
 
     trainer.fit(baseline, train_dataloaders=train_loader, val_dataloaders=val_loader or test_loader)
+
+    callbacks_metrics_train_val = trainer.callback_metrics
+
     trainer.test(baseline, dataloaders=test_loader)
+
+    callbacks_metrics_test = trainer.callback_metrics
+
+    _print_and_save_results_for_baseline(
+        results_path=final_result_path_baseline,
+        model_version=model_version,
+        sub_dataset=sub_dataset,
+        callbacks_metrics_train_val=callbacks_metrics_train_val,
+        callbacks_metrics_test=callbacks_metrics_test,
+    )
 
     baseline_module_with_trained_model = BaselineModule.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
 
-    transformer_lstm_module_with_trained_model = baseline_module_with_trained_model.to(device)
-    transformer_lstm_module_with_trained_model.eval()
+    baseline_module_with_trained_model = baseline_module_with_trained_model.to(device)
+    baseline_module_with_trained_model.eval()
 
     predictions = []
     targets = []
 
     for x, y in test_loader:
         x = x.to(device)
-        y_hat = transformer_lstm_module_with_trained_model(x)
-        predictions.extend(y_hat.cpu().detach().numpy().flatten())
+        y_hat = baseline_module_with_trained_model(x)
+
+        y_hat_reshaped = y_hat.view(-1, y.shape[1]) if y.dim() > 1 else y_hat.view(-1)
+
+        predictions.extend(y_hat_reshaped.cpu().detach().numpy().flatten())
         targets.extend(y.cpu().detach().numpy().flatten())
 
     predictions_tensor = torch.Tensor(predictions)
@@ -371,3 +403,43 @@ def build_baseline(
     model.load_encoder(checkpoint_path)
 
     return trainer, model
+
+
+def _print_and_save_results_for_pretraining(
+        results_path: str,
+        model_version: str,
+        sub_dataset: str,
+        callbacks_metrics:  dict[str, torch.Tensor],
+) -> None:
+    scores = pd.DataFrame(columns=['train_regression_loss', 'val_regression_loss'])
+
+    train_regression_loss = callbacks_metrics['train/regression_loss']
+    val_regression_loss = callbacks_metrics['val/regression_loss']
+
+    scores.loc[0] = [train_regression_loss, val_regression_loss]
+
+    scores.to_csv(f'{results_path}/{model_version}-turbofan-{sub_dataset}.csv', index=False)
+
+    print(f"Scores from train and test :\n{scores}")
+
+
+def _print_and_save_results_for_baseline(
+        results_path: str,
+        model_version: str,
+        sub_dataset: str,
+        callbacks_metrics_train_val:  dict[str, torch.Tensor],
+        callbacks_metrics_test:  dict[str, torch.Tensor],
+) -> None:
+    scores = pd.DataFrame(columns=['train_rmse', 'val_rmse', 'test_rmse', 'test_score'])
+
+    train_rmse = callbacks_metrics_train_val['train_rmse']
+    val_rmse = callbacks_metrics_train_val['val_rmse']
+
+    test_rmse = callbacks_metrics_test['test_rmse']
+    test_score = callbacks_metrics_test['test_score']
+
+    scores.loc[0] = [train_rmse, val_rmse, test_rmse, test_score]
+
+    scores.to_csv(f'{results_path}/{model_version}-turbofan-{sub_dataset}.csv', index=False)
+
+    print(f"Scores from train and test :\n{scores}")

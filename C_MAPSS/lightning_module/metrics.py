@@ -17,7 +17,7 @@ class RMSELoss(Metric):
         batch_size = inputs.shape[0]
 
         self.losses.append(summed_square)
-        self.sizes.append(torch.tensor(batch_size, dtype=torch.float))
+        self.sizes.append(torch.tensor(batch_size, dtype=torch.float, device=summed_square.device))
 
     def compute(self) -> torch.Tensor:
         if len(self.losses) == 0:
@@ -45,7 +45,7 @@ class SimpleMetric(Metric):
 
     def update(self, loss: torch.Tensor, batch_size: int):
         self.losses.append(loss)
-        self.sizes.append(torch.tensor(batch_size, dtype=torch.float))
+        self.sizes.append(torch.tensor(batch_size, dtype=torch.float, device=loss.device))
 
     def compute(self) -> torch.Tensor:
         if len(self.losses) == 0:

@@ -26,6 +26,8 @@ class TransformerLstmModule(LightningModule):
         self.save_hyperparameters(ignore=['model'])
         self.net = model
         self.lr = lr
+        # On CMAPSS storing outputs is not a big problem as there is not too much data.
+        # But on bigest dataset there is a risk of memory overflow
         self.training_step_outputs = []
         self.training_step_targets = []
         self.validation_step_outputs = []

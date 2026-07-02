@@ -24,11 +24,11 @@
       "fc_dropout": 0.5,
       "lr_first_model": 0.001,
       "lr_second_model": 0.0002,
-      "epochs_first_model": 2,
-      "epochs_second_model": 2,
+      "epochs_first_model": 1,
+      "epochs_second_model": 1,
       "batch_size_first_model": 128,
       "batch_size_second_model": 128,
-      "coprog_iterations": 1,
+      "coprog_iterations": 2,
       "coprog_suspension_pool_size": 3
     }
   },
@@ -57,11 +57,11 @@
       "fc_dropout": 0.5,
       "lr_first_model": 0.001,
       "lr_second_model": 0.0002,
-      "epochs_first_model": 2,
-      "epochs_second_model": 2,
+      "epochs_first_model": 1,
+      "epochs_second_model": 1,
       "batch_size_first_model": 128,
       "batch_size_second_model": 128,
-      "coprog_iterations": 1,
+      "coprog_iterations": 2,
       "coprog_suspension_pool_size": 3
     }
   },
@@ -90,11 +90,11 @@
       "fc_dropout": 0.5,
       "lr_first_model": 0.001,
       "lr_second_model": 0.0002,
-      "epochs_first_model": 2,
-      "epochs_second_model": 2,
+      "epochs_first_model": 1,
+      "epochs_second_model": 1,
       "batch_size_first_model": 128,
       "batch_size_second_model": 128,
-      "coprog_iterations": 1,
+      "coprog_iterations": 2,
       "coprog_suspension_pool_size": 3
     }
   },
@@ -123,11 +123,11 @@
       "fc_dropout": 0.5,
       "lr_first_model": 0.001,
       "lr_second_model": 0.0002,
-      "epochs_first_model": 2,
-      "epochs_second_model": 2,
+      "epochs_first_model": 1,
+      "epochs_second_model": 1,
       "batch_size_first_model": 128,
       "batch_size_second_model": 128,
-      "coprog_iterations": 1,
+      "coprog_iterations": 2,
       "coprog_suspension_pool_size": 3
     }
   }
