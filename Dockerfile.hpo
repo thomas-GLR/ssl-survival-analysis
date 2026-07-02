@@ -36,7 +36,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY . .
 
 # ── Python path ───────────────────────────────────────────────────────────────
+# PYTHONUNBUFFERED: without it, stdout is fully block-buffered (not
+# line-buffered) whenever it isn't a TTY — which it never is in a container.
+# print() output then only reaches `docker logs`/RunPod logs when the buffer
+# is flushed (at process exit), instead of as it happens.
 ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 # ── Volume mount points ───────────────────────────────────────────────────────
 RUN mkdir -p /workspace/data/CMAPSSData /workspace/outputs /workspace/checkpoints

@@ -152,10 +152,10 @@ def train_model(
     torch.save(coprog.first_model, f"{final_checkpoints_path}/coprog_cnn.pth")
     torch.save(coprog.second_model, f"{final_checkpoints_path}/coprog_lstm.pth")
 
-    y_hat = coprog.predict(features_tensor)
+    y_hat = coprog.predict(features_tensor).detach().cpu()
 
     rmse = torch.sqrt(torch.mean((targets_tensor - y_hat) ** 2))
-    score = utils_cmapss.cmapss_score(y_hat.cpu().detach().numpy().flatten(), targets_tensor.cpu().detach().numpy().flatten())
+    score = utils_cmapss.cmapss_score(y_hat.numpy().flatten(), targets_tensor.numpy().flatten())
 
     print(f"Test RMSE: {rmse}")
     print(f"Score: {score}")

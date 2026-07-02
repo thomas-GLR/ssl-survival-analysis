@@ -4,7 +4,6 @@ from typing import Callable
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
 
 
 class Coprog:
@@ -420,6 +419,9 @@ class Coprog:
             raise RuntimeError("Call .train() before .calculate_weights().")
 
         scores = []
+
+        x_test = x_test.to(self.device)
+        target = target.to(self.device).float()
 
         pred_h1 = self._predict(self._h1, x_test)
         scores.append(criteria_callback(pred_h1, target))
