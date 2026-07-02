@@ -313,7 +313,6 @@ def build_trainer(
         accelerator=device,
         max_epochs=max_epochs,
         num_sanity_val_steps=2,
-        deterministic=True,
         log_every_n_steps=10,
         gradient_clip_val=1.0,
         val_check_interval=1.0,

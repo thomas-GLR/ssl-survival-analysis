@@ -10,13 +10,29 @@ Usage:
 
 from __future__ import annotations
 
+import os
+
+# Cap CPU/BLAS thread pools *before* numpy/torch/sklearn initialize their
+# native backends. GPU pods (e.g. RunPod) often expose many vCPUs; left
+# uncapped, every small CPU-side op (dataset windowing, KMeans, DataLoader
+# collate) spawns a thread per visible core and spends more time on
+# contention than on work, pegging the CPU without speeding anything up.
+# Respect whatever the container/orchestrator already set (e.g. .env.train)
+# and only fall back to a default here.
+_NUM_THREADS = os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", _NUM_THREADS)
+os.environ.setdefault("OPENBLAS_NUM_THREADS", _NUM_THREADS)
+
 import argparse
 import logging
-import os
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import torch
+
+torch.set_num_threads(int(_NUM_THREADS))
+torch.set_num_interop_threads(int(_NUM_THREADS))
 
 from constants import results_columns
 from C_MAPSS.utils import utils_cmapss

@@ -63,13 +63,10 @@ used; the paper's default ('linear') only relies on cycle-index
 differences and is unaffected.
 """
 
-from typing import List, Optional, Tuple, Union, Any
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
-from numpy import dtype, ndarray, signedinteger
-from numpy._typing import _64Bit
-from torch import Tensor
 from torch.utils.data import DataLoader, IterableDataset, TensorDataset
 
 from C_MAPSS.dataset.CMAPSSDataset import CMAPSSDataset
@@ -85,6 +82,15 @@ class SiamesePairDataset(IterableDataset):
     an explicit per-run domain array (derived from `is_censored`, see
     `SiameseDataset._group_windows_by_run_with_domain`) instead of a list
     of `CMAPSSLoader`-like sources.
+
+    All anchor/query indices for a whole epoch are drawn in one
+    vectorized `numpy` call in `__iter__`, and every batch is gathered
+    from the flattened run tensors in a single indexing operation in
+    `__next__` (the dataset yields whole batches, so it must be used with
+    `DataLoader(..., batch_size=None)`). This avoids sampling and
+    building pairs one Python-level `__next__` call at a time, which
+    otherwise dominates wall-clock time and CPU usage while the GPU sits
+    idle waiting for each batch.
     """
 
     def __init__(
@@ -94,6 +100,7 @@ class SiamesePairDataset(IterableDataset):
             max_rul: float,
             num_samples: int,
             min_distance: int,
+            batch_size: int,
             deterministic: bool = False,
             mode: str = "linear",
     ):
@@ -107,6 +114,7 @@ class SiamesePairDataset(IterableDataset):
         :param num_samples: number of pairs sampled per epoch.
         :param min_distance: minimum number of cycles/windows between an
             anchor and its query.
+        :param batch_size: number of pairs yielded per `__next__` call.
         :param deterministic: if True, re-seed the RNG identically at
             the start of every epoch (used for validation pairs).
         :param mode: 'linear', 'piecewise' or 'labeled' pairing strategy.
@@ -116,10 +124,10 @@ class SiamesePairDataset(IterableDataset):
         # Runs with too few windows cannot provide an anchor/query pair
         # respecting min_distance, so they are dropped upfront.
         long_enough = [len(features) > min_distance for features in run_features]
-        self._features = [f for f, keep in zip(run_features, long_enough) if keep]
-        self._labels = [t for t, keep in zip(run_targets, long_enough) if keep]
+        features = [f for f, keep in zip(run_features, long_enough) if keep]
+        labels = [t for t, keep in zip(run_targets, long_enough) if keep]
 
-        if len(self._features) == 0:
+        if len(features) == 0:
             raise ValueError(
                 "No run has more than min_distance windows; cannot build any "
                 "anchor/query pair. Use a smaller min_distance or a smaller "
@@ -128,97 +136,114 @@ class SiamesePairDataset(IterableDataset):
 
         self.min_distance = min_distance
         self.num_samples = num_samples
+        self.batch_size = batch_size
         self.deterministic = deterministic
         self.mode = mode
         self._max_rul = max_rul
 
-        self._current_iteration = 0
+        # Flatten every run into one contiguous tensor so that an
+        # arbitrary number of anchor/query pairs can be gathered with a
+        # single vectorized indexing operation instead of one
+        # Python-level lookup per pair.
+        self._flat_features = torch.cat(features, dim=0)
+        self._flat_targets = torch.cat(labels, dim=0)
+
+        run_lengths = np.array([len(f) for f in features], dtype=np.int64)
+        self._run_lengths = run_lengths
+        self._run_offsets = np.concatenate([[0], np.cumsum(run_lengths)[:-1]])
+        self._num_runs = len(features)
+
         self._rng = self._reset_rng()
 
         if mode == "linear":
-            self._get_pair_func = self._get_pair_idx
+            self._sample_pairs = self._sample_linear
         elif mode == "piecewise":
-            self._get_pair_func = self._get_pair_idx_piecewise
+            self._sample_pairs = self._sample_piecewise
         elif mode == "labeled":
-            self._get_pair_func = self._get_labeled_pair_idx
+            self._sample_pairs = self._sample_labeled
         else:
             raise ValueError(f"Unknown distance mode {mode}.")
+
+        self._epoch_anchor_idx: Optional[np.ndarray] = None
+        self._epoch_query_idx: Optional[np.ndarray] = None
+        self._epoch_distance: Optional[torch.Tensor] = None
+        self._current_batch = 0
 
     @staticmethod
     def _reset_rng() -> np.random.Generator:
         return np.random.default_rng(seed=42)
 
     def __len__(self) -> int:
-        return self.num_samples
+        """Number of batches yielded per epoch (the dataset batches itself)."""
+        return -(-self.num_samples // self.batch_size)  # ceil division
 
     def __iter__(self):
-        self._current_iteration = 0
         if self.deterministic:
             self._rng = self._reset_rng()
+
+        anchor_idx, query_idx, distance = self._sample_pairs(self.num_samples)
+
+        self._epoch_anchor_idx = anchor_idx
+        self._epoch_query_idx = query_idx
+        distance = torch.as_tensor(distance, dtype=torch.float) / self._max_rul
+        self._epoch_distance = torch.clamp_max(distance, max=1)  # max distance is max_rul
+        self._current_batch = 0
 
         return self
 
     def __next__(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self._current_iteration < self.num_samples:
-            self._current_iteration += 1
-            pair_idx = self._get_pair_func()
-            return self._build_pair(*pair_idx)
-        else:
+        start = self._current_batch * self.batch_size
+        if start >= self.num_samples:
             raise StopIteration
 
-    def _get_pair_idx(self) -> tuple[Tensor, signedinteger[_64Bit], ndarray, ndarray]:
-        chosen_run_idx = self._rng.integers(0, len(self._features))
-        chosen_run = self._features[chosen_run_idx]
+        end = min(start + self.batch_size, self.num_samples)
+        self._current_batch += 1
 
-        run_length = chosen_run.shape[0]
-        anchor_idx = self._rng.integers(low=0, high=run_length - self.min_distance)
-        end_idx = min(run_length, anchor_idx + self._max_rul)
-        query_idx = self._rng.integers(low=anchor_idx + self.min_distance, high=end_idx)
-        distance = query_idx - anchor_idx
+        anchors = self._flat_features[self._epoch_anchor_idx[start:end]]
+        queries = self._flat_features[self._epoch_query_idx[start:end]]
+        distances = self._epoch_distance[start:end]
 
-        return chosen_run, anchor_idx, query_idx, distance
+        return anchors, queries, distances
 
-    def _get_pair_idx_piecewise(self) -> Tuple[Tensor, signedinteger[_64Bit], ndarray, ndarray]:
-        chosen_run_idx = self._rng.integers(0, len(self._features))
-        chosen_run = self._features[chosen_run_idx]
+    def _sample_linear(self, n: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        run_idx = self._rng.integers(0, self._num_runs, size=n)
+        lengths = self._run_lengths[run_idx]
 
-        run_length = chosen_run.shape[0]
-        middle_idx = run_length // 2
-        anchor_idx = self._rng.integers(low=0, high=run_length - self.min_distance)
-        end_idx = (
-            middle_idx if anchor_idx < (middle_idx - self.min_distance) else run_length
-        )
-        query_idx = self._rng.integers(low=anchor_idx + self.min_distance, high=end_idx)
-        distance = query_idx - anchor_idx if anchor_idx > middle_idx else 0
+        anchor_rel = self._rng.integers(low=0, high=lengths - self.min_distance)
+        end_rel = np.minimum(lengths, anchor_rel + self._max_rul)
+        query_rel = self._rng.integers(low=anchor_rel + self.min_distance, high=end_rel)
+        distance = (query_rel - anchor_rel).astype(np.float32)
 
-        return chosen_run, anchor_idx, query_idx, distance
+        offsets = self._run_offsets[run_idx]
+        return offsets + anchor_rel, offsets + query_rel, distance
 
-    def _get_labeled_pair_idx(self) -> Tuple[torch.Tensor, int, int, int]:
-        chosen_run_idx = self._rng.integers(0, len(self._features))
-        chosen_run = self._features[chosen_run_idx]
-        chosen_labels = self._labels[chosen_run_idx]
+    def _sample_piecewise(self, n: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        run_idx = self._rng.integers(0, self._num_runs, size=n)
+        lengths = self._run_lengths[run_idx]
+        middle_rel = lengths // 2
 
-        run_length = chosen_run.shape[0]
-        anchor_idx = self._rng.integers(low=0, high=run_length - self.min_distance)
-        query_idx = self._rng.integers(low=anchor_idx + self.min_distance, high=run_length)
+        anchor_rel = self._rng.integers(low=0, high=lengths - self.min_distance)
+        end_rel = np.where(anchor_rel < (middle_rel - self.min_distance), middle_rel, lengths)
+        query_rel = self._rng.integers(low=anchor_rel + self.min_distance, high=end_rel)
+        distance = np.where(anchor_rel > middle_rel, query_rel - anchor_rel, 0).astype(np.float32)
+
+        offsets = self._run_offsets[run_idx]
+        return offsets + anchor_rel, offsets + query_rel, distance
+
+    def _sample_labeled(self, n: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        run_idx = self._rng.integers(0, self._num_runs, size=n)
+        lengths = self._run_lengths[run_idx]
+
+        anchor_rel = self._rng.integers(low=0, high=lengths - self.min_distance)
+        query_rel = self._rng.integers(low=anchor_rel + self.min_distance, high=lengths)
+
+        offsets = self._run_offsets[run_idx]
+        anchor_idx = offsets + anchor_rel
+        query_idx = offsets + query_rel
         # RUL label difference is the negative of the time-step difference.
-        distance = chosen_labels[anchor_idx] - chosen_labels[query_idx]
+        distance = (self._flat_targets[anchor_idx] - self._flat_targets[query_idx]).numpy()
 
-        return chosen_run, anchor_idx, query_idx, distance
-
-    def _build_pair(
-            self,
-            run: torch.Tensor,
-            anchor_idx: int,
-            query_idx: int,
-            distance: Union[int, float, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        anchor = run[anchor_idx]
-        query = run[query_idx]
-        distance = torch.as_tensor(distance, dtype=torch.float) / self._max_rul
-        distance = torch.clamp_max(distance, max=1)  # max distance is max_rul
-
-        return anchor, query, distance
+        return anchor_idx, query_idx, distance
 
 
 class SiameseDataset:
@@ -388,6 +413,7 @@ class SiameseDataset:
             max_rul=max_rul,
             num_samples=num_samples,
             min_distance=min_distance,
+            batch_size=batch_size,
             deterministic=False,
             mode=distance_mode,
         )
@@ -396,15 +422,18 @@ class SiameseDataset:
             max_rul=max_rul,
             num_samples=num_val_samples,
             min_distance=1,
+            batch_size=batch_size,
             deterministic=True,
             mode=distance_mode,
         )
 
+        # `SiamesePairDataset` batches itself (see class docstring), so the
+        # DataLoader must not re-batch/collate on top of it.
         train_pair_loader = DataLoader(
-            train_pairs, batch_size=batch_size, pin_memory=True, num_workers=num_workers
+            train_pairs, batch_size=None, pin_memory=True, num_workers=num_workers
         )
         val_pair_loader = DataLoader(
-            val_pairs, batch_size=batch_size, pin_memory=True, num_workers=num_workers
+            val_pairs, batch_size=None, pin_memory=True, num_workers=num_workers
         )
 
         return train_pair_loader, val_pair_loader
