@@ -3,19 +3,25 @@ import tempfile
 from typing import Callable
 
 import torch
-from lightning import Trainer
+from lightning import Trainer, LightningModule
 from lightning.pytorch import callbacks
+from torch import nn
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
 from C_MAPSS.models import CNN1D
 from C_MAPSS.utils import utils_cmapss
+from C_MAPSS.models import Simple_LSTM
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2, SelectionMode
+from C_MAPSS.models.TransformerFeatures import TransformerFeatures
+from C_MAPSS.models.TransformerTimeSequence import TransformerTimeSequence
 
 
 def train_model(
     coprog_iterations: int,
     coprog_suspension_pool_size: int,
+    # Model params
+    max_epochs: int,
     # Dataset params
     dataset_root: str,
     seed: int | None,
@@ -104,15 +110,33 @@ def train_model(
         num_features=feature_num,
     )
 
-    cnn2 = CNN1D(
-        num_features=feature_num,
+    lstm = Simple_LSTM(
+        feature_num=feature_num,
+        sequence_len=sequence_len,
+        hidden_dim=128,
+        lstm_num_layers=1,
+        lstm_dropout=0.3,
+        fc_layer_dim=32,
+        fc_dropout=0.4,
     )
 
-    cnn3 = CNN1D(
-        num_features=feature_num,
+    transformer_features = TransformerFeatures(
+        feature_num=feature_num,
+        d_model=sequence_len,
+        transformer_encoder_head_num=8,
+        fc_layer_dim=32,
+        fc_dropout=0.4,
     )
 
-    models = [cnn, cnn2, cnn3]
+    transformer_time_sequence = TransformerTimeSequence(
+        feature_num=feature_num,
+        d_model=sequence_len,
+        transformer_encoder_head_num=8,
+        fc_layer_dim=32,
+        fc_dropout=0.4,
+    )
+
+    models = [cnn, lstm, transformer_features, transformer_time_sequence]
 
     cotraining_ensemble = CoTrainingEnsemble_v2(
         models=models,
@@ -121,13 +145,13 @@ def train_model(
 
     models_number = len(models)
 
-    max_epochs = 3
-    patience = 2
+    max_epochs = max_epochs
+    patience = 50
 
-    batchs_size = [32 for _ in range(models_number)]
+    batchs_size = [128 for _ in range(models_number)]
     shuffle_dataloaders = [True for _ in range(models_number)]
 
-    lightning_modules = [TransformerLstmModule(lr=0.001, model=model) for model in models]
+    lightning_modules = [TransformerLstmModule(lr=0.0002, model=model) for model in models]
 
     # Each _train_fun call builds a fresh Trainer from these factories. The ModelCheckpoint
     # lets the ensemble reload the best (val_loss) weights instead of the last-epoch ones, and
@@ -166,18 +190,26 @@ def train_model(
 
     trainer_factories: list[Callable[[], Trainer]] = [make_trainer] * models_number
 
+    fine_tune_trainable_params: list[Callable[[LightningModule], list[nn.Parameter]]] = [
+        lambda lm: list(lm.net.regressor.parameters()),
+        lambda lm: list(lm.net.linear.parameters()),
+        lambda lm: list(lm.net.linear.parameters()),
+        lambda lm: list(lm.net.linear.parameters()),
+    ]
+
     cotraining_ensemble.setup_training(
         lightning_modules=lightning_modules,
         trainer_factories=trainer_factories,
         batchs_size=batchs_size,
         shuffle_dataloaders=shuffle_dataloaders,
+        fine_tune_trainable_params=fine_tune_trainable_params
     )
 
     print(f"Training Coprog model...")
 
     try:
         cotraining_ensemble.train(
-            is_fine_tuning_during_finding_best_suspension_data=False,
+            is_fine_tuning_during_finding_best_suspension_data=True,
             is_fine_tuning_for_last_step=False,
             selection_mode=SelectionMode.VOTING,
             train_with_censored_data=False,
@@ -226,11 +258,48 @@ def cmapss_score(predict: torch.Tensor, label: torch.Tensor) -> float:
 
 
 if __name__ == "__main__":
+
+    coprog_iterations = 10
+    coprog_suspension_pool_size = 25
+    dataset_root = "data/C_MAPSS"
+    seed = 42
+    sub_dataset = "FD002"
+    sequence_len = 32
+    max_rul = 125
+    return_sequence_label = False
+    norm_type = "z-score"
+    cluster_operations = True
+    norm_by_operations = True
+    include_cols = []
+    exclude_cols = []
+    return_id = False
+    validation_rate = 0.2
+    use_only_final_on_test = True
+    use_max_rul_on_test = True
+    use_max_rul_on_valid = True
+    percent_of_broken_data = 0.9
+    percent_of_censored_data = 0.7
+
     train_model(
-        coprog_iterations=2,
-        coprog_suspension_pool_size=5,
+        coprog_iterations=coprog_iterations,
+        coprog_suspension_pool_size=coprog_suspension_pool_size,
+        max_epochs=1,
         dataset_root="../../data/C_MAPSS",
-        seed=42,
-        sub_dataset="FD001",
-        sequence_len=30,
+        seed=seed,
+        sub_dataset=sub_dataset,
+        sequence_len=sequence_len,
+        max_rul=max_rul,
+        return_sequence_label=return_sequence_label,
+        norm_type=norm_type,
+        cluster_operations=cluster_operations,
+        norm_by_operations=norm_by_operations,
+        include_cols=include_cols,
+        exclude_cols=exclude_cols,
+        return_id=return_id,
+        validation_rate=validation_rate,
+        use_only_final_on_test=use_only_final_on_test,
+        use_max_rul_on_test=use_max_rul_on_test,
+        use_max_rul_on_valid=use_max_rul_on_valid,
+        percent_of_broken_data=percent_of_broken_data,
+        percent_of_censored_data=percent_of_censored_data,
     )

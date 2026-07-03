@@ -1,4 +1,5 @@
 import copy
+import warnings
 from collections import OrderedDict
 from typing import Callable
 
@@ -25,6 +26,8 @@ class CoTrainingEnsemble_v2:
             models: list[nn.Module],
             weights: list[float] | None = None,
             verbose: int = 0,
+            fine_tune_lr_factor: float = 0.1,
+            forgetting_warning_tolerance: float = 0.0,
     ):
         """
         :param models: list[nn.Module]
@@ -33,9 +36,23 @@ class CoTrainingEnsemble_v2:
             Optional pre-defined weights for each model.
         :param verbose: int
             Verbosity level. 0 = silent, 1 = key decisions, 2 = full per-candidate details.
+        :param fine_tune_lr_factor: float
+            Multiplier applied to a model's own learning rate while it is being
+            fine-tuned (see ``_fine_tune_fun``), so an already-trained model is
+            nudged rather than overridden by the newly added censored data.
+        :param forgetting_warning_tolerance: float
+            Relative tolerance (e.g. ``0.05`` = 5%) allowed for the validation MSE
+            to increase after a fine-tuning call before a forgetting warning is
+            raised. ``0.0`` (default) warns on any increase.
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
+
+        if not (0 < fine_tune_lr_factor <= 1):
+            raise ValueError("fine_tune_lr_factor must be in the range (0, 1].")
+
+        if forgetting_warning_tolerance < 0:
+            raise ValueError("forgetting_warning_tolerance must be >= 0.")
 
         self.models = models
         self.number_of_models = len(self.models)
@@ -43,8 +60,11 @@ class CoTrainingEnsemble_v2:
         self.trainer_factories = None
         self.batchs_size = None
         self.shuffle_dataloaders = None
+        self.fine_tune_trainable_params = None
         self.weights = weights
         self.verbose = verbose
+        self.fine_tune_lr_factor = fine_tune_lr_factor
+        self.forgetting_warning_tolerance = forgetting_warning_tolerance
 
     def _log(self, level: int, message: str) -> None:
         if self.verbose >= level:
@@ -56,6 +76,7 @@ class CoTrainingEnsemble_v2:
             trainer_factories: list[Callable[[], Trainer]],
             batchs_size: list[int],
             shuffle_dataloaders: list[bool],
+            fine_tune_trainable_params: list[Callable[[LightningModule], list[nn.Parameter]] | None] | None = None,
     ) -> None:
         r"""Setup training for the models.
 
@@ -76,6 +97,21 @@ class CoTrainingEnsemble_v2:
                 Each batch size will be used to train one model.
             shuffle_dataloaders (list[bool]): The shuffle dataloader that will be used to train
                 the models. Each shuffle dataloader will be used to train one model.
+            fine_tune_trainable_params (list[Callable[[LightningModule], list[nn.Parameter]] | None] | None):
+                Optional, one entry per model. Each entry is either ``None`` (fine-tune all
+                parameters, the default) or a callable that, given the model being fine-tuned,
+                returns the subset of its parameters that should stay trainable — every other
+                parameter is frozen (``requires_grad=False``) for the duration of that
+                fine-tuning call. Only affects ``_fine_tune_fun``; ``_train_fun`` always trains
+                every parameter. Only used when the ensemble is actually fine-tuned (see
+                ``train``'s ``is_fine_tuning_during_finding_best_suspension_data`` /
+                ``is_fine_tuning_for_last_step``).
+
+                Example, freezing everything but the regression head of a ``CNN1D``-backed
+                ``TransformerLstmModule``:
+                    fine_tune_trainable_params = [
+                        lambda lm: list(lm.net.regressor.parameters()),
+                    ] * models_number
         """
         if (len(lightning_modules) != len(self.models) or
                 len(trainer_factories) != len(self.models) or
@@ -84,10 +120,15 @@ class CoTrainingEnsemble_v2:
             raise ValueError(
                 f"The number of lightning modules (size={len(lightning_modules)}), trainers (size={len(trainer_factories)}), shuffle_dataloaders (size={len(shuffle_dataloaders)}), batchs_size (size={len(batchs_size)}) must be the same as the number of models.")
 
+        if fine_tune_trainable_params is not None and len(fine_tune_trainable_params) != len(self.models):
+            raise ValueError(
+                f"The number of fine_tune_trainable_params (size={len(fine_tune_trainable_params)}) must be the same as the number of models.")
+
         self.lightning_modules = lightning_modules
         self.trainer_factories = trainer_factories
         self.batchs_size = batchs_size
         self.shuffle_dataloaders = shuffle_dataloaders
+        self.fine_tune_trainable_params = fine_tune_trainable_params
 
     def train(
             self,
@@ -212,21 +253,23 @@ class CoTrainingEnsemble_v2:
                     xu = suspension_data[mask]
 
                     lu_p = self._predict(hj, xu)
-
-                    x_augmented = torch.cat([xj, xu], dim=0)
                     lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
-                    y_augmented = torch.cat([yj, lu_p_reshaped], dim=0)
 
                     if is_fine_tuning_during_finding_best_suspension_data:
+                        # Fine-tuning warm-starts from hj, so only the new candidate's
+                        # data needs to be passed in — the whole point of fine-tuning
+                        # here is to avoid re-training on the full accumulated dataset.
                         hj_prime = self._fine_tune_fun(
                             model=copy.deepcopy(hj),
                             model_index=j,
-                            x=x_augmented,
-                            y=y_augmented,
+                            x=xu,
+                            y=lu_p_reshaped,
                             val_x=val_data,
                             val_y=val_label,
                         )
                     else:
+                        x_augmented = torch.cat([xj, xu], dim=0)
+                        y_augmented = torch.cat([yj, lu_p_reshaped], dim=0)
                         hj_prime = self._train_fun(
                             model=copy.deepcopy(self.lightning_modules[j]),
                             model_index=j,
@@ -308,11 +351,14 @@ class CoTrainingEnsemble_v2:
                                  f"({'fine-tune' if is_fine_tuning_for_last_step else 'from scratch'})")
 
                     if is_fine_tuning_for_last_step:
+                        # Fine-tuning warm-starts from h[j], so only the newly selected
+                        # unit's data is passed in, not the full accumulated (xj, yj) —
+                        # that's what makes fine-tuning cheaper than retraining from scratch.
                         h[j] = self._fine_tune_fun(
                             model=copy.deepcopy(h[j]),
                             model_index=j,
-                            x=xj,
-                            y=yj,
+                            x=xu,
+                            y=lu2_reshaped,
                             val_x=val_data,
                             val_y=val_label,
                         )
@@ -389,6 +435,23 @@ class CoTrainingEnsemble_v2:
         :return: LightningModule
             The trained lightning module.
         """
+        return self._fit_and_reload_best(model, model_index, x, y, val_x, val_y)
+
+    def _fit_and_reload_best(
+            self,
+            model: LightningModule,
+            model_index: int,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            val_x: torch.Tensor | None,
+            val_y: torch.Tensor | None,
+    ) -> LightningModule:
+        """
+        Fit ``model`` (whatever its current weights are) on ``(x, y)`` and reload the
+        best checkpoint (as tracked by the trainer's ``ModelCheckpoint`` callback) so
+        we never keep the potentially worse last-epoch weights. Shared by
+        ``_train_fun`` (fresh model) and ``_fine_tune_fun`` (warm-started model).
+        """
         # Trainer can save some state then we create a new one
         trainer: Trainer = self.trainer_factories[model_index]()
 
@@ -428,19 +491,112 @@ class CoTrainingEnsemble_v2:
         """
         Fine-tune the lightning module for the given index with the given data.
 
+        Unlike ``_train_fun``, ``model`` is expected to already carry the weights
+        from a previous training/fine-tuning call (the co-training loop passes in a
+        deep copy of the current model, not a fresh one). This continues training
+        those weights instead of reinitializing them, using a reduced learning rate
+        (``self.fine_tune_lr_factor``) so the update is a nudge rather than a full
+        override.
+
         :param model: LightningModule
-            The lightning module to fine-tune.
+            The already-trained lightning module to fine-tune in place.
         :param model_index: int
             The index of the model to fine-tune.
         :param x: torch.Tensor
             The data features.
         :param y: torch.Tensor
             The data labels.
+        :param val_x: torch.Tensor | None
+            Optional validation features used for early stopping / best-checkpoint
+            selection, and to check for forgetting (see below).
+        :param val_y: torch.Tensor | None
+            Optional validation labels associated with ``val_x``.
         :return: LightningModule
             The fine-tuned lightning module.
+
+        Note on freezing: if ``setup_training`` was given a
+        ``fine_tune_trainable_params`` entry for this model index, every
+        parameter *not* returned by that callable is frozen
+        (``requires_grad=False``) for the duration of this call — e.g. to keep
+        a backbone fixed and only adapt the head when fine-tuning on a single
+        new data point. Frozen parameters get no gradient, so the optimizer
+        built by ``configure_optimizers()`` simply skips them; nothing about
+        the ``LightningModule`` itself needs to change.
         """
-        # TODO implement the fine-tuning logic
-        raise NotImplementedError("Fine-tuning is not implemented yet.")
+        original_lr = getattr(model, "lr", None)
+        if original_lr is not None:
+            model.lr = original_lr * self.fine_tune_lr_factor
+
+        trainable_params_fn = (
+            self.fine_tune_trainable_params[model_index]
+            if self.fine_tune_trainable_params is not None
+            else None
+        )
+        original_requires_grad = self._apply_freeze(model, trainable_params_fn)
+
+        # Only the new unit is used for training (see the call sites in `train`),
+        # so there is no rehearsal of previously-seen data to protect against
+        # catastrophic forgetting beyond the reduced LR, the optional freezing
+        # above, and the best-checkpoint reload below. Snapshot the pre-fine-tune
+        # validation MSE so we can warn if the fine-tuned model ends up
+        # generalizing worse than before.
+        has_val_data = val_x is not None and val_y is not None
+        val_mse_before = self._mse_on(model, val_x, val_y) if has_val_data else None
+
+        try:
+            model = self._fit_and_reload_best(model, model_index, x, y, val_x, val_y)
+        finally:
+            if original_lr is not None:
+                model.lr = original_lr
+            self._restore_freeze(original_requires_grad)
+
+        if has_val_data:
+            val_mse_after = self._mse_on(model, val_x, val_y)
+            if val_mse_after > val_mse_before * (1 + self.forgetting_warning_tolerance):
+                message = (
+                    f"[CoTraining] Possible forgetting detected for model {model_index}: "
+                    f"validation MSE went from {val_mse_before:.4f} to {val_mse_after:.4f} "
+                    f"after fine-tuning on {len(x)} new sample(s)."
+                )
+                warnings.warn(message)
+                self._log(1, message)
+
+        return model
+
+    def _apply_freeze(
+            self,
+            model: LightningModule,
+            trainable_params_fn: Callable[[LightningModule], list[nn.Parameter]] | None,
+    ) -> dict[nn.Parameter, bool] | None:
+        """
+        Freeze every parameter of ``model`` except the ones returned by
+        ``trainable_params_fn``. Returns the pre-freeze ``requires_grad`` state
+        (to be restored via ``_restore_freeze``), or ``None`` if
+        ``trainable_params_fn`` is ``None`` (no freezing).
+        """
+        if trainable_params_fn is None:
+            return None
+
+        trainable_params = set(trainable_params_fn(model))
+        original_requires_grad = {p: p.requires_grad for p in model.parameters()}
+        for p in model.parameters():
+            p.requires_grad = p in trainable_params
+
+        return original_requires_grad
+
+    def _restore_freeze(self, original_requires_grad: dict[nn.Parameter, bool] | None) -> None:
+        """Undo ``_apply_freeze``, restoring each parameter's original ``requires_grad``."""
+        if original_requires_grad is None:
+            return
+
+        for p, requires_grad in original_requires_grad.items():
+            p.requires_grad = requires_grad
+
+    def _mse_on(self, model: LightningModule, x: torch.Tensor, y: torch.Tensor) -> float:
+        """Mean squared error of ``model`` on ``(x, y)``, used for the forgetting check."""
+        y_flat = y.view(-1)
+        pred_flat = self._predict(model, x).view(-1)
+        return ((y_flat - pred_flat) ** 2).mean().item()
 
     def _predict(
             self,
