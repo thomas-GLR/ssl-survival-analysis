@@ -101,6 +101,8 @@ class CoTrainingEnsemble_v2:
             suspension_ids: torch.Tensor,
             iterations: int,
             suspension_pool_size: int,
+            val_data: torch.Tensor | None = None,
+            val_label: torch.Tensor | None = None,
     ) -> None:
         r"""The train algorithm for co-training ensemble v2
 
@@ -131,8 +133,17 @@ class CoTrainingEnsemble_v2:
                 The number of iteration for training models on suspension data
             suspension_pool_size:
                 The number of suspension data selected for each iteration
+            val_data:
+                Optional validation features used for early stopping / best-checkpoint
+                selection during every training call.
+            val_label:
+                Optional validation labels associated with ``val_data``. Must be provided
+                together with ``val_data``.
         """
         self._check_if_training_is_possible()
+
+        if (val_data is None) != (val_label is None):
+            raise ValueError("val_data and val_label must both be provided or both be None.")
 
         total_suspension_units = len(torch.unique(suspension_ids))
         self._log(1, f"[CoTraining] Starting training | models: {self.number_of_models} | "
@@ -160,6 +171,8 @@ class CoTrainingEnsemble_v2:
                 model_index=j,
                 x=x_i,
                 y=y_i,
+                val_x=val_data,
+                val_y=val_label,
             )
 
             h.append(h_j)
@@ -210,6 +223,8 @@ class CoTrainingEnsemble_v2:
                             model_index=j,
                             x=x_augmented,
                             y=y_augmented,
+                            val_x=val_data,
+                            val_y=val_label,
                         )
                     else:
                         hj_prime = self._train_fun(
@@ -217,6 +232,8 @@ class CoTrainingEnsemble_v2:
                             model_index=j,
                             x=x_augmented,
                             y=y_augmented,
+                            val_x=val_data,
+                            val_y=val_label,
                         )
 
                     delta = self._confidence_measure(xj, yj, hj, hj_prime)
@@ -296,6 +313,8 @@ class CoTrainingEnsemble_v2:
                             model_index=j,
                             x=xj,
                             y=yj,
+                            val_x=val_data,
+                            val_y=val_label,
                         )
                     else:
                         h[j] = self._train_fun(
@@ -303,6 +322,8 @@ class CoTrainingEnsemble_v2:
                             model_index=j,
                             x=xj,
                             y=yj,
+                            val_x=val_data,
+                            val_y=val_label,
                         )
 
         self._log(1, f"[CoTraining] Training complete.")
@@ -342,9 +363,16 @@ class CoTrainingEnsemble_v2:
             model_index: int,
             x: torch.Tensor,
             y: torch.Tensor,
+            val_x: torch.Tensor | None = None,
+            val_y: torch.Tensor | None = None,
     ) -> LightningModule:
         """
         Train the lightning module for the given index with the given data.
+
+        If a validation set is provided it is used for early stopping / checkpointing.
+        After ``trainer.fit`` the best checkpoint (as tracked by the trainer's
+        ``ModelCheckpoint`` callback) is reloaded so we never keep the potentially
+        worse last-epoch weights.
 
         :param model: LightningModule
             The lightning module to train.
@@ -354,6 +382,10 @@ class CoTrainingEnsemble_v2:
             The data features.
         :param y: torch.Tensor
             The data labels.
+        :param val_x: torch.Tensor | None
+            Optional validation features used for early stopping / best-checkpoint selection.
+        :param val_y: torch.Tensor | None
+            Optional validation labels associated with ``val_x``.
         :return: LightningModule
             The trained lightning module.
         """
@@ -365,7 +397,22 @@ class CoTrainingEnsemble_v2:
         train_dataset = TensorDataset(x, y)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=self.shuffle_dataloaders[model_index])
 
-        trainer.fit(model, train_dataloaders=train_loader)
+        val_loader = None
+        if val_x is not None and val_y is not None:
+            val_loader = DataLoader(TensorDataset(val_x, val_y), batch_size=batch_size)
+
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
+        # Reload the best checkpoint (based on the monitored validation metric) so we
+        # use the best model after training instead of the last-epoch weights.
+        checkpoint_callback = getattr(trainer, "checkpoint_callback", None)
+        best_model_path = getattr(checkpoint_callback, "best_model_path", "") if checkpoint_callback else ""
+        if best_model_path:
+            self._log(2, f"[CoTraining]     Reloading best model from {best_model_path}")
+            checkpoint = torch.load(best_model_path, map_location=model.device, weights_only=False)
+            model.load_state_dict(checkpoint["state_dict"])
+        else:
+            self._log(2, f"[CoTraining]     No best model found, the model with last epoch is used")
 
         return model
 
@@ -375,6 +422,8 @@ class CoTrainingEnsemble_v2:
             model_index: int,
             x: torch.Tensor,
             y: torch.Tensor,
+            val_x: torch.Tensor | None = None,
+            val_y: torch.Tensor | None = None,
     ) -> LightningModule:
         """
         Fine-tune the lightning module for the given index with the given data.
@@ -546,9 +595,14 @@ class CoTrainingEnsemble_v2:
             raise ValueError("Mode must be either 'min' or 'max'.")
 
         scores = []
+
+        # Flatten both sides so the criteria callback compares aligned (N,) vectors
+        # instead of broadcasting (N, 1) against (N,) into an (N, N) matrix.
+        target_flat = target.view(-1).float()
+
         for model in self.lightning_modules:
-            pred = self._predict(model, x_test)
-            scores.append(criteria_callback(pred, target))
+            pred = self._predict(model, x_test).view(-1).to(target_flat.device)
+            scores.append(criteria_callback(pred, target_flat))
 
         self._log(1, f"[CoTraining] Calculating weights (mode={mode}) | "
                      f"scores per model: {[round(s, 4) for s in scores]}")
