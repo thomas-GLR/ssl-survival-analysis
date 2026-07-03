@@ -14,6 +14,7 @@ from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
 from C_MAPSS.models.Simple_LSTM import Simple_LSTM
 from C_MAPSS.models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
 from C_MAPSS.utils import utils_cmapss
+from C_MAPSS.models import CNN1D
 
 # For PyTorch 2.6+
 # We indicate to PyTorch that these classes are "safe" when loading checkpoints
@@ -44,19 +45,19 @@ def train_model(
         use_max_rul_on_valid: bool,
         percent_of_broken_data: float | None,
         percent_of_censored_data: float,
-        # Model params
-        lstm_num_layers: int,
-        hidden_dim: int,
-        lstm_dropout: float,
-        fc_layer_dim: int,
-        fc_dropout: float,
         # Training
         batch_size: int,
         lr: float,
         patience: int,
         max_epochs: int,
         transformer_encoder_head_num: int | None = None,
-        datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+        # Model params
+        lstm_num_layers: int | None=None,
+        hidden_dim: int | None=None,
+        lstm_dropout: float | None=None,
+        fc_layer_dim: int | None=None,
+        fc_dropout: float | None=None,
 ) -> tuple[float, float]:
     utils_cmapss.assert_data_is_valid(
         checkpoints_path=checkpoints_path,
@@ -150,6 +151,8 @@ def train_model(
         model = TransformerEncoder_LSTM_1(**model_kwargs)
     elif model_version == 'lstm':
         model = Simple_LSTM(**model_kwargs)
+    elif model_version == 'cnn':
+        model = CNN1D(feature_num)
     else:
         raise ValueError(f"Model version {model_version} is not supported")
 
@@ -207,6 +210,8 @@ def train_model(
         model_for_reload = TransformerEncoder_LSTM_1(**model_kwargs)
     elif model_version == 'lstm':
         model_for_reload = Simple_LSTM(**model_kwargs)
+    elif model_version == 'cnn':
+        model_for_reload = CNN1D(feature_num)
     else:
         raise ValueError(f"Model reload version {model_version} is not supported")
 

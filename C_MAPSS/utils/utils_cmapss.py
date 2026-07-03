@@ -84,6 +84,8 @@ def get_train_model_method(model_version: ModelVersion) -> Callable:
             return utils_pyclus.train_model
         case ModelVersion.COPROG:
             return utils_coprog.train_model
+        case ModelVersion.CNN:
+            return utils_transformer_lstm.train_model
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
@@ -104,6 +106,8 @@ def get_necessary_dataset_keys(model_version: ModelVersion) -> list[str]:
             return necessary_keys_cmapss.NECESSARY_DATASET_PYCLUS_KEYS
         case ModelVersion.COPROG:
             return necessary_keys_cmapss.NECESSARY_DATASET_COPROG_KEYS
+        case ModelVersion.CNN:
+            return necessary_keys_cmapss.NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
@@ -124,6 +128,8 @@ def get_necessary_model_keys(model_version: ModelVersion) -> list[str]:
             return necessary_keys_cmapss.NECESSARY_PYCLUS_KEYS
         case ModelVersion.COPROG:
             return necessary_keys_cmapss.NECESSARY_COPROG_KEYS
+        case ModelVersion.CNN:
+            return necessary_keys_cmapss.NECESSARY_CNN_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 

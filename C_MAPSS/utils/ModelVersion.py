@@ -9,3 +9,4 @@ class ModelVersion(Enum):
     RSF = "rsf"
     PYCLUS = "pyclus"
     COPROG = "coprog"
+    CNN = "cnn"

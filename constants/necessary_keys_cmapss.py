@@ -121,3 +121,11 @@ NECESSARY_PYCLUS_KEYS = [
     "pruning_method",
     "variance_warning_threshold",
 ]
+
+NECESSARY_CNN_KEYS = [
+    "sequence_len",
+    "batch_size",
+    "lr",
+    "patience",
+    "max_epochs",
+]
