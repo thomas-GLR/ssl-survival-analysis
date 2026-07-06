@@ -1,14 +1,18 @@
-import os
+import shutil
+import tempfile
 from datetime import datetime
+from typing import Callable
 
 import pandas as pd
 import torch
+from lightning import Trainer
+from lightning.pytorch import callbacks
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
+from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
 from C_MAPSS.models import CNN1D, Simple_LSTM
 from C_MAPSS.utils import utils_cmapss
 from models import Coprog
-from C_MAPSS.utils import utils_cmapss
 
 
 def train_model(
@@ -31,6 +35,7 @@ def train_model(
     epochs_second_model: int,
     batch_size_first_model: int,
     batch_size_second_model: int,
+    patience: int,
     # Dataset params
     dataset_root: str,
     seed: int | None,
@@ -73,7 +78,7 @@ def train_model(
 
     print("Loading datasets...")
 
-    train_dataset, test_dataset, _ = CMAPSSLoader.get_datasets(
+    train_dataset, test_dataset, valid_dataset = CMAPSSLoader.get_datasets(
         dataset_root=dataset_root,
         seed=seed,
         sub_dataset=sub_dataset,
@@ -94,8 +99,18 @@ def train_model(
         percent_of_censored_data=percent_of_censored_data,
     )
 
+    if valid_dataset is None:
+        raise ValueError(
+            "Coprog needs a validation set for early stopping / best-model selection and for the "
+            "ensemble weights. Set validation_rate > 0 in the config."
+        )
+
     features_uncensored, targets_uncensored, features_censored, ids_censored = train_dataset.get_censored_split_tensors()
     features_tensor, targets_tensor = test_dataset.get_features_targets()
+
+    # Labelled (uncensored) validation data: used both for early stopping / best-checkpoint
+    # selection during training and to compute the ensemble weights (instead of the test set).
+    val_features, val_targets, _, _ = valid_dataset.get_censored_split_tensors()
 
     print("Creating first model (CNN1D)...")
 
@@ -120,50 +135,106 @@ def train_model(
     coprog = Coprog(
         first_model=cnn,
         second_model=lstm,
-        lr_first_model=lr_first_model,
-        lr_second_model=lr_second_model,
-        epochs_first_model=epochs_first_model,
-        epochs_second_model=epochs_second_model,
-        batch_size_first_model=batch_size_first_model,
-        batch_size_second_model=batch_size_second_model,
         verbose=1,
-        device=device,
+    )
+
+    # Wrap each model in a Lightning module (TransformerLstmModule works for CNN too).
+    cnn_module = TransformerLstmModule(lr=lr_first_model, model=cnn)
+    lstm_module = TransformerLstmModule(lr=lr_second_model, model=lstm)
+
+    # Each _train_fun call builds a fresh Trainer from these factories. The ModelCheckpoint
+    # lets Coprog reload the best (val_loss) weights instead of the last-epoch ones, and
+    # EarlyStopping avoids over/under-training. Checkpoints go to throwaway temp dirs that
+    # we remove at the end (there is one fit per candidate, so this can be a lot of files).
+    created_ckpt_dirs: list[str] = []
+
+    def make_trainer_factory(max_epochs: int) -> Callable[[], Trainer]:
+        def factory() -> Trainer:
+            ckpt_dir = tempfile.mkdtemp(prefix="coprog_ckpt_")
+            created_ckpt_dirs.append(ckpt_dir)
+
+            early_stop_callback = callbacks.EarlyStopping(
+                monitor='val_loss',
+                min_delta=0.00,
+                patience=patience,
+                verbose=False,
+                mode='min',
+            )
+            checkpoint_callback = callbacks.ModelCheckpoint(
+                dirpath=ckpt_dir,
+                monitor='val_loss',
+                filename='best-{epoch:02d}-{val_loss:.4f}',
+                save_top_k=1,
+                mode='min',
+            )
+
+            return Trainer(
+                default_root_dir=ckpt_dir,
+                accelerator="auto",
+                max_epochs=max_epochs,
+                callbacks=[early_stop_callback, checkpoint_callback],
+                logger=False,
+                enable_progress_bar=False,
+                enable_model_summary=False,
+            )
+
+        return factory
+
+    coprog.setup_training(
+        lightning_modules=[cnn_module, lstm_module],
+        trainer_factories=[
+            make_trainer_factory(epochs_first_model),
+            make_trainer_factory(epochs_second_model),
+        ],
+        batch_sizes=[batch_size_first_model, batch_size_second_model],
+        shuffle_dataloaders=[True, True],
     )
 
     print(f"Training Coprog model...")
 
-    coprog.train(
-        failure_data=features_uncensored,
-        failure_label=targets_uncensored,
-        suspension_data=features_censored,
-        suspension_ids=ids_censored,
-        iterations=coprog_iterations,
-        suspension_pool_size=coprog_suspension_pool_size
-    )
+    try:
+        coprog.train(
+            failure_data=features_uncensored,
+            failure_label=targets_uncensored,
+            suspension_data=features_censored,
+            suspension_ids=ids_censored,
+            iterations=coprog_iterations,
+            suspension_pool_size=coprog_suspension_pool_size,
+            val_data=val_features,
+            val_label=val_targets,
+        )
 
-    coprog.calculate_weights(
-        x_test=features_tensor,
-        target=targets_tensor,
-        criteria_callback=cmapss_score,
-        mode="min",
-    )
+        # Ensemble weights are computed on the validation set, not the test set,
+        # to avoid leaking test information into the weighting.
+        coprog.calculate_weights(
+            x_test=val_features,
+            target=val_targets,
+            criteria_callback=cmapss_score,
+            mode="min",
+        )
+    finally:
+        for ckpt_dir in created_ckpt_dirs:
+            shutil.rmtree(ckpt_dir, ignore_errors=True)
 
     print("Saving first and second trained models...")
 
-    torch.save(coprog.first_model, f"{final_checkpoints_path}/coprog_cnn.pth")
-    torch.save(coprog.second_model, f"{final_checkpoints_path}/coprog_lstm.pth")
+    torch.save(coprog._h1, f"{final_checkpoints_path}/coprog_cnn.pth")
+    torch.save(coprog._h2, f"{final_checkpoints_path}/coprog_lstm.pth")
 
-    y_hat = coprog.predict(features_tensor).detach().cpu()
+    # Flatten both sides so we compute a real element-wise RMSE. targets_tensor is (N, 1)
+    # and predict() returns (N,); subtracting them directly would broadcast to (N, N).
+    y_hat = coprog.predict(features_tensor).detach().cpu().view(-1)
+    targets_flat = targets_tensor.detach().cpu().view(-1)
 
-    rmse = torch.sqrt(torch.mean((targets_tensor - y_hat) ** 2))
-    score = utils_cmapss.cmapss_score(y_hat.numpy().flatten(), targets_tensor.numpy().flatten())
+    rmse = torch.sqrt(torch.mean((targets_flat - y_hat) ** 2))
+    score = utils_cmapss.cmapss_score(y_hat.numpy(), targets_flat.numpy())
 
     print(f"Test RMSE: {rmse}")
     print(f"Score: {score}")
 
-    scores = pd.DataFrame(columns=['test_rmse', 'test_score', 'weight_h2', 'weight_h2'])
+    scores = pd.DataFrame(columns=['test_rmse', 'test_score', 'weight_h1', 'weight_h2'])
 
-    scores.loc[0] = [rmse, score, coprog.w1, coprog.w2]
+    scores.loc[0] = [rmse.item(), score, coprog.w1, coprog.w2]
 
     # Save the results
     scores.to_csv(f'{final_results_path}/{model_version}-turbofan-{sub_dataset}.csv', index=False)

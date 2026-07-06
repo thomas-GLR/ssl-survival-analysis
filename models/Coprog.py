@@ -3,6 +3,7 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+from lightning import LightningModule, Trainer
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -18,58 +19,102 @@ class Coprog:
     sample and passes it to the *other* model (cross-training). Training stops
     when neither model finds a beneficial sample or after `T` iterations.
 
+    Training is delegated to PyTorch Lightning. Each of the two models is wrapped
+    in a :class:`~lightning.LightningModule` and trained with a
+    :class:`~lightning.Trainer` produced by a factory (same pattern as
+    ``CoTrainingEnsemble_v2``). Every call to :meth:`_train_fun` reloads the best
+    checkpoint (based on the validation metric monitored by the trainer's
+    ``ModelCheckpoint`` callback) so we never keep the last-epoch weights.
+
+    Use :meth:`setup_training` to provide the Lightning modules, trainer
+    factories, batch sizes and shuffle flags before calling :meth:`train`.
+
     :param first_model:  A torch.nn.Module for view 1.
     :param second_model: A torch.nn.Module for view 2.
-    :param w1: Weight of first model in the final ensemble prediction (default 0.5).
-    :param w2: Weight of second model in the final ensemble prediction (default 0.5).
-    :param lr: Learning rate used when fine-tuning with a new labelled suspension sample (default 1e-3).
-    :param epochs: Number of epochs for each TrainFun call (default 20).
-    :param batch_size: Mini-batch size for TrainFun (default 32).
-    :param device: torch.device to run on (default: cuda if available, else cpu).
-    :param shuffle_dataloader: if set to True it will shuffle the data during the training otherwise no. Default = False
+    :param verbose: Verbosity level. 0 = silent, 1 = key decisions, 2 = full per-candidate details.
     """
 
     def __init__(
             self,
             first_model: nn.Module,
             second_model: nn.Module,
-            lr_first_model: float = 1e-3,
-            lr_second_model: float = 1e-3,
-            epochs_first_model: int = 20,
-            epochs_second_model: int = 20,
-            batch_size_first_model: int = 32,
-            batch_size_second_model: int = 32,
-            device: str | None = None,
-            shuffle_dataloader: bool = False,
             verbose: int = 0,
-            first_and_second_model_already_trained: bool = False
     ):
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Keep the originals so we can deep-copy them cheaply
-        self.first_model = first_model.to(self.device)
-        self.second_model = second_model.to(self.device)
+        # Keep the originals so external code can still reference them.
+        self.first_model = first_model
+        self.second_model = second_model
+        self.models = [first_model, second_model]
 
         self.w1 = None
         self.w2 = None
 
-        self.lr_first_model = lr_first_model
-        self.lr_second_model = lr_second_model
-        self.epochs_first_model = epochs_first_model
-        self.epochs_second_model = epochs_second_model
-        self.batch_size_first_model = batch_size_first_model
-        self.batch_size_second_model = batch_size_second_model
-
-        self.shuffle_dataloader = shuffle_dataloader
         self.verbose = verbose
 
-        # Trained models (set after calling .train())
-        self._h1: nn.Module | None = self.first_model if first_and_second_model_already_trained else None
-        self._h2: nn.Module | None = self.second_model if first_and_second_model_already_trained else None
+        # Set through setup_training()
+        self.lightning_modules: list[LightningModule] | None = None  # pristine templates
+        self.trainer_factories: list[Callable[[], Trainer]] | None = None
+        self.batch_sizes: list[int] | None = None
+        self.shuffle_dataloaders: list[bool] | None = None
+
+        # Trained Lightning modules (set after calling .train())
+        self._h1: LightningModule | None = None
+        self._h2: LightningModule | None = None
 
     def _log(self, level: int, message: str) -> None:
         if self.verbose >= level:
             print(message)
+
+    def setup_training(
+            self,
+            lightning_modules: list[LightningModule],
+            trainer_factories: list[Callable[[], Trainer]],
+            batch_sizes: list[int],
+            shuffle_dataloaders: list[bool],
+    ) -> None:
+        r"""Setup training for the two models.
+
+        Args:
+            lightning_modules (list[LightningModule]): The lightning modules used to train the
+                models. ``lightning_modules[0]`` wraps ``first_model`` and ``lightning_modules[1]``
+                wraps ``second_model``. These instances are used as *pristine templates*: every
+                training call trains a fresh deep copy, so they are never mutated.
+            trainer_factories (list[Callable[[], Trainer]]): Factories that build a fresh Trainer
+                for each training call. To benefit from best-model reload, the produced Trainer
+                should include a ``ModelCheckpoint`` callback (typically monitoring ``val_loss``).
+
+                Example:
+                    trainer_factories = [
+                        lambda: Trainer(max_epochs=200, accelerator="auto",
+                                        callbacks=[EarlyStopping(monitor="val_loss", patience=50),
+                                                   ModelCheckpoint(monitor="val_loss", save_top_k=1)]),
+                        ...
+                    ]
+            batch_sizes (list[int]): Batch size used to train each model.
+            shuffle_dataloaders (list[bool]): Whether to shuffle the training DataLoader of each model.
+        """
+        if (len(lightning_modules) != len(self.models) or
+                len(trainer_factories) != len(self.models) or
+                len(shuffle_dataloaders) != len(self.models) or
+                len(batch_sizes) != len(self.models)):
+            raise ValueError(
+                f"The number of lightning modules (size={len(lightning_modules)}), "
+                f"trainer factories (size={len(trainer_factories)}), "
+                f"shuffle_dataloaders (size={len(shuffle_dataloaders)}), "
+                f"batch_sizes (size={len(batch_sizes)}) must be the same as the number of models "
+                f"(size={len(self.models)})."
+            )
+
+        self.lightning_modules = lightning_modules
+        self.trainer_factories = trainer_factories
+        self.batch_sizes = batch_sizes
+        self.shuffle_dataloaders = shuffle_dataloaders
+
+    def _check_if_training_is_possible(self) -> None:
+        if (self.lightning_modules is None
+                or self.trainer_factories is None
+                or self.batch_sizes is None
+                or self.shuffle_dataloaders is None):
+            raise ValueError("You need to call setup_training before calling train.")
 
     def train(
             self,
@@ -78,7 +123,9 @@ class Coprog:
             suspension_data: torch.Tensor,
             suspension_ids: torch.Tensor,
             iterations: int,
-            suspension_pool_size: int
+            suspension_pool_size: int,
+            val_data: torch.Tensor | None = None,
+            val_label: torch.Tensor | None = None,
     ) -> None:
         """
         Full COPROG training procedure (Algorithm 1 in the paper).
@@ -86,18 +133,24 @@ class Coprog:
         :param failure_data:        Shape (N, *feature_dims) – labelled failure set L.
         :param failure_label:       Shape (N,) or (N, 1)     – RUL labels for L.
         :param suspension_data:     Shape (M, *feature_dims) – unlabelled suspension set U.
+        :param suspension_ids:      Shape (M,) – unit id of each suspension sequence.
         :param iterations:          Maximum number of co-training rounds T.
         :param suspension_pool_size: Size u of the random sub-pool U' drawn each round.
+        :param val_data:            Optional validation features used for early stopping /
+                                    best-checkpoint selection during every training call.
+        :param val_label:           Optional validation labels associated with ``val_data``.
+                                    Must be provided together with ``val_data``.
         """
-        failure_data = failure_data.to(self.device)
-        failure_label = failure_label.to(self.device).float()
-        suspension_data = suspension_data.to(self.device)
-        suspension_ids = suspension_ids.to(self.device)
+        self._check_if_training_is_possible()
+
+        if (val_data is None) != (val_label is None):
+            raise ValueError("val_data and val_label must both be provided or both be None.")
 
         total_suspension_units = len(torch.unique(suspension_ids))
         self._log(1, f"[Coprog] Starting training | failure samples: {len(failure_data)} | "
                      f"censored units: {total_suspension_units} | "
-                     f"max iterations: {iterations} | pool size: {suspension_pool_size}")
+                     f"max iterations: {iterations} | pool size: {suspension_pool_size} | "
+                     f"validation: {'yes' if val_data is not None else 'no'}")
 
         # Line 1 – L1 = L2 = L  (we split L into two views)
         x1, y1 = failure_data, failure_label
@@ -106,29 +159,25 @@ class Coprog:
         # Line 2 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
         self._log(1, f"[Coprog] Initial training of h1 on {len(x1)} failure samples...")
         h1 = self._train_fun(
-            copy.deepcopy(self.first_model),
+            copy.deepcopy(self.lightning_modules[0]),
+            0,
             x1,
             y1,
-            self.lr_first_model,
-            self.batch_size_first_model,
-            self.epochs_first_model,
-            "h1",
+            val_data,
+            val_label,
         )
         self._log(1, f"[Coprog] Initial training of h2 on {len(x2)} failure samples...")
         h2 = self._train_fun(
-            copy.deepcopy(self.second_model),
+            copy.deepcopy(self.lightning_modules[1]),
+            1,
             x2,
             y2,
-            self.lr_second_model,
-            self.batch_size_second_model,
-            self.epochs_second_model,
-            "h2"
+            val_data,
+            val_label,
         )
         self._log(1, f"[Coprog] Initial training done.")
 
-        remaining_suspension_ids = torch.unique(suspension_ids)# remaining_suspension = suspension_data.clone()
-
-        number_iterations = 0
+        remaining_suspension_ids = torch.unique(suspension_ids)
 
         # Line 3 – Repeat for T times
         for i in range(iterations):
@@ -140,26 +189,13 @@ class Coprog:
 
             pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
             shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
-            pool_ids = shuffled_ids[:pool_size] # U'
+            pool_ids = shuffled_ids[:pool_size]  # U'
 
             self._log(1, f"[Coprog] --- Iteration {i + 1}/{iterations} | "
                          f"remaining censored units: {len(remaining_suspension_ids)} | "
                          f"pool: {pool_ids.tolist()} ---")
 
             pi = [None, None]  # π1, π2
-
-            training_params = [
-                {
-                    "lr": self.lr_first_model,
-                    "batch_size": self.batch_size_first_model,
-                    "epochs": self.epochs_first_model,
-                },
-                {
-                    "lr": self.lr_second_model,
-                    "batch_size": self.batch_size_second_model,
-                    "epochs": self.epochs_second_model,
-                }
-            ]
 
             # Line 5 – for j = 1 to 2
             for j, (hj, xj, yj) in enumerate([(h1, x1, y1), (h2, x2, y2)]):
@@ -180,21 +216,19 @@ class Coprog:
                     # Line 7 – pseudo-label from current model j
                     lu_p = self._predict(hj, xu)  # L^P_u
 
-                    # Line 8 – train a temporary model h'j
-                    model_j = copy.deepcopy(self.first_model if j == 0 else self.second_model)
+                    # Line 8 – train a temporary model h'j from scratch on the augmented set
                     x_aug = torch.cat([xj, xu], dim=0)
 
                     lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
                     y_aug = torch.cat([yj, lu_p_reshaped], dim=0)
 
                     hj_prime = self._train_fun(
-                        copy.deepcopy(model_j),
+                        copy.deepcopy(self.lightning_modules[j]),
+                        j,
                         x_aug,
                         y_aug,
-                        training_params[j]["lr"],
-                        training_params[j]["batch_size"],
-                        training_params[j]["epochs"],
-                        f"h{j + 1}_prime",
+                        val_data,
+                        val_label,
                     )
 
                     # Line 9 – Δ_{j, X_u} = MSE(hj, L) – MSE(h'j, L)
@@ -258,25 +292,22 @@ class Coprog:
             # Line 20 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
             self._log(1, f"[Coprog]   Retraining h1 | dataset size: {len(x1)} samples")
             h1 = self._train_fun(
-                copy.deepcopy(self.first_model),
+                copy.deepcopy(self.lightning_modules[0]),
+                0,
                 x1,
                 y1,
-                self.lr_first_model,
-                self.batch_size_first_model,
-                self.epochs_first_model,
-                "h1",
+                val_data,
+                val_label,
             )
             self._log(1, f"[Coprog]   Retraining h2 | dataset size: {len(x2)} samples")
             h2 = self._train_fun(
-                copy.deepcopy(self.second_model),
+                copy.deepcopy(self.lightning_modules[1]),
+                1,
                 x2,
                 y2,
-                self.lr_second_model,
-                self.batch_size_second_model,
-                self.epochs_second_model,
-                "h2"
+                val_data,
+                val_label,
             )
-            number_iterations += 1
 
         self._log(1, f"[Coprog] Training complete.")
 
@@ -298,75 +329,73 @@ class Coprog:
         if self.w1 is None or self.w2 is None:
             raise RuntimeError("Call .calculate_weights() before .predict().")
 
-        x = x.to(self.device)
-        p1 = self._predict(self._h1, x)
-        p2 = self._predict(self._h2, x)
+        p1 = self._predict(self._h1, x).view(-1)
+        p2 = self._predict(self._h2, x).view(-1)
         return self.w1 * p1 + self.w2 * p2
 
     def _train_fun(
             self,
-            model: nn.Module,
+            model: LightningModule,
+            model_index: int,
             x: torch.Tensor,
             y: torch.Tensor,
-            lr: float,
-            batch_size: int,
-            epochs: int,
-            model_name: str = ""
-    ) -> nn.Module:
+            val_x: torch.Tensor | None = None,
+            val_y: torch.Tensor | None = None,
+    ) -> LightningModule:
         """
-        TrainFun: fit `model` on (x, y) with MSE loss and return it.
+        TrainFun: fit ``model`` on (x, y) with Lightning and return it.
         Equivalent to lines 2 / 8 / 20 in the pseudo-code.
+
+        A fresh Trainer is built from the factory for this model index. If a
+        validation set is provided it is used for early stopping / checkpointing.
+        After ``trainer.fit`` the best checkpoint (as tracked by the trainer's
+        ``ModelCheckpoint`` callback) is reloaded so we never keep the potentially
+        worse last-epoch weights.
         """
-        model = model.to(self.device)
-        model.train()
+        # A Trainer keeps internal state, so we always build a fresh one.
+        trainer = self.trainer_factories[model_index]()
+        batch_size = self.batch_sizes[model_index]
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        criterion = nn.MSELoss()
+        train_loader = DataLoader(
+            TensorDataset(x, y),
+            batch_size=batch_size,
+            shuffle=self.shuffle_dataloaders[model_index],
+        )
 
-        dataset = TensorDataset(x, y)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=self.shuffle_dataloader)
+        val_loader = None
+        if val_x is not None and val_y is not None:
+            val_loader = DataLoader(TensorDataset(val_x, val_y), batch_size=batch_size)
 
-        self._log(2, f"[Coprog]     Training {model_name} | samples: {len(x)} | "
-                     f"epochs: {epochs} | batch_size: {batch_size} | lr: {lr}")
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
-        best_loss = 1_000_000
-        avg_epochs_loss = 0.
-
-        for epoch in range(epochs):
-            avg_loss = 0.
-
-            for x_batch, y_batch in loader:
-                optimizer.zero_grad()
-                loss = criterion(model(x_batch), y_batch)
-                loss.backward()
-                optimizer.step()
-
-                avg_loss += loss.item()
-
-            if avg_loss < best_loss:
-                best_loss = (avg_loss / len(loader))
-
-            avg_epochs_loss += (avg_loss / len(loader))
-
-        self._log(2, f"[Coprog]     {model_name} done | avg loss: {avg_epochs_loss / epochs:.4f} | "
-                     f"best epoch loss: {best_loss:.4f}")
+        # Reload the best checkpoint (based on the monitored validation metric) so we
+        # use the best model after training instead of the last-epoch weights.
+        checkpoint_callback = getattr(trainer, "checkpoint_callback", None)
+        best_model_path = getattr(checkpoint_callback, "best_model_path", "") if checkpoint_callback else ""
+        if best_model_path:
+            self._log(2, f"[Coprog]     Reloading best model from {best_model_path}")
+            checkpoint = torch.load(best_model_path, map_location=model.device, weights_only=False)
+            model.load_state_dict(checkpoint["state_dict"])
+        else:
+            self._log(2, f"[Coprog]     No best model find the model with last epoch is used")
 
         return model
 
-    @torch.no_grad()
-    def _predict(self, model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    def _predict(self, model: LightningModule, x: torch.Tensor) -> torch.Tensor:
         """
-        Return flattened predictions (shape (N,)) without tracking gradients.
+        Return model predictions (shape (N, *output_dims)) without tracking gradients.
         """
         model.eval()
-        return model(x).view(-1)
+        with torch.no_grad():
+            x = x.to(next(model.parameters()).device)
+            return model(x)
 
     def _confidence_measure(
             self,
             x: torch.Tensor,
             y: torch.Tensor,
-            original_model: nn.Module,
-            augmented_model: nn.Module,
+            original_model: LightningModule,
+            augmented_model: LightningModule,
     ) -> float:
         """
         Δ_{j, X_u} from line 9:
@@ -382,7 +411,7 @@ class Coprog:
 
         :return Scalar float (positive ⟹ improvement).
         """
-        y_flat = y.view(-1)
+        y_flat = y.view(-1).to(next(original_model.parameters()).device)
 
         pred_orig = self._predict(original_model, x).view(-1)
         pred_aug = self._predict(augmented_model, x).view(-1)
@@ -400,17 +429,15 @@ class Coprog:
             mode: str,
     ):
         """
+        Compute the ensemble weights from each model's score on a held-out set.
 
         Args:
-            x_test:
-            target:
-            criteria_callback:
+            x_test: Features of the held-out (ideally validation) set.
+            target: Labels of the held-out set.
+            criteria_callback: Callable returning a scalar score from (prediction, target).
             mode: value can be "min" or "max".
                 "min" mean that more the score is little more the model is good.
                 "max" mean that more the score is high more the model is good.
-
-        Returns:
-
         """
         if mode not in ["min", "max"]:
             raise ValueError("Mode must be either 'min' or 'max'.")
@@ -420,14 +447,15 @@ class Coprog:
 
         scores = []
 
-        x_test = x_test.to(self.device)
-        target = target.to(self.device).float()
+        # Flatten both sides so the criteria callback compares aligned (N,) vectors
+        # instead of broadcasting (N, 1) against (N,) into an (N, N) matrix.
+        target_flat = target.view(-1).float()
 
-        pred_h1 = self._predict(self._h1, x_test)
-        scores.append(criteria_callback(pred_h1, target))
+        pred_h1 = self._predict(self._h1, x_test).view(-1).to(target_flat.device)
+        scores.append(criteria_callback(pred_h1, target_flat))
 
-        pred_h2 = self._predict(self._h2, x_test)
-        scores.append(criteria_callback(pred_h2, target))
+        pred_h2 = self._predict(self._h2, x_test).view(-1).to(target_flat.device)
+        scores.append(criteria_callback(pred_h2, target_flat))
 
         self._log(1, f"[Coprog] Calculating weights (mode={mode}) | "
                      f"scores per model: {[round(s, 4) for s in scores]}")

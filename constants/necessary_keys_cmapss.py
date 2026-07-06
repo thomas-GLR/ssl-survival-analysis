@@ -109,6 +109,7 @@ NECESSARY_COPROG_KEYS = [
     "epochs_second_model",
     "batch_size_first_model",
     "batch_size_second_model",
+    "patience",
     "coprog_iterations",
     "coprog_suspension_pool_size",
 ]
