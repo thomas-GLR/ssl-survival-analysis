@@ -63,7 +63,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.train
-    image: guitix/cmapss-train:dev-6ad5d5ec
+    image: guitix/cmapss-train:dev-4721e346
     profiles: [train]
 
     # Load optional override file first, then inline env below
