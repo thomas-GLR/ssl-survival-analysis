@@ -12,11 +12,11 @@ from torch.utils.data import TensorDataset, DataLoader
 
 
 class SelectionMode(Enum):
-    VOTING = 1
-    EVIDENCE = 2
+    VOTING = "voting"
+    EVIDENCE = "evidence"
 
 
-class CoTrainingEnsemble_v2:
+class CoTrainingEnsemble:
     """
     This is the second version of the co training ensemble. This version have a higher computational cost.
     """
@@ -173,7 +173,7 @@ class CoTrainingEnsemble_v2:
             iterations:
                 The number of iteration for training models on suspension data
             suspension_pool_size:
-                The number of suspension data selected for each iteration
+                The number of suspension data selected for each iteration. If -1 then all censored data are selected
             val_data:
                 Optional validation features used for early stopping / best-checkpoint
                 selection during every training call.
@@ -227,7 +227,10 @@ class CoTrainingEnsemble_v2:
                 self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
                 break
 
-            pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
+            if suspension_pool_size == -1:
+                pool_size = len(remaining_suspension_ids)
+            else:
+                pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
             shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
             pool_ids = shuffled_ids[:pool_size]  # U'
 

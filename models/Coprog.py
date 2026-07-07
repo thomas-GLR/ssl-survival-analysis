@@ -135,7 +135,7 @@ class Coprog:
         :param suspension_data:     Shape (M, *feature_dims) – unlabelled suspension set U.
         :param suspension_ids:      Shape (M,) – unit id of each suspension sequence.
         :param iterations:          Maximum number of co-training rounds T.
-        :param suspension_pool_size: Size u of the random sub-pool U' drawn each round.
+        :param suspension_pool_size: Size u of the random sub-pool U' drawn each round. If -1 then all censored are selected
         :param val_data:            Optional validation features used for early stopping /
                                     best-checkpoint selection during every training call.
         :param val_label:           Optional validation labels associated with ``val_data``.
@@ -187,7 +187,10 @@ class Coprog:
                 self._log(1, f"[Coprog] Early stop at iteration {i}: no remaining censored units.")
                 break
 
-            pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
+            if suspension_pool_size == -1:
+                pool_size = len(remaining_suspension_ids)
+            else:
+                pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
             shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
             pool_ids = shuffled_ids[:pool_size]  # U'
 
