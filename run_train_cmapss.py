@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import traceback
 
 # Cap CPU/BLAS thread pools *before* numpy/torch/sklearn initialize their
 # native backends. GPU pods (e.g. RunPod) often expose many vCPUs; left
@@ -98,6 +99,8 @@ def reproduce_result(
 
     benchmark_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
+    log_file_path = os.path.join(results_path, f"log_model_{model_version.value}_{benchmark_datetime}.txt")
+
     for sub_dataset in cmapss_files:
         secure_save_for_sub_dataset_rows = []
 
@@ -123,19 +126,37 @@ def reproduce_result(
                     necessary_keys=necessary_model_keys,
                 )
 
-                rmse, score = train_model_func(
-                    checkpoints_path=checkpoints_path,
-                    results_path=results_path,
-                    model_version=model_version.value,
-                    dataset_root=dataset_root,
-                    sub_dataset=sub_dataset,
-                    percent_of_broken_data=broken_percentage,
-                    percent_of_censored_data=censored_percentage,
-                    **dataset_params,
-                    **model_params,
-                    device=device,
-                    datetime_for_folders=benchmark_datetime,
-                )
+                try:
+                    rmse, score = train_model_func(
+                        checkpoints_path=checkpoints_path,
+                        results_path=results_path,
+                        model_version=model_version.value,
+                        dataset_root=dataset_root,
+                        sub_dataset=sub_dataset,
+                        percent_of_broken_data=broken_percentage,
+                        percent_of_censored_data=censored_percentage,
+                        **dataset_params,
+                        **model_params,
+                        device=device,
+                        datetime_for_folders=benchmark_datetime,
+                    )
+                except Exception as e:
+                    rmse = None
+                    score = None
+
+                    with open(log_file_path, "a", encoding="utf-8") as f:
+                        f.write(f"=== {model_version.value} run ===\n")
+                        f.write(f"Datetime: {benchmark_datetime}\n")
+                        f.write(f"Sub-dataset: {sub_dataset}\n")
+                        f.write(f"Percent censored: {censored_percentage}\n")
+                        f.write(f"Percent broken: {broken_percentage}\n")
+                        f.write(f"Error: {e}\n")
+                        traceback.print_exc(file=f)
+                        f.write("================================\n")
+
+                    print(f"An error occured for subdataset: {sub_dataset}, censored: {censored_percentage}, broken: {broken_percentage} :")
+                    print(f"Error: {e}")
+                    traceback.print_exc()
 
                 new_dataframe_row = {
                     results_columns.SUB_DATASET: sub_dataset,
