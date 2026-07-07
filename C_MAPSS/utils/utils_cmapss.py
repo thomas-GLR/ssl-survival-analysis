@@ -184,6 +184,22 @@ def create_and_get_checkpoints_results_path(
     return final_checkpoints_path, final_results_path
 
 
+def write_run_metadata_file(directory_path: str, metadata: dict, filename_prefix: str = "run-info") -> str:
+    os.makedirs(directory_path, exist_ok=True)
+
+    datetime_for_folders = metadata.get("datetime_for_folders")
+    if datetime_for_folders:
+        filename = f"{filename_prefix}-{datetime_for_folders}.json"
+    else:
+        filename = f"{filename_prefix}.json"
+
+    file_path = os.path.join(directory_path, filename)
+    with open(file_path, mode="wt") as file_handle:
+        json.dump(metadata, file_handle, indent=2, sort_keys=True)
+
+    return file_path
+
+
 def cmapss_score(predict: np.ndarray, label: np.ndarray) -> float:
     a1 = 13
     a2 = 10

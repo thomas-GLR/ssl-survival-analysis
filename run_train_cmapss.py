@@ -19,7 +19,7 @@ import os
 # contention than on work, pegging the CPU without speeding anything up.
 # Respect whatever the container/orchestrator already set (e.g. .env.train)
 # and only fall back to a default here.
-_NUM_THREADS = os.environ.setdefault("OMP_NUM_THREADS", "4")
+_NUM_THREADS = os.environ.setdefault("OMP_NUM_THREADS", "16")
 os.environ.setdefault("MKL_NUM_THREADS", _NUM_THREADS)
 os.environ.setdefault("OPENBLAS_NUM_THREADS", _NUM_THREADS)
 
@@ -96,8 +96,6 @@ def reproduce_result(
     necessary_model_keys = get_necessary_model_keys(model_version)
     train_model_func = get_train_model_method(model_version)
 
-    benchmark_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
     for sub_dataset in cmapss_files:
         secure_save_for_sub_dataset_rows = []
 
@@ -134,7 +132,6 @@ def reproduce_result(
                     **dataset_params,
                     **model_params,
                     device=device,
-                    datetime_for_folders=benchmark_datetime,
                 )
 
                 new_dataframe_row = {
@@ -163,7 +160,7 @@ def reproduce_result(
 
         print(f"Saving intermediate result for sub dataset {sub_dataset}...")
         secure_save_for_sub_dataset.to_csv(
-            f"{results_path}/secure_{sub_dataset}_{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
+            f"{results_path}/secure_{sub_dataset}_{model_version.value}_benchmark_{benchmark_version}_results_turbofan.csv",
             index=False)
 
     df_results = pd.DataFrame(rows, columns=columns)
@@ -172,7 +169,7 @@ def reproduce_result(
 
     print("Saving results...")
 
-    df_results.to_csv(f"{results_path}/{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
+    df_results.to_csv(f"{results_path}/{model_version.value}_benchmark_{benchmark_version}_results_turbofan.csv",
                       index=False)
 
 

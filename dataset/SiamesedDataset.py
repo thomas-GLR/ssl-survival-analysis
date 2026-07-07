@@ -337,9 +337,8 @@ class SiameseDataset:
             engine units held out as the validation split.
         :param percent_of_censored_data: forwarded to CMAPSSDataset; fraction
             of train/validation units that are censored ("broken" domain,
-            i.e. truncated before failure). Required to be > 0: the pretext
-            task needs both a "broken" and a "fail" domain to build its
-            domain label and to expose unlabeled, partially observed runs.
+            i.e. truncated before failure). May be 0.0 when you want to run
+            the pair sampler without a censored domain.
         :param percent_of_broken_data: forwarded to CMAPSSDataset; fraction
             of cycles kept for each censored unit. None means a random
             fraction is drawn independently for every censored unit, same
@@ -368,9 +367,8 @@ class SiameseDataset:
               pretraining; it is not used by the pretext task itself.
         """
         assert sub_dataset in cls.WINDOW_SIZES, f"sub_dataset must be one of {list(cls.WINDOW_SIZES)}, got {sub_dataset}"
-        assert 0 < percent_of_censored_data <= 1, (
-            "The siamese pretext task needs both a 'fail' and a 'broken' domain, so "
-            "percent_of_censored_data must be > 0 (see CMAPSSDataset.percent_of_censored_data)."
+        assert 0 <= percent_of_censored_data <= 1, (
+            "percent_of_censored_data must be between 0 and 1 (see CMAPSSDataset.percent_of_censored_data)."
         )
 
         window_size = window_size or cls.WINDOW_SIZES[sub_dataset]
@@ -475,9 +473,8 @@ class SiameseDataset:
         if "is_censored" not in dataset.df.columns:
             raise RuntimeError(
                 "No 'is_censored' column found on the dataset. The siamese "
-                "pretext task needs CMAPSSDataset to generate censored "
-                "('broken') units; pass percent_of_censored_data > 0 to "
-                "SiameseDataset.from_cmapss()."
+                "loader expects CMAPSSDataset to attach this column even when "
+                "percent_of_censored_data is 0.0."
             )
 
         run_ids = np.unique(dataset.id_array)

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
@@ -74,6 +75,16 @@ def train_self_supervised(
 
     broken_percentage = 0. if percent_of_broken_data is None else percent_of_broken_data
 
+    datetime_for_folders = _resolve_run_datetime(
+        checkpoints_path=checkpoints_path,
+        results_path=results_path,
+        model_version=model_version,
+        sub_dataset=sub_dataset,
+        percent_of_censored_data=percent_of_censored_data,
+        percent_of_broken_data=broken_percentage,
+        default_datetime=datetime_for_folders,
+    )
+
     folder_for_current_pretraining = f"pre-trained-model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
     folder_for_current_training = f"model-baseline-with-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
 
@@ -84,6 +95,19 @@ def train_self_supervised(
     os.makedirs(final_result_path_pretraining, exist_ok=True)
     final_result_path_baseline = os.path.join(results_path, folder_for_current_training)
     os.makedirs(final_result_path_baseline, exist_ok=True)
+
+    run_metadata = {
+        "datetime_for_folders": datetime_for_folders,
+        "model_version": model_version,
+        "sub_dataset": sub_dataset,
+        "percent_of_censored_data": percent_of_censored_data,
+        "percent_of_broken_data": broken_percentage,
+        "seed": seed,
+        "device": device,
+    }
+
+    utils_cmapss.write_run_metadata_file(pretraining_checkpoints_path, {**run_metadata, "phase": "pretraining"})
+    utils_cmapss.write_run_metadata_file(final_result_path_pretraining, {**run_metadata, "phase": "pretraining"})
 
     # First we will pretrain the unsupervised model
     dataset_params = {
@@ -182,6 +206,8 @@ def train_self_supervised(
         patience=patience
     )
 
+    pretraining_resume_checkpoint = _find_latest_checkpoint(pretraining_checkpoints_path)
+
     pretraining_model_parameters = {
         'in_channels': in_channels,
         'seq_len': sequence_len,
@@ -209,7 +235,12 @@ def train_self_supervised(
 
     print("Training pre-trained model")
 
-    trainer.fit(model, train_dataloaders=train_pair_loader, val_dataloaders=val_pair_loader)
+    trainer.fit(
+        model,
+        train_dataloaders=train_pair_loader,
+        val_dataloaders=val_pair_loader,
+        ckpt_path=pretraining_resume_checkpoint,
+    )
 
 
     callbacks_metrics = trainer.callback_metrics
@@ -239,13 +270,23 @@ def train_self_supervised(
         patience=patience,
     )
 
+    baseline_resume_checkpoint = _find_latest_checkpoint(training_checkpoints_path)
+
+    utils_cmapss.write_run_metadata_file(training_checkpoints_path, {**run_metadata, "phase": "baseline"})
+    utils_cmapss.write_run_metadata_file(final_result_path_baseline, {**run_metadata, "phase": "baseline"})
+
     train_loader = train_dataset.get_data_loader_without_censored_data(batch_size_baseline, is_model_cnn=True)
     val_loader = val_dataset.get_data_loader_without_censored_data(batch_size_baseline, is_model_cnn=True)
     test_loader = test_dataset.get_data_loader_without_censored_data(batch_size_baseline, is_model_cnn=True)
 
     print("Training baseline model")
 
-    trainer.fit(baseline, train_dataloaders=train_loader, val_dataloaders=val_loader or test_loader)
+    trainer.fit(
+        baseline,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader or test_loader,
+        ckpt_path=baseline_resume_checkpoint,
+    )
 
     callbacks_metrics_train_val = trainer.callback_metrics
 
@@ -305,12 +346,14 @@ def build_trainer(
         monitor='val/regression_loss',
         filename='checkpoint-{epoch:02d}-{val_regression_loss:.4f}',
         save_top_k=1,
+        save_last=True,
         mode='min',
     )
 
     return Trainer(
         default_root_dir=checkpoints_path,
         accelerator=device,
+        devices=1,
         max_epochs=max_epochs,
         num_sanity_val_steps=2,
         log_every_n_steps=10,
@@ -318,6 +361,53 @@ def build_trainer(
         val_check_interval=1.0,
         callbacks=[early_stop_callback, checkpoint_callback],
     )
+
+
+def _find_latest_checkpoint(checkpoints_path: str) -> str | None:
+    checkpoint_files = list(Path(checkpoints_path).rglob("*.ckpt"))
+    if not checkpoint_files:
+        return None
+
+    last_checkpoint = next((path for path in checkpoint_files if path.name == "last.ckpt"), None)
+    if last_checkpoint is not None:
+        return str(last_checkpoint)
+
+    latest_checkpoint = max(checkpoint_files, key=lambda path: path.stat().st_mtime)
+    return str(latest_checkpoint)
+
+
+def _resolve_run_datetime(
+        checkpoints_path: str,
+        results_path: str,
+        model_version: str,
+        sub_dataset: str,
+        percent_of_censored_data: float,
+        percent_of_broken_data: float,
+        default_datetime: str,
+) -> str:
+    run_prefixes = ("pre-trained-model", "model-baseline-with")
+    matched_runs: list[Path] = []
+
+    for base_path in (checkpoints_path, results_path):
+        for run_prefix in run_prefixes:
+            pattern = (
+                f"{run_prefix}-{model_version}-turbofan-{sub_dataset}-*/"
+                f"censored-{percent_of_censored_data:.2f}-broken-{percent_of_broken_data:.2f}"
+            )
+            matched_runs.extend(Path(base_path).glob(pattern))
+
+    if not matched_runs:
+        return default_datetime
+
+    latest_run = max(matched_runs, key=lambda path: path.stat().st_mtime)
+    run_root_name = latest_run.parent.name
+
+    for run_prefix in run_prefixes:
+        prefix = f"{run_prefix}-{model_version}-turbofan-{sub_dataset}-"
+        if run_root_name.startswith(prefix):
+            return run_root_name[len(prefix):]
+
+    return default_datetime
 
 
 def get_pair_loader_for_pretraining(
