@@ -35,6 +35,8 @@ def train_model(
         batchs_size: list[int],
         shuffle_dataloaders: list[bool],
         lr: list[float],
+        fine_tune_lr_factor: float,
+        forgetting_warning_tolerance: float,
         # Model params
         hidden_dim_lstm: int,
         lstm_num_layers_lstm: int,
@@ -203,7 +205,9 @@ def train_model(
 
     cotraining_ensemble = CoTrainingEnsemble(
         models=models,
-        verbose=2
+        verbose=2,
+        fine_tune_lr_factor=fine_tune_lr_factor,
+        forgetting_warning_tolerance=forgetting_warning_tolerance,
     )
 
     models_number = len(models)
@@ -270,6 +274,17 @@ def train_model(
 
     print(f"Training Coprog model...")
 
+    # Persistent run log next to the results. Created (truncated) here with a metadata
+    # header, then handed to the ensemble which appends all its messages under it.
+    log_file_path = os.path.join(results_path, "log.txt")
+    with open(log_file_path, "w", encoding="utf-8") as f:
+        f.write("=== Co-Training Ensemble run ===\n")
+        f.write(f"Datetime: {datetime_for_folders}\n")
+        f.write(f"Sub-dataset: {sub_dataset}\n")
+        f.write(f"Percent censored: {percent_of_censored_data}\n")
+        f.write(f"Percent broken: {percent_of_broken_data}\n")
+        f.write("================================\n")
+
     try:
         cotraining_ensemble.train(
             is_fine_tuning_during_finding_best_suspension_data=is_fine_tuning_during_finding_best_suspension_data,
@@ -284,6 +299,7 @@ def train_model(
             suspension_pool_size=coprog_suspension_pool_size,
             val_data=val_features,
             val_label=val_targets,
+            log_file=log_file_path,
         )
 
         # Ensemble weights are computed on the validation set, not the test set,
@@ -394,6 +410,7 @@ if __name__ == "__main__":
     patiences = [2, 2, 2, 2]
     batchs_size = [256, 256, 256, 256]
     shuffle_dataloaders = [True, True, True, True]
+    lr = [0.0002, 0.0002, 0.0002, 0.0002]
 
     # Model params. Transformer head counts must divide d_model (= sequence_len = 32).
     hidden_dim_lstm = 32
@@ -422,6 +439,7 @@ if __name__ == "__main__":
         patiences=patiences,
         batchs_size=batchs_size,
         shuffle_dataloaders=shuffle_dataloaders,
+        lr=lr,
         # Model params
         hidden_dim_lstm=hidden_dim_lstm,
         lstm_num_layers_lstm=lstm_num_layers_lstm,

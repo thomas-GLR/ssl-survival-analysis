@@ -65,10 +65,18 @@ class CoTrainingEnsemble:
         self.verbose = verbose
         self.fine_tune_lr_factor = fine_tune_lr_factor
         self.forgetting_warning_tolerance = forgetting_warning_tolerance
+        # Optional path to a .txt log file (set by ``train``). When not None, every
+        # ``_log`` message is appended to it regardless of ``verbose``.
+        self._log_file_path: str | None = None
 
     def _log(self, level: int, message: str) -> None:
         if self.verbose >= level:
             print(message)
+        # When a log file is configured, capture every message regardless of level;
+        # append-per-call keeps it crash-safe and needs no file-handle lifecycle.
+        if self._log_file_path is not None:
+            with open(self._log_file_path, "a", encoding="utf-8") as f:
+                f.write(message + "\n")
 
     def setup_training(
             self,
@@ -144,6 +152,7 @@ class CoTrainingEnsemble:
             suspension_pool_size: int,
             val_data: torch.Tensor | None = None,
             val_label: torch.Tensor | None = None,
+            log_file: str | None = None,
     ) -> None:
         r"""The train algorithm for co-training ensemble v2
 
@@ -180,7 +189,15 @@ class CoTrainingEnsemble:
             val_label:
                 Optional validation labels associated with ``val_data``. Must be provided
                 together with ``val_data``.
+            log_file:
+                Optional path to a ``.txt`` file. When given, every log message is
+                appended to it regardless of ``verbose`` (stdout still follows
+                ``verbose``). The path stays active on the instance after ``train``
+                returns, so logs from a subsequent ``calculate_weights`` call are
+                captured too.
         """
+        self._log_file_path = log_file
+
         self._check_if_training_is_possible()
 
         if (val_data is None) != (val_label is None):

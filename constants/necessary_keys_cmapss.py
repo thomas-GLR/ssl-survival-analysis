@@ -145,6 +145,8 @@ NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
     "batchs_size",
     "lr",
     "shuffle_dataloaders",
+    "fine_tune_lr_factor",
+    "forgetting_warning_tolerance",
     "hidden_dim_lstm",
     "lstm_num_layers_lstm",
     "lstm_dropout_lstm",
