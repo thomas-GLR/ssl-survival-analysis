@@ -9,7 +9,7 @@ class TransformerFeatures(nn.Module):
             transformer_encoder_head_num,
             fc_layer_dim,
             fc_dropout,
-            num_layers=2,
+            transformer_num_layer=2,
     ):
         super().__init__()
         # Tokens are feature channels and each token's embedding is that sensor's raw time
@@ -37,7 +37,7 @@ class TransformerFeatures(nn.Module):
             nhead=self.transformer_encoder_head_num,
             batch_first=True,
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=transformer_num_layer)
 
         self.gap = nn.AdaptiveAvgPool1d(1)
         self.flatten = nn.Flatten()

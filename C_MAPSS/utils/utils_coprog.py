@@ -9,8 +9,8 @@ from lightning import Trainer
 from lightning.pytorch import callbacks
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
-from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
-from C_MAPSS.models import CNN1D, Simple_LSTM
+from C_MAPSS.lightning_module import TransformerLstmModule
+from models import CNN1D, Simple_LSTM
 from C_MAPSS.utils import utils_cmapss
 from models import Coprog
 

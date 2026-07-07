@@ -28,7 +28,6 @@ import argparse
 import logging
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
 import torch
 
@@ -36,8 +35,7 @@ torch.set_num_threads(int(_NUM_THREADS))
 torch.set_num_interop_threads(int(_NUM_THREADS))
 
 from constants import results_columns
-from C_MAPSS.utils import utils_cmapss
-from C_MAPSS.utils.ModelVersion import ModelVersion
+from shared.utils import ModelVersion
 from C_MAPSS.utils.utils_cmapss import (get_necessary_dataset_keys,
                                         get_necessary_model_keys,
                                         get_train_model_method, extract_benchmark_information_from_config,
@@ -215,7 +213,7 @@ def _parse_args() -> argparse.Namespace:
         "--model-version",
         required=True,
         choices=[
-            "transformer",
+            "transformer_lstm",
             "lstm",
             "autoencoder",
             "metric",

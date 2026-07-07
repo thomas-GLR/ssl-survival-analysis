@@ -73,6 +73,90 @@ class ScikitDataset:
             train_cmapss, test_cmapss, valid_cmapss, cmapss_col.ID, cmapss_col.TIME, summarize_features
         )
 
+    @staticmethod
+    def from_scania(data_module) -> tuple["ScikitDataset", "ScikitDataset", "ScikitDataset | None"]:
+        """Build train/test/valid ScikitDatasets from a ScaniaDataModule for RSF.
+
+        A Random Survival Forest cannot consume multivariate time series, so every
+        readout row is treated as its own individual (no feature summarization, no
+        keep-last-row). For a row at ``time_step = t`` of a vehicle:
+
+        - ``Time``   = ``time_step`` (elapsed observed time). RSF predicts the total
+          lifetime as ``∫ survival_fn``; RUL = ``predicted_total - Time``.
+        - ``Status`` = ``True`` if the vehicle failed (``is_censored == 0``) else ``False``.
+        - ``rul``    = ``length_of_study_time_step - time_step`` (true RUL for failures).
+
+        Training keeps all rows (RSF handles censoring via ``Status``). The test set
+        is restricted to uncensored (failure) rows so a true RUL exists for evaluation.
+
+        :param data_module: A ``ScaniaDataModule`` (setup is triggered here if needed).
+        :return: ``(train, test, valid)`` ScikitDatasets; ``valid`` is ``None`` if the
+            module has no validation split.
+        """
+        # Local import to avoid any package-init import cycle (scania depends on dataset).
+        from constants.scania_component_x_columns import VEHICLE_ID, TIME_STEP
+        from scania.dataset.ScaniaDataset import IS_CENSORED, RUL_LOWER_BOUND
+
+        data_module.setup()
+        feature_cols = list(data_module.feature_cols)
+
+        train = ScikitDataset._scania_split_to_scikit(
+            data_module.train_set, feature_cols, IS_CENSORED, TIME_STEP, VEHICLE_ID,
+            RUL_LOWER_BOUND, keep_uncensored_only=False,
+        )
+        test = ScikitDataset._scania_split_to_scikit(
+            data_module.test_set, feature_cols, IS_CENSORED, TIME_STEP, VEHICLE_ID,
+            RUL_LOWER_BOUND, keep_uncensored_only=True,
+        )
+        valid = None
+        if data_module.val_set is not None:
+            valid = ScikitDataset._scania_split_to_scikit(
+                data_module.val_set, feature_cols, IS_CENSORED, TIME_STEP, VEHICLE_ID,
+                RUL_LOWER_BOUND, keep_uncensored_only=False,
+            )
+
+        return train, test, valid
+
+    @staticmethod
+    def _scania_split_to_scikit(
+            scania_dataset,
+            feature_cols: list[str],
+            is_censored_col: str,
+            time_col: str,
+            id_col: str,
+            rul_col: str,
+            keep_uncensored_only: bool,
+    ) -> "ScikitDataset":
+        """Turn one pre-processed ScaniaDataset split into a ScikitDataset.
+
+        Each row of ``scania_dataset.df`` (features already z-score-normalized, RUL
+        columns already computed) becomes one survival sample.
+
+        :param scania_dataset: A built ``ScaniaDataset`` exposing ``.df``.
+        :param feature_cols: Feature columns to use as ``X``.
+        :param is_censored_col: Name of the censoring flag column (1 = censored).
+        :param time_col: Name of the elapsed-time column used as survival ``Time``.
+        :param id_col: Name of the per-individual id column.
+        :param rul_col: Name of the column holding the true RUL / survival lower bound.
+        :param keep_uncensored_only: If True, drop censored rows (test evaluation).
+        :return: A ``ScikitDataset`` with ``X``, structured ``Y``, ``ids`` and ``rul``.
+        """
+        df = scania_dataset.df.copy()
+        if keep_uncensored_only:
+            df = df[df[is_censored_col] == 0].reset_index(drop=True)
+
+        X = df[feature_cols].to_numpy(dtype=object)  # parity with from_cmapss
+        status = (df[is_censored_col] == 0).to_numpy()  # True = event (failure) observed
+        time = df[time_col].to_numpy(dtype=np.float64)
+        Y = np.array(
+            list(zip(status, time)),
+            dtype=[('Status', '?'), ('Time', '<f8')],
+        )
+        ids = df[id_col].to_numpy()
+        rul = df[rul_col].to_numpy(dtype=np.float64)
+
+        return ScikitDataset(X, Y, ids, feature_cols, rul=rul)
+
     # ============================================================================
     # GENERIC METHOD TO TRANSFORM DATASET FOR PYCLUS
     # ============================================================================

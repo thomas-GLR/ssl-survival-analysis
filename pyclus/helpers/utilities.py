@@ -14,16 +14,13 @@ class Utilities:
     @staticmethod
     def find_an_available_root_temp_dir():
         candidate = tempfile.gettempdir()
-        # test if writeable
-        test_file = os.path.join(candidate, "test.txt")
+        # test if writeable, using a unique file name so concurrent processes
+        # (e.g. spawned DataLoader workers on Windows) don't race on the same file
         try:
-            with open(test_file, "w") as f:
-                print("?", file=f)
-        except:
+            with tempfile.NamedTemporaryFile(dir=candidate, delete=True):
+                pass
+        except OSError:
             logger.error(f"The temp directory {candidate} is not writable. You won't be able to do much.")
-        finally:
-            if os.path.exists(test_file):
-                os.remove(test_file)
         return candidate
 
     @staticmethod

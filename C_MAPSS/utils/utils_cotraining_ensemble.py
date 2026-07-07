@@ -12,13 +12,13 @@ from torch import nn
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
-from C_MAPSS.models import CNN1D
+from models import CNN1D
 from C_MAPSS.utils import utils_cmapss
-from C_MAPSS.models import Simple_LSTM
+from models import Simple_LSTM
 from models.CoTrainingEnsemble import CoTrainingEnsemble, SelectionMode
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2 as CoTrainingEnsembleV2
-from C_MAPSS.models.TransformerFeatures import TransformerFeatures
-from C_MAPSS.models.TransformerTimeSequence import TransformerTimeSequence
+from models.TransformerFeatures import TransformerFeatures
+from models.TransformerTimeSequence import TransformerTimeSequence
 
 
 def train_model(
@@ -194,7 +194,7 @@ def train_model(
         transformer_encoder_head_num=transformer_encoder_head_num_transformer_features,
         fc_layer_dim=fc_layer_dim_transformer_features,
         fc_dropout=fc_dropout_transformer_features,
-        num_layers=num_layers_transformer_features,
+        transformer_num_layer=num_layers_transformer_features,
     )
 
     transformer_time_sequence = TransformerTimeSequence(
@@ -517,7 +517,7 @@ def train_model_v2(
         transformer_encoder_head_num=transformer_encoder_head_num_transformer_features,
         fc_layer_dim=fc_layer_dim_transformer_features,
         fc_dropout=fc_dropout_transformer_features,
-        num_layers=num_layers_transformer_features,
+        transformer_num_layer=num_layers_transformer_features,
     )
 
     transformer_time_sequence = TransformerTimeSequence(

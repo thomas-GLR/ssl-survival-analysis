@@ -107,7 +107,7 @@ def _build_lstm(trial: optuna.Trial, input_size: int, output_size: int) -> nn.Mo
     fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1)
     sequence_len = trial.suggest_categorical("sequence_len", [32, 64, 128])
 
-    from C_MAPSS.models.Simple_LSTM import Simple_LSTM
+    from models.Simple_LSTM import Simple_LSTM
     return Simple_LSTM(
         feature_num=input_size,
         sequence_len=sequence_len,
@@ -132,7 +132,7 @@ def _build_transformer_lstm(trial: optuna.Trial, input_size: int, output_size: i
     fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256])
     fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1)
 
-    from C_MAPSS.models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1  # ← adapt import
+    from models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1  # ← adapt import
     return TransformerEncoder_LSTM_1(
         feature_num=input_size,
         sequence_len=sequence_len,
@@ -148,7 +148,7 @@ def _build_transformer_lstm(trial: optuna.Trial, input_size: int, output_size: i
 def _build_cnn1d(trial: optuna.Trial, input_size: int, output_size: int) -> nn.Module:
     """1D CNN model."""
 
-    from C_MAPSS.models.CNN1D import CNN1D
+    from models.CNN1D import CNN1D
     return CNN1D(
         num_features=input_size,
         output_dim=output_size,

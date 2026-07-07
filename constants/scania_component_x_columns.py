@@ -121,6 +121,21 @@ COLUMN_397_33 = "397_33"
 COLUMN_397_34 = "397_34"
 COLUMN_397_35 = "397_35"
 
+##################################################### Numerical counter feature groups #####################################################
+
+# Single-index numerical counter columns used as features by ScaniaDataModule.
+# Built from the name constants above so the raw strings live only in one place.
+COUNTER_COLUMNS = [
+    COLUMN_171_0,
+    COLUMN_666_0,
+    COLUMN_427_0,
+    COLUMN_837_0,
+    COLUMN_309_0,
+    COLUMN_835_0,
+    COLUMN_370_0,
+    COLUMN_100_0,
+]
+
 ##################################################### train_tte.csv #####################################################
 
 LENGTH_OF_STUDY_TIME_STEP = "length_of_study_time_step"
