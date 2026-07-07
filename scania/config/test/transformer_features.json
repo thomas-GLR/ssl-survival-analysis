@@ -1,0 +1,26 @@
+{
+  "dataset_params": {
+    "sequence_len": 32,
+    "seed": 42,
+    "val_rate": 0.2,
+    "test_rate": 0.1,
+    "stratify": true,
+    "norm_type": "z-score",
+    "num_workers": 4,
+    "pin_memory": true,
+    "return_sequence_label": false,
+    "batch_size": 128,
+    "shuffle_loader": true
+  },
+  "training_params": {
+    "lr": 0.0002,
+    "patience": 50,
+    "max_epochs": 1
+  },
+  "model_params": {
+    "transformer_encoder_head_num": 8,
+    "transformer_num_layer": 2,
+    "fc_layer_dim": 128,
+    "fc_dropout": 0.2
+  }
+}

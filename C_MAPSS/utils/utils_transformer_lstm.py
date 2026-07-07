@@ -1,4 +1,3 @@
-import os
 from datetime import datetime
 
 import numpy as np
@@ -11,10 +10,10 @@ from torch.utils.data import DataLoader
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
-from C_MAPSS.models.Simple_LSTM import Simple_LSTM
-from C_MAPSS.models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
+from models.Simple_LSTM import Simple_LSTM
+from models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
 from C_MAPSS.utils import utils_cmapss
-from C_MAPSS.models import CNN1D
+from models import CNN1D
 
 # For PyTorch 2.6+
 # We indicate to PyTorch that these classes are "safe" when loading checkpoints
@@ -147,7 +146,7 @@ def train_model(
     print(f"Patience : {patience}")
     print(f"Models parameters : {model_kwargs}")
 
-    if model_version == 'transformer':
+    if model_version == 'transformer_lstm':
         model = TransformerEncoder_LSTM_1(**model_kwargs)
     elif model_version == 'lstm':
         model = Simple_LSTM(**model_kwargs)
@@ -206,7 +205,7 @@ def train_model(
     print(f"Scores from train and test :\n{scores}")
 
     # Save model predictions
-    if model_version == 'transformer':
+    if model_version == 'transformer_lstm':
         model_for_reload = TransformerEncoder_LSTM_1(**model_kwargs)
     elif model_version == 'lstm':
         model_for_reload = Simple_LSTM(**model_kwargs)

@@ -336,6 +336,16 @@ class Coprog:
         p2 = self._predict(self._h2, x).view(-1)
         return self.w1 * p1 + self.w2 * p2
 
+    def prediction_for_first_model(self, x: torch.Tensor) -> torch.Tensor:
+        if self._h1 is None or self._h2 is None:
+            raise RuntimeError("Call .train() before .prediction_for_first_model().")
+        return self._predict(self._h1, x).view(-1)
+
+    def prediction_for_second_model(self, x: torch.Tensor) -> torch.Tensor:
+        if self._h1 is None or self._h2 is None:
+            raise RuntimeError("Call .train() before .prediction_for_second_model().")
+        return self._predict(self._h2, x).view(-1)
+
     def _train_fun(
             self,
             model: LightningModule,

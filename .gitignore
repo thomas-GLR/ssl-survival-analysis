@@ -6,3 +6,6 @@
 .env.*
 /outputs
 /checkpoints
+/scania_cache
+__pycache__/
+/lightning_logs

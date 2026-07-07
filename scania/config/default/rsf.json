@@ -1,0 +1,19 @@
+{
+  "dataset_params": {
+    "seed": 42,
+    "val_rate": 0.2,
+    "test_rate": 0.1,
+    "stratify": true,
+    "norm_type": "z-score",
+    "return_sequence_label": false
+  },
+  "training_params": {},
+  "model_params": {
+      "n_estimators": [100],
+      "max_depth": [30],
+      "min_samples_split":  [30],
+      "min_samples_leaf": [30],
+      "cv_for_grid_search":  5,
+      "variance_warning_threshold": 0.05
+  }
+}

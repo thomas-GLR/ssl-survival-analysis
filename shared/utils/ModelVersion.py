@@ -2,7 +2,7 @@ from enum import Enum
 
 
 class ModelVersion(Enum):
-    TRANSFORMER = "transformer"
+    TRANSFORMER_LSTM = "transformer_lstm"
     LSTM = "lstm"
     AUTOENCODER = "autoencoder"
     METRIC = "metric"
@@ -12,3 +12,5 @@ class ModelVersion(Enum):
     CNN = "cnn"
     CO_TRAINING_ENSEMBLE = "co_training_ensemble"
     CO_TRAINING_ENSEMBLE_V2 = "co_training_ensemble_v2"
+    TRANSFORMER_FEATURES = "transformer_features"
+    TRANSFORMER_TIME_SEQUENCE = "transformer_time_sequence"

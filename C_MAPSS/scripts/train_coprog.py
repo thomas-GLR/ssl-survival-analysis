@@ -3,7 +3,7 @@ from typing import Callable
 from lightning import Trainer
 from lightning.pytorch import callbacks
 
-from C_MAPSS.models import Simple_LSTM, CNN1D
+from models import Simple_LSTM, CNN1D
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from C_MAPSS.lightning_module.TransformerLstmModule import TransformerLstmModule
 from models import Coprog

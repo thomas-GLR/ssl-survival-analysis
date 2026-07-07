@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from C_MAPSS.models.layers import AttentionPooling, LearnedPositionalEncoding
+from models.layers import AttentionPooling, LearnedPositionalEncoding
 
 
 class TransformerTimeSequence(nn.Module):
