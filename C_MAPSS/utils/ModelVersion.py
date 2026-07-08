@@ -11,3 +11,4 @@ class ModelVersion(Enum):
     COPROG = "coprog"
     CNN = "cnn"
     CO_TRAINING_ENSEMBLE = "co_training_ensemble"
+    CO_TRAINING_ENSEMBLE_V2 = "co_training_ensemble_v2"
