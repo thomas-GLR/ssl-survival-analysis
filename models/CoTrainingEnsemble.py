@@ -1,4 +1,6 @@
 import copy
+import csv
+import os
 import warnings
 from collections import OrderedDict
 from typing import Callable
@@ -152,6 +154,11 @@ class CoTrainingEnsemble:
             suspension_pool_size: int,
             val_data: torch.Tensor | None = None,
             val_label: torch.Tensor | None = None,
+            test_data: torch.Tensor | None = None,
+            test_label: torch.Tensor | None = None,
+            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            weight_mode: str = "min",
+            metrics_file: str | None = None,
             log_file: str | None = None,
     ) -> None:
         r"""The train algorithm for co-training ensemble v2
@@ -189,6 +196,24 @@ class CoTrainingEnsemble:
             val_label:
                 Optional validation labels associated with ``val_data``. Must be provided
                 together with ``val_data``.
+            test_data:
+                Optional test features used only for the per-stage metrics logged to
+                ``metrics_file``. Never used for training or model selection.
+            test_label:
+                Optional test labels associated with ``test_data``.
+            criteria_callback:
+                Score used both per model (test score) and to compute the ensemble
+                weights on the validation set for the "with weights" metrics. Same
+                callback the caller passes to ``calculate_weights`` (lower is better
+                for ``weight_mode="min"``). Required when metrics logging is enabled.
+            weight_mode:
+                "min" or "max", passed to ``_compute_weights`` when deriving the
+                per-stage ensemble weights (defaults to "min").
+            metrics_file:
+                Optional path to a ``.csv`` file. When given (together with the test
+                set, the validation set and ``criteria_callback``), per-stage metrics
+                are appended: one row after the initial training, one after each
+                iteration that retrains, and one final row. Enables metrics logging.
             log_file:
                 Optional path to a ``.txt`` file. When given, every log message is
                 appended to it regardless of ``verbose`` (stdout still follows
@@ -202,6 +227,23 @@ class CoTrainingEnsemble:
 
         if (val_data is None) != (val_label is None):
             raise ValueError("val_data and val_label must both be provided or both be None.")
+
+        # Per-stage metrics need the test set, the criteria callback, a destination file
+        # and — because the "with weights" metrics weight the models on the validation
+        # set — the validation set too. Enable only when all are present; if the caller
+        # asked for metrics (test_data given) but left something out, fail loudly.
+        metrics_enabled = test_data is not None
+        if metrics_enabled:
+            if test_label is None:
+                raise ValueError("test_label must be provided together with test_data.")
+            if criteria_callback is None:
+                raise ValueError("criteria_callback is required to log per-stage metrics (per-model test score).")
+            if metrics_file is None:
+                raise ValueError("metrics_file is required to log per-stage metrics.")
+            if val_data is None or val_label is None:
+                raise ValueError(
+                    "val_data and val_label are required to log per-stage metrics "
+                    "(the 'with weights' metrics weight the models on the validation set).")
 
         total_suspension_units = len(torch.unique(suspension_ids))
         self._log(1, f"[CoTraining] Starting training | models: {self.number_of_models} | "
@@ -236,6 +278,20 @@ class CoTrainingEnsemble:
             h.append(h_j)
 
         self._log(1, f"[CoTraining] Initial training done.")
+
+        if metrics_enabled:
+            self._log_stage_metrics(
+                stage="initial",
+                h=h,
+                models_datasets=models_datasets,
+                test_data=test_data,
+                test_label=test_label,
+                val_data=val_data,
+                val_label=val_label,
+                criteria_callback=criteria_callback,
+                weight_mode=weight_mode,
+                metrics_file=metrics_file,
+            )
 
         remaining_suspension_ids = torch.unique(suspension_ids)
 
@@ -392,8 +448,132 @@ class CoTrainingEnsemble:
                             val_y=val_label,
                         )
 
+            if metrics_enabled:
+                self._log_stage_metrics(
+                    stage=f"iteration_{i + 1}",
+                    h=h,
+                    models_datasets=models_datasets,
+                    test_data=test_data,
+                    test_label=test_label,
+                    val_data=val_data,
+                    val_label=val_label,
+                    criteria_callback=criteria_callback,
+                    weight_mode=weight_mode,
+                    metrics_file=metrics_file,
+                )
+
+        if metrics_enabled:
+            self._log_stage_metrics(
+                stage="final",
+                h=h,
+                models_datasets=models_datasets,
+                test_data=test_data,
+                test_label=test_label,
+                val_data=val_data,
+                val_label=val_label,
+                criteria_callback=criteria_callback,
+                weight_mode=weight_mode,
+                metrics_file=metrics_file,
+            )
+
         self._log(1, f"[CoTraining] Training complete.")
         self.lightning_modules = h
+
+    def _log_stage_metrics(
+            self,
+            stage: str,
+            h: list[LightningModule],
+            models_datasets: list[tuple[torch.Tensor, torch.Tensor]],
+            test_data: torch.Tensor,
+            test_label: torch.Tensor,
+            val_data: torch.Tensor,
+            val_label: torch.Tensor,
+            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            weight_mode: str,
+            metrics_file: str,
+    ) -> None:
+        """
+        Compute and append one row of per-stage metrics to ``metrics_file``.
+
+        For the current models ``h`` this records, per model, the train RMSE (on that
+        model's own accumulated ``models_datasets`` split), the validation RMSE, the test
+        RMSE and the test score; then the averages of the per-model test RMSE / test score
+        (arithmetic mean, ignoring weights); and finally the test RMSE / test score of the
+        weighted-ensemble prediction, whose weights are computed on the validation set via
+        ``_compute_weights`` (so ``self.weights`` is left untouched).
+
+        Args:
+            stage: label for the row ("initial", "iteration_<k>" or "final").
+            h: the current best model per index.
+            models_datasets: per-model ``(x, y)`` accumulated training split.
+            test_data, test_label: test set used only for the metrics.
+            val_data, val_label: validation set (used for val RMSE and the weights).
+            criteria_callback: score used for per-model test score and the weights.
+            weight_mode: "min"/"max" passed to ``_compute_weights``.
+            metrics_file: destination CSV; header written only when it does not yet exist.
+        """
+        test_label_flat = test_label.view(-1).float()
+
+        train_rmses: list[float] = []
+        val_rmses: list[float] = []
+        test_rmses: list[float] = []
+        test_scores: list[float] = []
+        test_preds: list[torch.Tensor] = []
+
+        for j, model in enumerate(h):
+            xj, yj = models_datasets[j]
+            train_rmses.append(self._mse_on(model, xj, yj) ** 0.5)
+            val_rmses.append(self._mse_on(model, val_data, val_label) ** 0.5)
+
+            pred_j = self._predict(model, test_data).view(-1).to(test_label_flat.device)
+            test_preds.append(pred_j)
+            test_rmses.append((((test_label_flat - pred_j) ** 2).mean().item()) ** 0.5)
+            test_scores.append(criteria_callback(pred_j, test_label_flat))
+
+        n = len(h)
+        avg_test_rmse = sum(test_rmses) / n
+        avg_test_score = sum(test_scores) / n
+
+        # Weights come from the validation set (no test leakage) and do NOT mutate
+        # self.weights — they exist only to report the weighted-ensemble metrics.
+        # Pass ``h`` explicitly: self.lightning_modules still holds the untrained template
+        # modules at this point (they are only replaced by ``h`` when train() finishes),
+        # so weighting against it would give weights unrelated to the trained models —
+        # and would not match the caller's post-train ``calculate_weights``.
+        weights = self._compute_weights(val_data, val_label, criteria_callback, weight_mode, models=h)
+        weighted_pred = torch.stack(
+            [w * pred for w, pred in zip(weights, test_preds)], dim=0
+        ).sum(dim=0).view(-1)
+        weighted_test_rmse = (((test_label_flat - weighted_pred) ** 2).mean().item()) ** 0.5
+        weighted_test_score = criteria_callback(weighted_pred, test_label_flat)
+
+        header = ["stage"]
+        for j in range(n):
+            header += [f"train_rmse_{j}", f"val_rmse_{j}", f"test_rmse_{j}", f"test_score_{j}"]
+        header += ["avg_test_rmse", "avg_test_score", "weighted_test_rmse", "weighted_test_score"]
+        for j in range(n):
+            header += [f"weight_{j}"]
+
+        row = [stage]
+        for j in range(n):
+            row += [train_rmses[j], val_rmses[j], test_rmses[j], test_scores[j]]
+        row += [avg_test_rmse, avg_test_score, weighted_test_rmse, weighted_test_score]
+        for j in range(n):
+            row += [weights[j]]
+
+        # Append per call (crash-safe, no file-handle lifecycle), writing the header only
+        # the first time the file is created — mirrors the append style of ``_log``.
+        write_header = not os.path.exists(metrics_file)
+        with open(metrics_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(header)
+            writer.writerow(row)
+
+        self._log(1, f"[CoTraining] Metrics [{stage}] | "
+                     f"avg test RMSE: {avg_test_rmse:.4f} | avg test score: {avg_test_score:.4f} | "
+                     f"weighted test RMSE: {weighted_test_rmse:.4f} | "
+                     f"weighted test score: {weighted_test_score:.4f}")
 
     def predict(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -767,8 +947,47 @@ class CoTrainingEnsemble:
         Returns:
 
         """
+        self.weights = self._compute_weights(x_test, target, criteria_callback, mode)
+
+        self._log(1, f"[CoTraining] Weights assigned: "
+                     f"{[f'model {j}={round(w, 4)}' for j, w in enumerate(self.weights)]}")
+
+    def _compute_weights(
+            self,
+            x_test: torch.Tensor,
+            target: torch.Tensor,
+            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            mode: str,
+            models: list[LightningModule] | None = None,
+    ) -> list[float]:
+        """
+        Compute the ensemble weights for the current models and return them **without**
+        mutating ``self.weights``.
+
+        This holds the scoring→weight math shared by ``calculate_weights`` (which stores
+        the result) and the per-stage metrics logging in ``train`` (which needs weights
+        for the "with weights" test metrics without changing the ensemble's state).
+
+        Args:
+            x_test: features to score the models on (the validation set is used at the
+                call sites, to avoid leaking test information into the weighting).
+            target: labels associated with ``x_test``.
+            criteria_callback: per-model score, lower-is-better for ``mode="min"``.
+            mode: "min" (lower score is better → inverse weighting) or "max".
+            models: the models to weight. Defaults to ``self.lightning_modules``. During
+                ``train`` the trained models live in a local list (``h``) and are only
+                assigned to ``self.lightning_modules`` at the very end, so the per-stage
+                metrics must pass that list explicitly — otherwise the weights would be
+                derived from the still-untrained template modules.
+
+        Returns:
+            list[float]: one normalized weight per model, summing to 1.
+        """
         if mode not in ["min", "max"]:
             raise ValueError("Mode must be either 'min' or 'max'.")
+
+        if models is None:
+            models = self.lightning_modules
 
         scores = []
 
@@ -776,7 +995,7 @@ class CoTrainingEnsemble:
         # instead of broadcasting (N, 1) against (N,) into an (N, N) matrix.
         target_flat = target.view(-1).float()
 
-        for model in self.lightning_modules:
+        for model in models:
             pred = self._predict(model, x_test).view(-1).to(target_flat.device)
             scores.append(criteria_callback(pred, target_flat))
 
@@ -789,12 +1008,9 @@ class CoTrainingEnsemble:
                     "At least one model has a score of zero in 'min' mode, inverse weighting is undefined.")
             inv_scores = [1.0 / s for s in scores]
             total = sum(inv_scores)
-            self.weights = [inv_s / total for inv_s in inv_scores]
-        else:
-            total = sum(scores)
-            if total == 0:
-                raise ValueError(f"The sum of scores from all models is zero, cannot calculate weights : {scores}")
-            self.weights = [s / total for s in scores]
+            return [inv_s / total for inv_s in inv_scores]
 
-        self._log(1, f"[CoTraining] Weights assigned: "
-                     f"{[f'model {j}={round(w, 4)}' for j, w in enumerate(self.weights)]}")
+        total = sum(scores)
+        if total == 0:
+            raise ValueError(f"The sum of scores from all models is zero, cannot calculate weights : {scores}")
+        return [s / total for s in scores]

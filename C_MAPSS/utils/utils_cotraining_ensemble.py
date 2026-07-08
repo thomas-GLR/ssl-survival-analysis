@@ -299,6 +299,11 @@ def train_model(
             suspension_pool_size=coprog_suspension_pool_size,
             val_data=val_features,
             val_label=val_targets,
+            test_data=features_tensor,
+            test_label=targets_tensor,
+            criteria_callback=cmapss_score,
+            weight_mode="min",
+            metrics_file=os.path.join(results_path, "metrics_per_stage.csv"),
             log_file=log_file_path,
         )
 
