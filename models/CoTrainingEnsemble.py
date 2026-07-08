@@ -865,16 +865,16 @@ class CoTrainingEnsemble:
         models). The unit with the highest average delta is selected, provided
         that average is strictly positive.
 
-        The pseudo-label assigned to model k is the prediction made by the model
-        j ≠ k that achieved the highest individual delta for the selected unit
-        (i.e. the most confident predictor for that specific unit).
+        The pseudo-label assigned to model k is the average of the RUL
+        predictions made by all models j ≠ k that scored the selected unit
+        (an ensemble consensus rather than the single most-confident model).
 
         Args:
             all_preds: mapping from model index j to an OrderedDict of
                 ``{unit_id_int: (unit_id_tensor, xu, lu_p, delta)}``.
             model_index_to_exclude: index k of the model being updated — its
-                own predictions are excluded from both the average and the
-                pseudo-label selection.
+                own predictions are excluded from both the average delta and the
+                averaged pseudo-label.
 
         Returns:
             ``(unit_id, xu, lu_p)`` for the selected unit, or ``None`` if no
@@ -907,14 +907,21 @@ class CoTrainingEnsemble:
         if best_unit_id_int is None:
             return None
 
-        # Among models j ≠ k, pick the one with the highest individual delta
-        # for this unit — its prediction is the most reliable pseudo-label.
-        best_j = max(
-            (j for j in all_preds if j != model_index_to_exclude and best_unit_id_int in all_preds[j]),
-            key=lambda j: all_preds[j][best_unit_id_int][3],
-        )
+        # Average the RUL predictions across all models j ≠ k that scored this
+        # unit, so the pseudo-label is an ensemble consensus rather than the
+        # single most-confident model's guess.
+        contributors = [
+            j for j in all_preds
+            if j != model_index_to_exclude and best_unit_id_int in all_preds[j]
+        ]
 
-        unit_id, xu, lu_p, _ = all_preds[best_j][best_unit_id_int]
+        # xu is identical across models for a given unit (same suspension rows),
+        # so take it (and unit_id) from any contributor.
+        unit_id, xu, _, _ = all_preds[contributors[0]][best_unit_id_int]
+
+        lu_preds = [all_preds[j][best_unit_id_int][2] for j in contributors]
+        lu_p = torch.stack(lu_preds).mean(dim=0)
+
         return unit_id, xu, lu_p
 
     def _evidential_censored_data_selection(self):
