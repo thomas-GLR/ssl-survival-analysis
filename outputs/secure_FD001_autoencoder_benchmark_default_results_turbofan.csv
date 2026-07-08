@@ -1,0 +1,22 @@
+Sub dataset,Censored percentage,Broken percentage,Model,RMSE,Score
+FD001,0.98,0.4,autoencoder,11406.1669921875,inf
+FD001,0.98,0.6,autoencoder,46682.1015625,inf
+FD001,0.98,0.7,autoencoder,60799.75390625,inf
+FD001,0.98,0.8,autoencoder,38465.73046875,inf
+FD001,0.98,0.9,autoencoder,108003.8828125,inf
+FD001,0.9,0.4,autoencoder,108311.4296875,inf
+FD001,0.9,0.6,autoencoder,115967.2265625,inf
+FD001,0.9,0.7,autoencoder,101870.921875,inf
+FD001,0.9,0.8,autoencoder,123768.4609375,inf
+FD001,0.9,0.9,autoencoder,224708.046875,inf
+FD001,0.8,0.4,autoencoder,35779.3515625,inf
+FD001,0.8,0.6,autoencoder,62954.84375,inf
+FD001,0.8,0.7,autoencoder,140345.875,inf
+FD001,0.8,0.8,autoencoder,66335.9453125,inf
+FD001,0.8,0.9,autoencoder,82223.6171875,inf
+FD001,0.6,0.4,autoencoder,48150.015625,inf
+FD001,0.6,0.6,autoencoder,54700.1171875,inf
+FD001,0.6,0.7,autoencoder,71665.53125,inf
+FD001,0.6,0.8,autoencoder,50792.7109375,inf
+FD001,0.6,0.9,autoencoder,51240.54296875,inf
+FD001,0.0,0.0,autoencoder,108741.8046875,inf

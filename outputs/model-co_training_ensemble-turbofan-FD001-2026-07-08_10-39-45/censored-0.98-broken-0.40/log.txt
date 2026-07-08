@@ -1,0 +1,12 @@
+=== Co-Training Ensemble run ===
+Datetime: 2026-07-08_10-39-45
+Sub-dataset: FD001
+Percent censored: 0.98
+Percent broken: 0.4
+================================
+[CoTraining] Starting training | models: 4 | failure samples: 325 | censored units: 78 | max iterations: 10 | pool size: -1 | selection: VOTING
+[CoTraining] Initial training of model 0 on 325 failure samples...
+[CoTraining]     Reloading best model from /tmp/cotraining_ckpt_dzxr8ma1/best-epoch=260-val_loss=459.7551.ckpt
+[CoTraining] Initial training of model 1 on 325 failure samples...
+[CoTraining]     Reloading best model from /tmp/cotraining_ckpt_bzoiav7z/best-epoch=256-val_loss=1100.0992.ckpt
+[CoTraining] Initial training of model 2 on 325 failure samples...

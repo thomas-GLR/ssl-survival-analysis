@@ -1,2 +1,0 @@
-train_regression_loss,val_regression_loss
-tensor(0.3424),tensor(0.2942)

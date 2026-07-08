@@ -1,0 +1,10 @@
+{
+  "datetime_for_folders": "2026-07-07_11-22-16",
+  "device": "cuda",
+  "model_version": "autoencoder",
+  "percent_of_broken_data": 0.9,
+  "percent_of_censored_data": 0.9,
+  "phase": "pretraining",
+  "seed": 42,
+  "sub_dataset": "FD001"
+}

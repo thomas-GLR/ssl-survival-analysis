@@ -4,5 +4,4 @@
 /C_MAPSS/results/
 .env
 .env.*
-/outputs
-/checkpoints
+__pycache__/

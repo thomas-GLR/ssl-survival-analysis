@@ -1,0 +1,8 @@
+base_filters: 16
+dropout: 0.0
+in_channels: 24
+kernel_size: 3
+latent_dim: 64
+lr: 0.095
+num_layers: 6
+seq_len: 30

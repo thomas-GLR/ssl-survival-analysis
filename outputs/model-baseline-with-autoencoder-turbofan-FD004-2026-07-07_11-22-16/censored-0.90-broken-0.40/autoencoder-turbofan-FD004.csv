@@ -1,0 +1,2 @@
+train_rmse,val_rmse,test_rmse,test_score
+tensor(12.0118),tensor(37.6306),tensor(34.9992),tensor(90331.9766)
