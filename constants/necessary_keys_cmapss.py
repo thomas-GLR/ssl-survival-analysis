@@ -159,3 +159,25 @@ NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
     "fc_layer_dim_transformer_time_series",
     "fc_dropout_transformer_time_series",
 ]
+
+NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
+    "sequence_len",
+    "coprog_iterations",
+    "max_epochs",
+    "patiences",
+    "batchs_size",
+    "lr",
+    "confidence",
+    "shuffle_dataloaders",
+    "hidden_dim_lstm",
+    "lstm_num_layers_lstm",
+    "lstm_dropout_lstm",
+    "fc_layer_dim_lstm",
+    "fc_dropout_lstm",
+    "transformer_encoder_head_num_transformer_features",
+    "fc_layer_dim_transformer_features",
+    "fc_dropout_transformer_features",
+    "transformer_encoder_head_num_transformer_time_series",
+    "fc_layer_dim_transformer_time_series",
+    "fc_dropout_transformer_time_series",
+]

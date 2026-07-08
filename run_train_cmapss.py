@@ -223,7 +223,8 @@ def _parse_args() -> argparse.Namespace:
             "pyclus",
             "coprog",
             "cnn",
-            "co_training_ensemble"
+            "co_training_ensemble",
+            "co_training_ensemble_v2"
         ],
         help="The model to train",
     )
