@@ -50,6 +50,8 @@ def train_model(
         transformer_encoder_head_num_transformer_time_series: int,
         fc_layer_dim_transformer_time_series: int,
         fc_dropout_transformer_time_series: float,
+        num_layers_transformer_features: int,
+        num_layers_transformer_time_series: int,
         # Dataset params
         dataset_root: str,
         seed: int | None,
@@ -188,18 +190,21 @@ def train_model(
 
     transformer_features = TransformerFeatures(
         feature_num=feature_num,
-        d_model=sequence_len,
+        sequence_len=sequence_len,
         transformer_encoder_head_num=transformer_encoder_head_num_transformer_features,
         fc_layer_dim=fc_layer_dim_transformer_features,
         fc_dropout=fc_dropout_transformer_features,
+        num_layers=num_layers_transformer_features,
     )
 
     transformer_time_sequence = TransformerTimeSequence(
         feature_num=feature_num,
+        sequence_len=sequence_len,
         d_model=sequence_len,
         transformer_encoder_head_num=transformer_encoder_head_num_transformer_time_series,
         fc_layer_dim=fc_layer_dim_transformer_time_series,
         fc_dropout=fc_dropout_transformer_time_series,
+        num_layers=num_layers_transformer_time_series,
     )
 
     models = [cnn, lstm, transformer_features, transformer_time_sequence]
@@ -390,6 +395,8 @@ def train_model_v2(
         transformer_encoder_head_num_transformer_time_series: int,
         fc_layer_dim_transformer_time_series: int,
         fc_dropout_transformer_time_series: float,
+        num_layers_transformer_features: int,
+        num_layers_transformer_time_series: int,
         # Dataset params
         dataset_root: str,
         seed: int | None = 42,
@@ -506,18 +513,21 @@ def train_model_v2(
 
     transformer_features = TransformerFeatures(
         feature_num=feature_num,
-        d_model=sequence_len,
+        sequence_len=sequence_len,
         transformer_encoder_head_num=transformer_encoder_head_num_transformer_features,
         fc_layer_dim=fc_layer_dim_transformer_features,
         fc_dropout=fc_dropout_transformer_features,
+        num_layers=num_layers_transformer_features,
     )
 
     transformer_time_sequence = TransformerTimeSequence(
         feature_num=feature_num,
+        sequence_len=sequence_len,
         d_model=sequence_len,
         transformer_encoder_head_num=transformer_encoder_head_num_transformer_time_series,
         fc_layer_dim=fc_layer_dim_transformer_time_series,
         fc_dropout=fc_dropout_transformer_time_series,
+        num_layers=num_layers_transformer_time_series,
     )
 
     models = [cnn, lstm, transformer_features, transformer_time_sequence]
@@ -716,7 +726,8 @@ if __name__ == "__main__":
     shuffle_dataloaders = [True, True, True, True]
     lr = [0.0002, 0.0002, 0.0002, 0.0002]
 
-    # Model params. Transformer head counts must divide d_model (= sequence_len = 32).
+    # Model params. TransformerFeatures head count must divide sequence_len (= 32);
+    # TransformerTimeSequence head count must divide d_model (= sequence_len = 32).
     hidden_dim_lstm = 32
     lstm_num_layers_lstm = 3
     lstm_dropout_lstm = 0.2
@@ -725,9 +736,11 @@ if __name__ == "__main__":
     transformer_encoder_head_num_transformer_features = 4
     fc_layer_dim_transformer_features = 32
     fc_dropout_transformer_features = 0.2
+    num_layers_transformer_features = 2
     transformer_encoder_head_num_transformer_time_series = 4
     fc_layer_dim_transformer_time_series = 32
     fc_dropout_transformer_time_series = 0.2
+    num_layers_transformer_time_series = 2
 
     train_model_v2(
         checkpoints_path=checkpoints_path,
@@ -754,6 +767,8 @@ if __name__ == "__main__":
         transformer_encoder_head_num_transformer_time_series=transformer_encoder_head_num_transformer_time_series,
         fc_layer_dim_transformer_time_series=fc_layer_dim_transformer_time_series,
         fc_dropout_transformer_time_series=fc_dropout_transformer_time_series,
+        num_layers_transformer_features=num_layers_transformer_features,
+        num_layers_transformer_time_series=num_layers_transformer_time_series,
         # Dataset params
         dataset_root=dataset_root,
         seed=seed,
