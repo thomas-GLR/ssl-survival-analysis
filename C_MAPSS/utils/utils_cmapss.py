@@ -91,6 +91,8 @@ def get_train_model_method(model_version: ModelVersion) -> Callable:
             return utils_cotraining_ensemble.train_model
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
             return utils_cotraining_ensemble.train_model_v2
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V3:
+            return utils_cotraining_ensemble.train_model_v3
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
@@ -116,6 +118,8 @@ def get_necessary_dataset_keys(model_version: ModelVersion) -> list[str]:
         case ModelVersion.CO_TRAINING_ENSEMBLE:
             return necessary_keys_cmapss.NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
+            return necessary_keys_cmapss.NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V3:
             return necessary_keys_cmapss.NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
@@ -143,6 +147,8 @@ def get_necessary_model_keys(model_version: ModelVersion) -> list[str]:
             return necessary_keys_cmapss.NECESSARY_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
             return necessary_keys_cmapss.NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V3:
+            return necessary_keys_cmapss.NECESSARY_CO_TRAINING_ENSEMBLE_V3_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 

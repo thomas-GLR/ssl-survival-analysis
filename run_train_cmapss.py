@@ -224,7 +224,8 @@ def _parse_args() -> argparse.Namespace:
             "coprog",
             "cnn",
             "co_training_ensemble",
-            "co_training_ensemble_v2"
+            "co_training_ensemble_v2",
+            "co_training_ensemble_v3"
         ],
         help="The model to train",
     )
