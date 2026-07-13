@@ -690,6 +690,7 @@ def train_model_v3(
         lr: list[float],
         confidence: float,
         width_threshold: float | None,
+        n_censored_per_model: int,
         # Model params
         hidden_dim_lstm: int,
         lstm_num_layers_lstm: int,
@@ -734,7 +735,9 @@ def train_model_v3(
     model), the owned unit's pseudo-RUL is a weighted average of the contributing models'
     predictions (inverse-normalized-width weights), and the unit is assigned to every *other*
     model. ``width_threshold`` (on the normalized width) optionally filters out low-confidence
-    owners / contributors; pass ``None`` to disable it.
+    owners / contributors; pass ``None`` to disable it. ``n_censored_per_model`` (>= 1) controls
+    how many units each model may own per iteration (round-robin selection); ``1`` reproduces the
+    original one-unit-per-model behaviour.
     """
     if (len(batchs_size) != 4
             or len(patiences) != 4
@@ -846,6 +849,7 @@ def train_model_v3(
         verbose=2,
         confidence=confidence,
         width_threshold=width_threshold,
+        n_censored_per_model=n_censored_per_model,
     )
 
     models_number = len(models)
@@ -913,6 +917,7 @@ def train_model_v3(
         f.write(f"Sub-dataset: {sub_dataset}\n")
         f.write(f"Confidence: {confidence}\n")
         f.write(f"Width threshold: {width_threshold}\n")
+        f.write(f"N censored per model: {n_censored_per_model}\n")
         f.write(f"Percent censored: {percent_of_censored_data}\n")
         f.write(f"Percent broken: {percent_of_broken_data}\n")
         f.write("===================================\n")

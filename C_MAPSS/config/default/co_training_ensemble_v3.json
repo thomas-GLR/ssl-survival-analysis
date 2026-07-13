@@ -37,7 +37,8 @@
       "fc_layer_dim_transformer_time_series": 32,
       "fc_dropout_transformer_time_series": 0.4,
       "num_layers_transformer_features":  2,
-      "num_layers_transformer_time_series": 2
+      "num_layers_transformer_time_series": 2,
+      "n_censored_per_model": 5
     }
   },
   "FD002": {
@@ -78,7 +79,8 @@
       "fc_layer_dim_transformer_time_series": 32,
       "fc_dropout_transformer_time_series": 0.4,
       "num_layers_transformer_features":  2,
-      "num_layers_transformer_time_series": 2
+      "num_layers_transformer_time_series": 2,
+      "n_censored_per_model": 5
     }
   },
   "FD003": {
@@ -119,7 +121,8 @@
       "fc_layer_dim_transformer_time_series": 32,
       "fc_dropout_transformer_time_series": 0.4,
       "num_layers_transformer_features":  2,
-      "num_layers_transformer_time_series": 2
+      "num_layers_transformer_time_series": 2,
+      "n_censored_per_model": 5
     }
   },
   "FD004": {
@@ -160,7 +163,8 @@
       "fc_layer_dim_transformer_time_series": 32,
       "fc_dropout_transformer_time_series": 0.4,
       "num_layers_transformer_features":  2,
-      "num_layers_transformer_time_series": 2
+      "num_layers_transformer_time_series": 2,
+      "n_censored_per_model": 5
     }
   }
 }

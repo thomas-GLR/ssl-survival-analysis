@@ -6,3 +6,4 @@
 .env.*
 /outputs
 /checkpoints
+__pycache__/

@@ -191,6 +191,7 @@ NECESSARY_CO_TRAINING_ENSEMBLE_V3_KEYS = [
     "lr",
     "confidence",
     "width_threshold",
+    "n_censored_per_model",
     "shuffle_dataloaders",
     "hidden_dim_lstm",
     "lstm_num_layers_lstm",

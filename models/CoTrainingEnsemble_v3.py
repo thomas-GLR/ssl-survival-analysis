@@ -64,6 +64,12 @@ class CoTrainingEnsemble_v3:
       only *own* a unit when its own normalized width is under the threshold, and only models under
       the threshold for a unit contribute to that unit's weighted RUL. A model whose prediction is
       too wide (not confident enough) is ignored both as an owner and as a contributor.
+    * **Multiple units per model.** ``n_censored_per_model`` lets each model own up to *N* units
+      per iteration instead of a single one. Selection is **round-robin**: the per-model owner pick
+      above is repeated for ``N`` rounds, and in each round every model grabs its single best
+      still-available unit (removed from the pool as before). ``N = 1`` (default) reproduces the
+      original one-unit-per-model behaviour; rounds stop early as soon as a full round selects
+      nothing (pool exhausted or nothing passes the threshold).
 
     Models are retrained from scratch each iteration with their newly pseudo-labelled units.
     """
@@ -75,6 +81,7 @@ class CoTrainingEnsemble_v3:
             verbose: int = 0,
             confidence: float = 0.95,
             width_threshold: float | None = None,
+            n_censored_per_model: int = 1,
     ):
         """
         :param models: list[nn.Module]
@@ -94,6 +101,11 @@ class CoTrainingEnsemble_v3:
             a unit whose normalized width is ``<= width_threshold``, and only models under the
             threshold for a unit contribute to that unit's weighted RUL. ``None`` (default)
             disables the filter: every model can own and every model contributes.
+        :param n_censored_per_model: int
+            Maximum number of censored units each model may *own* per iteration. Selection is
+            round-robin: the per-model owner pick is repeated for ``n_censored_per_model`` rounds,
+            and in each round every model takes its single best still-available unit. Must be an
+            integer ``>= 1``. Defaults to ``1`` (original one-unit-per-model behaviour).
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
@@ -103,6 +115,9 @@ class CoTrainingEnsemble_v3:
 
         if width_threshold is not None and width_threshold <= 0:
             raise ValueError("width_threshold must be > 0 when provided.")
+
+        if not isinstance(n_censored_per_model, int) or n_censored_per_model < 1:
+            raise ValueError("n_censored_per_model must be an integer >= 1.")
 
         self.models = models
         self.number_of_models = len(self.models)
@@ -114,6 +129,7 @@ class CoTrainingEnsemble_v3:
         self.verbose = verbose
         self.confidence = confidence
         self.width_threshold = width_threshold
+        self.n_censored_per_model = n_censored_per_model
         # Optional path to a .txt log file (set by ``train``). When not None, every
         # ``_log`` message is appended to it regardless of ``verbose``.
         self._log_file_path: str | None = None
@@ -189,8 +205,9 @@ class CoTrainingEnsemble_v3:
         interval per model (calibrated on the validation set) and normalizes the widths per model.
         Then, greedily over the models, each model *owns* the remaining unit it is most confident
         about (smallest normalized width, and — when ``width_threshold`` is set — only if that
-        width is under the threshold). The owned unit's pseudo-RUL is a weighted average of every
-        contributing model's per-window predictions (inverse-normalized-width weights), and the
+        width is under the threshold). This per-model pass is repeated ``n_censored_per_model``
+        times (round-robin), so each model can own up to that many units per iteration. The owned
+        unit's pseudo-RUL is a weighted average of every
         unit is assigned to **all other models but the owner** before being removed from the pool.
         Finally every model with new data is retrained from scratch.
 
@@ -266,7 +283,8 @@ class CoTrainingEnsemble_v3:
                      f"failure samples: {len(failure_data)} | "
                      f"censored units: {total_suspension_units} | "
                      f"max iterations: {iterations} | confidence: {self.confidence} | "
-                     f"width_threshold: {self.width_threshold} | ")
+                     f"width_threshold: {self.width_threshold} | "
+                     f"n_censored_per_model: {self.n_censored_per_model} | ")
 
         models_datasets = []
         h: list[LightningModule] = []
@@ -384,48 +402,61 @@ class CoTrainingEnsemble_v3:
             # Phase 2 — greedily, for each model k (the "owner"), pick the remaining unit k is
             # most confident about, compute a confidence-weighted RUL from every contributing
             # model, and assign it to all other models. The owned unit is then removed from the
-            # pool so no other model can reuse it and it never returns to the owner.
+            # pool so no other model can reuse it and it never returns to the owner. This whole
+            # per-model pass is repeated ``n_censored_per_model`` times (round-robin), so each
+            # model can own up to that many units per iteration; rounds stop early once a full
+            # round selects nothing (pool exhausted or nothing passes the threshold).
             available_ids: set[int] = {uid for preds in all_preds.values() for uid in preds}
 
             # pending[j] accumulates the (xu, rul) units assigned to model j this iteration; a
-            # model can receive up to (number_of_models - 1) units (one per other owner).
+            # model can receive up to n_censored_per_model * (number_of_models - 1) units
+            # (one per other owner per round).
             pending: list[list[tuple[torch.Tensor, torch.Tensor]]] = [
                 [] for _ in range(self.number_of_models)
             ]
 
             any_selected = False
-            for k in range(self.number_of_models):
-                owner_uid = self._select_owner_unit(norm_width[k], available_ids)
+            for r in range(self.n_censored_per_model):
+                selected_this_round = False
+                for k in range(self.number_of_models):
+                    owner_uid = self._select_owner_unit(norm_width[k], available_ids)
 
-                if owner_uid is None:
-                    self._log(1, f"[CoTraining]   Model {k}: owns no unit "
-                                 f"(none available or none under the width threshold).")
-                    continue
+                    if owner_uid is None:
+                        self._log(1, f"[CoTraining]   Round {r + 1}/{self.n_censored_per_model} "
+                                     f"model {k}: owns no unit "
+                                     f"(none available or none under the width threshold).")
+                        continue
 
-                any_selected = True
+                    selected_this_round = True
+                    any_selected = True
 
-                rul, contributors, contrib_weights = self._compute_weighted_rul(
-                    all_preds, norm_width, owner_uid)
-                xu = all_preds[k][owner_uid][1]
+                    rul, contributors, contrib_weights = self._compute_weighted_rul(
+                        all_preds, norm_width, owner_uid)
+                    xu = all_preds[k][owner_uid][1]
 
-                receivers = [j for j in range(self.number_of_models) if j != k]
-                contrib_log = [(j, round(w, 4)) for j, w in zip(contributors, contrib_weights)]
-                self._log(1, f"[CoTraining]   Model {k}: owns unit {owner_uid} | "
-                             f"RUL contributors (model, weight): {contrib_log} | "
-                             f"assigned to models {receivers}")
+                    receivers = [j for j in range(self.number_of_models) if j != k]
+                    contrib_log = [(j, round(w, 4)) for j, w in zip(contributors, contrib_weights)]
+                    self._log(1, f"[CoTraining]   Round {r + 1}/{self.n_censored_per_model} "
+                                 f"model {k}: owns unit {owner_uid} | "
+                                 f"RUL contributors (model, weight): {contrib_log} | "
+                                 f"assigned to models {receivers}")
 
-                for j in receivers:
-                    pending[j].append((xu, rul))
+                    for j in receivers:
+                        pending[j].append((xu, rul))
 
-                # Remove the owned unit everywhere so it is never reused this iteration nor
-                # returned to any model in a later one.
-                available_ids.discard(owner_uid)
-                for j in range(self.number_of_models):
-                    all_preds[j].pop(owner_uid, None)
-                    norm_width[j].pop(owner_uid, None)
-                remaining_suspension_ids = remaining_suspension_ids[
-                    remaining_suspension_ids != owner_uid
-                    ]
+                    # Remove the owned unit everywhere so it is never reused this iteration nor
+                    # returned to any model in a later one.
+                    available_ids.discard(owner_uid)
+                    for j in range(self.number_of_models):
+                        all_preds[j].pop(owner_uid, None)
+                        norm_width[j].pop(owner_uid, None)
+                    remaining_suspension_ids = remaining_suspension_ids[
+                        remaining_suspension_ids != owner_uid
+                        ]
+
+                if not selected_this_round:
+                    # No model could own a unit this round — further rounds cannot either.
+                    break
 
             if not any_selected:
                 self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: "
