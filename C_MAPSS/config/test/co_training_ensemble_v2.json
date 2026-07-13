@@ -34,7 +34,9 @@
       "fc_dropout_transformer_features": 0.4,
       "transformer_encoder_head_num_transformer_time_series": 8,
       "fc_layer_dim_transformer_time_series": 32,
-      "fc_dropout_transformer_time_series": 0.4
+      "fc_dropout_transformer_time_series": 0.4,
+      "num_layers_transformer_features":  2,
+      "num_layers_transformer_time_series": 2
     }
   },
   "FD002": {
@@ -72,7 +74,9 @@
       "fc_dropout_transformer_features": 0.4,
       "transformer_encoder_head_num_transformer_time_series": 8,
       "fc_layer_dim_transformer_time_series": 32,
-      "fc_dropout_transformer_time_series": 0.4
+      "fc_dropout_transformer_time_series": 0.4,
+      "num_layers_transformer_features":  2,
+      "num_layers_transformer_time_series": 2
     }
   },
   "FD003": {
@@ -110,7 +114,9 @@
       "fc_dropout_transformer_features": 0.4,
       "transformer_encoder_head_num_transformer_time_series": 8,
       "fc_layer_dim_transformer_time_series": 32,
-      "fc_dropout_transformer_time_series": 0.4
+      "fc_dropout_transformer_time_series": 0.4,
+      "num_layers_transformer_features":  2,
+      "num_layers_transformer_time_series": 2
     }
   },
   "FD004": {
@@ -148,7 +154,9 @@
       "fc_dropout_transformer_features": 0.4,
       "transformer_encoder_head_num_transformer_time_series": 8,
       "fc_layer_dim_transformer_time_series": 32,
-      "fc_dropout_transformer_time_series": 0.4
+      "fc_dropout_transformer_time_series": 0.4,
+      "num_layers_transformer_features":  2,
+      "num_layers_transformer_time_series": 2
     }
   }
 }

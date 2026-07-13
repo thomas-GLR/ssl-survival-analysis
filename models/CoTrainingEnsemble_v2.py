@@ -157,9 +157,11 @@ class CoTrainingEnsemble_v2:
         r"""The train algorithm for co-training ensemble v2.
 
         Each iteration scores **all** remaining censored units with a conformal prediction
-        interval per model (calibrated on the validation set), selects for every model the unit
-        whose average interval width across the *other* models is smallest (most confident), and
-        retrains all models from scratch on their newly pseudo-labelled data.
+        interval per model (calibrated on the validation set), normalizes each model's widths by
+        its own median (widths aren't comparable across models, since each calibrates its own
+        regressor), selects for every model the unit whose average normalized width across the
+        *other* models is smallest (most confident), and retrains all models from scratch on
+        their newly pseudo-labelled data.
 
         Args:
             train_with_censored_data:
@@ -327,8 +329,6 @@ class CoTrainingEnsemble_v2:
                     upper = float(intervals[idx, 1])
                     width = upper - lower
                     candidates.append((unit_id, xus[idx], lu_ps[idx], lower, upper, width))
-                    self._log(2, f"[CoTraining]     unit {unit_id.item()}: "
-                                 f"range [{lower:.2f}, {upper:.2f}] width = {width:.4f}")
 
                 # Smaller width = more confident, so sort ascending (best candidate first).
                 candidates.sort(key=lambda e: e[5])
@@ -342,6 +342,11 @@ class CoTrainingEnsemble_v2:
                     self._log(2, f"[CoTraining]   Model {j} candidate ranking (most confident first): "
                                  f"{ranking}")
 
+            # Widths are not comparable across models (each model calibrates its own conformal
+            # regressor on its own accumulated data), so normalize each model's widths by its
+            # own median before comparing them across models.
+            norm_width = self._normalized_widths(all_preds)
+
             # Phase 2 — for each model k, pick the most confident available candidate using the
             # selection mode. When a candidate is chosen it is removed from every model's
             # map so no other model k can reuse the same suspension unit.
@@ -352,6 +357,7 @@ class CoTrainingEnsemble_v2:
             for k in range(self.number_of_models):
                 censored_data_selected[k] = self._voting_censored_data_selection(
                     all_preds=all_preds,
+                    norm_width=norm_width,
                     model_index_to_exclude=k,
                 )
 
@@ -363,6 +369,7 @@ class CoTrainingEnsemble_v2:
                     # cannot be assigned to another model in this iteration.
                     for j in range(self.number_of_models):
                         all_preds[j].pop(selected_id, None)
+                        norm_width[j].pop(selected_id, None)
 
                     remaining_suspension_ids = remaining_suspension_ids[
                         remaining_suspension_ids != censored_data_selected[k][0]
@@ -694,25 +701,67 @@ class CoTrainingEnsemble_v2:
 
         return predictions
 
+    def _normalized_widths(
+            self,
+            all_preds: dict[int, OrderedDict],
+    ) -> dict[int, dict[int, float]]:
+        r"""Normalize each model's interval widths by that model's median width.
+
+        Each model calibrates its own conformal regressor, so raw widths live on different
+        scales and cannot be compared across models directly. Dividing every model's widths by
+        that model's median over the remaining units puts them on a common, model-relative scale
+        (a normalized width of ~1.0 is a typical width for that model, ``< 1`` more confident than
+        typical). This normalized width drives both the consensus average and the most-confident
+        peer selection in ``_voting_censored_data_selection``.
+
+        Args:
+            all_preds: mapping from model index j to an OrderedDict of
+                ``{unit_id_int: (unit_id, xu, lu_p, lower, upper, width)}`` (index 5 = raw width).
+
+        Returns:
+            ``{model_index: {unit_id_int: normalized_width}}``. If a model's widths are degenerate
+            (median ``<= 0``, e.g. all zero), every unit gets a normalized width of ``1.0`` so the
+            ranking simply has nothing to discriminate on rather than dividing by zero.
+        """
+        norm: dict[int, dict[int, float]] = {}
+        for j, preds in all_preds.items():
+            widths = [tup[5] for tup in preds.values()]
+            if not widths:
+                norm[j] = {}
+                continue
+            median = float(np.median(widths))
+            if median <= 0:
+                norm[j] = {uid: 1.0 for uid in preds}
+            else:
+                norm[j] = {uid: tup[5] / median for uid, tup in preds.items()}
+        return norm
+
     def _voting_censored_data_selection(
             self,
             all_preds: dict[int, OrderedDict],
+            norm_width: dict[int, dict[int, float]],
             model_index_to_exclude: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         r"""Select the censored unit the *other* models are most confident about.
 
-        For each candidate unit u, the average interval width is computed over all
-        models j ≠ k. The unit with the *smallest* average width (i.e. the tightest,
-        most confident consensus among the other models) is selected.
+        For each candidate unit u, the average **normalized** interval width (see
+        ``_normalized_widths``) is computed over all models j ≠ k. Normalizing first matters
+        because each model calibrates its own conformal regressor independently, so raw widths
+        aren't on a comparable scale — a systematically noisier model would otherwise dominate
+        the average regardless of which unit is actually easiest for it. The unit with the
+        *smallest* average normalized width (i.e. the tightest, most confident consensus among
+        the other models) is selected.
 
-        The pseudo-label assigned to model k comes from the single model j ≠ k with
-        the smallest interval width for that unit — the most confident peer — using
-        its per-window RUL predictions. Model k's own predictions are ignored so it
-        genuinely learns from its peers (the co-training principle).
+        The pseudo-label assigned to model k comes from the single model j ≠ k with the smallest
+        *normalized* interval width for that unit — the most confident peer — using its
+        per-window RUL predictions. Model k's own predictions are ignored so it genuinely learns
+        from its peers (the co-training principle).
 
         Args:
             all_preds: mapping from model index j to an OrderedDict of
                 ``{unit_id_int: (unit_id_tensor, xu, lu_p, lower, upper, width)}``.
+            norm_width: mapping from model index j to ``{unit_id_int: normalized_width}``, as
+                returned by ``_normalized_widths``.
             model_index_to_exclude: index k of the model being updated — its own
                 predictions are excluded from both the width average and the pseudo-label.
 
@@ -733,7 +782,7 @@ class CoTrainingEnsemble_v2:
 
         for unit_id_int in all_unit_ids:
             widths = [
-                all_preds[j][unit_id_int][5]
+                norm_width[j][unit_id_int]
                 for j in all_preds
                 if j != model_index_to_exclude and unit_id_int in all_preds[j]
             ]
@@ -747,15 +796,35 @@ class CoTrainingEnsemble_v2:
         if best_unit_id_int is None:
             return None
 
-        # The pseudo-label comes from the most confident peer (smallest interval width
-        # among models j ≠ k) — not an average — as specified for v2.
+        # The pseudo-label comes from the most confident peer (smallest normalized interval
+        # width among models j ≠ k) — not an average — as specified for v2.
         contributors = [
             j for j in all_preds
             if j != model_index_to_exclude and best_unit_id_int in all_preds[j]
         ]
-        most_confident_j = min(contributors, key=lambda j: all_preds[j][best_unit_id_int][5])
+        most_confident_j = min(contributors, key=lambda j: norm_width[j][best_unit_id_int])
 
         unit_id, xu, lu_p, _, _, _ = all_preds[most_confident_j][best_unit_id_int]
+
+        self._log(1, f"[CoTraining]     Unit {best_unit_id_int} selected for model {model_index_to_exclude} | "
+                     f"best avg normalized width = {best_avg_width:.4f}")
+
+        num_sequences = lu_p.view(-1).shape[0]
+
+        self._log(1, f"[CoTraining]     Unit {best_unit_id_int} width per peer model (raw / normalized):")
+        for j in contributors:
+            self._log(1, f"[CoTraining]     \tmodel {j}: {all_preds[j][best_unit_id_int][5]:.4f} / "
+                         f"{norm_width[j][best_unit_id_int]:.4f}")
+
+        self._log(1, f"[CoTraining]     Unit {best_unit_id_int} RUL predicted by all peer models "
+                     f"({num_sequences} sequences for this unit):")
+        for j in contributors:
+            self._log(1, f"[CoTraining]     \tmodel {j}: "
+                         f"{[round(v, 4) for v in all_preds[j][best_unit_id_int][2].view(-1).tolist()]}")
+
+        self._log(1, f"[CoTraining]     Unit {best_unit_id_int} chosen RUL ({num_sequences} sequences for this "
+                     f"unit, from most confident peer, model {most_confident_j}): "
+                     f"{[round(v, 4) for v in lu_p.view(-1).tolist()]}")
 
         return unit_id, xu, lu_p
 
