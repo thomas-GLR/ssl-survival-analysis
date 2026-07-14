@@ -10,7 +10,8 @@
     "pin_memory": true,
     "return_sequence_label": false,
     "batch_size": 128,
-    "shuffle_loader": true
+    "shuffle_loader": true,
+    "counter_mode": "cumulative"
   },
   "model_params": {
     "first_model": {
@@ -31,6 +32,7 @@
     "patiences": [50, 50],
     "max_epochs": [500, 500],
     "coprog_iterations": 10,
-    "coprog_suspension_pool_size": 25
+    "coprog_suspension_pool_size": 25,
+    "rul_target_standardization": [true, true]
   }
 }

@@ -68,10 +68,13 @@ class ScaniaDataModule(LightningDataModule):
             num_workers: int = 0,
             pin_memory: bool = False,
             return_sequence_label: bool = False,
+            counter_mode: str = "cumulative",
     ):
         super().__init__()
         assert 0 <= val_rate < 1 and 0 <= test_rate < 1 and (val_rate + test_rate) < 1, \
             "val_rate/test_rate must be in [0, 1) and sum to < 1"
+        assert counter_mode in ("delta", "cumulative", "both"), \
+            f"Unsupported counter_mode: {counter_mode}"
 
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -86,8 +89,18 @@ class ScaniaDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.return_sequence_label = return_sequence_label
+        self.counter_mode = counter_mode
 
-        self.feature_cols = list(COUNTER_COLUMNS)
+        # Raw counter columns as they appear in the CSV (what we read/difference).
+        self._base_counter_cols = list(COUNTER_COLUMNS)
+        # Feature columns actually fed to the model. In "both" mode the per-step
+        # deltas are appended as separate "<counter>_delta" columns, doubling the
+        # feature count; "delta"/"cumulative" keep the base columns (same names,
+        # different values).
+        if counter_mode == "both":
+            self.feature_cols = self._base_counter_cols + [f"{c}_delta" for c in self._base_counter_cols]
+        else:
+            self.feature_cols = list(self._base_counter_cols)
 
         self.train_set: ScaniaDataset | None = None
         self.val_set: ScaniaDataset | None = None
@@ -124,7 +137,10 @@ class ScaniaDataModule(LightningDataModule):
     def _preprocess_and_split(self) -> None:
         start = time.time()
 
-        usecols = [VEHICLE_ID, TIME_STEP] + self.feature_cols
+        # Read only the raw counter columns; "both" mode's "_delta" feature
+        # columns are derived below, they do not exist in the CSV.
+        base_cols = self._base_counter_cols
+        usecols = [VEHICLE_ID, TIME_STEP] + base_cols
         readouts = pd.read_csv(os.path.join(self.data_dir, READOUTS_FILE), usecols=usecols)
         tte = pd.read_csv(
             os.path.join(self.data_dir, TTE_FILE),
@@ -134,13 +150,23 @@ class ScaniaDataModule(LightningDataModule):
         readouts = readouts.sort_values([VEHICLE_ID, TIME_STEP]).reset_index(drop=True)
 
         # 2. per-vehicle NaN fill of the raw cumulative counters
-        readouts[self.feature_cols] = readouts.groupby(VEHICLE_ID)[self.feature_cols].ffill()
-        readouts[self.feature_cols] = readouts.groupby(VEHICLE_ID)[self.feature_cols].bfill()
+        readouts[base_cols] = readouts.groupby(VEHICLE_ID)[base_cols].ffill()
+        readouts[base_cols] = readouts.groupby(VEHICLE_ID)[base_cols].bfill()
 
-        # 3. per-vehicle differencing: cumulative counter -> per-step delta.
-        #    diff() yields NaN for the first row of each vehicle -> set to 0.
-        readouts[self.feature_cols] = readouts.groupby(VEHICLE_ID)[self.feature_cols].diff()
-        readouts[self.feature_cols] = readouts[self.feature_cols].fillna(0.0)
+        # 3. build the feature representation according to counter_mode.
+        #    The raw counters are cumulative; the *cumulative* level is the
+        #    monotonic aging signal most predictive of RUL. diff() yields NaN
+        #    for the first row of each vehicle -> set to 0.
+        if self.counter_mode == "cumulative":
+            # Keep the cumulative counters as-is (no differencing).
+            pass
+        elif self.counter_mode == "delta":
+            # Replace counters by their per-step delta (legacy behavior).
+            readouts[base_cols] = readouts.groupby(VEHICLE_ID)[base_cols].diff().fillna(0.0)
+        elif self.counter_mode == "both":
+            # Keep the cumulative counters AND append the per-step deltas as new columns.
+            delta_cols = [f"{c}_delta" for c in base_cols]
+            readouts[delta_cols] = readouts.groupby(VEHICLE_ID)[base_cols].diff().fillna(0.0)
 
         # 4. merge TTE and derive the censoring flag
         readouts = readouts.merge(tte, on=VEHICLE_ID, how="inner")
@@ -275,6 +301,7 @@ class ScaniaDataModule(LightningDataModule):
             "stratify": self.stratify,
             "seed": self.seed,
             "sequence_len": self.sequence_len,
+            "counter_mode": self.counter_mode,
         }
 
     def _cache_columns(self) -> list[str]:

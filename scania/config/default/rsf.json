@@ -5,7 +5,8 @@
     "test_rate": 0.1,
     "stratify": true,
     "norm_type": "z-score",
-    "return_sequence_label": false
+    "return_sequence_label": false,
+    "counter_mode": "delta"
   },
   "training_params": {},
   "model_params": {

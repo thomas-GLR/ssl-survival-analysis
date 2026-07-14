@@ -10,12 +10,14 @@
     "pin_memory": true,
     "return_sequence_label": false,
     "batch_size": 128,
-    "shuffle_loader": true
+    "shuffle_loader": true,
+    "counter_mode": "cumulative"
   },
   "training_params": {
     "lr": 0.0002,
     "patience": 50,
-    "max_epochs": 1
+    "max_epochs": 1,
+    "rul_target_standardization": true
   },
   "model_params": {
     "transformer_encoder_head_num": 8,

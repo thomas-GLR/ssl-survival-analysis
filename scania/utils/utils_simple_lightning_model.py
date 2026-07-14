@@ -36,10 +36,12 @@ def train_model(
         pin_memory: bool,
         return_sequence_label: bool,
         batch_size: int,
+        counter_mode: str,
         # Training
         lr: float,
         patience: int,
         max_epochs: int,
+        rul_target_standardization: bool,
         # Model params
         transformer_encoder_head_num: int | None=None,
         transformer_num_layer: int | None=None,
@@ -81,6 +83,7 @@ def train_model(
         'return_sequence_label': return_sequence_label,
         'batch_size': batch_size,
         'sequence_len': sequence_len,
+        'counter_mode': counter_mode,
     }
 
     print("Creating data loader with the following parameters :")
@@ -100,11 +103,29 @@ def train_model(
         return_sequence_label=return_sequence_label,
         batch_size=batch_size,
         sequence_len=sequence_len,
+        counter_mode=counter_mode,
     )
 
     scania_data_module.setup()
 
     feature_num = len(scania_data_module.feature_cols)
+
+    if rul_target_standardization:
+        # Standardize the RUL target: the network trains/predicts in normalized
+        # target space (see BasicLightningModule) so the MSE gradient is not
+        # dominated by the raw target magnitude. Stats are computed on the training
+        # (uncensored) window labels only, via the public train dataloader, to avoid
+        # leakage and without touching the dataset classes. BasicLightningModule
+        # de-normalizes predictions back to real RUL units for all metrics/outputs.
+        train_targets = torch.cat([y for _, y in scania_data_module.train_dataloader()])
+        target_mean = float(train_targets.mean())
+        target_std = float(train_targets.std())
+        if target_std < 1e-6:
+            target_std = 1.0
+        print(f"RUL target standardization : mean={target_mean:.4f} std={target_std:.4f}")
+    else:
+        target_mean = 0.0
+        target_std = 1.0
 
     print('Training model with the following parameters:')
     print(f"Sequence length : {sequence_len}")
@@ -175,6 +196,9 @@ def train_model(
         "lr": lr,
         "patience": patience,
         "max_epochs": max_epochs,
+        "rul_target_standardization": rul_target_standardization,
+        "target_mean": target_mean,
+        "target_std": target_std,
     }
 
     print(f"Training parameters : {training_kwargs}")
@@ -188,7 +212,9 @@ def train_model(
 
     lightning_module = BasicLightningModule(
         lr=lr,
-        model=model
+        model=model,
+        target_mean=target_mean,
+        target_std=target_std,
     )
 
     early_stop_callback = callbacks.early_stopping.EarlyStopping(
@@ -250,9 +276,13 @@ def train_model(
         case _:
             raise ValueError(f"Model version {model_version} is not supported")
 
+    # target_mean/target_std are restored from the checkpoint hyperparameters;
+    # passed explicitly as belt-and-suspenders so de-normalization is correct.
     lightning_module_with_trained_model = BasicLightningModule.load_from_checkpoint(
         checkpoint_callback.best_model_path,
         model=model_for_reload,
+        target_mean=target_mean,
+        target_std=target_std,
     )
 
     lightning_module_with_trained_model.eval()
