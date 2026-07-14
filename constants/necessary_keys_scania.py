@@ -14,6 +14,7 @@ NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
     "return_sequence_label",
     "batch_size",
     "shuffle_loader",
+    "counter_mode",
 ]
 
 NECESSARY_DATASET_SELF_SUPERVISED_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
@@ -25,6 +26,7 @@ NECESSARY_DATASET_RSF_KEYS = [
     "stratify",
     "norm_type",
     "return_sequence_label",
+    "counter_mode",
 ]
 
 NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
@@ -123,6 +125,7 @@ NECESSARY_TRAINING_CNN_KEYS = [
     "lr",
     "patience",
     "max_epochs",
+    "rul_target_standardization",
 ]
 
 NECESSARY_TRAINING_LSTM_KEYS = NECESSARY_TRAINING_CNN_KEYS
@@ -138,4 +141,5 @@ NECESSARY_TRAINING_COPROG_KEYS = [
     "max_epochs",
     "coprog_iterations",
     "coprog_suspension_pool_size",
+    "rul_target_standardization",
 ]

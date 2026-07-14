@@ -45,12 +45,14 @@ def train_model(
     pin_memory: bool,
     return_sequence_label: bool,
     batch_size: int,
+    counter_mode: str,
     # Training params
     lr: list[float],
     patiences: list[int],
     max_epochs: list[int],
     coprog_iterations: int,
     coprog_suspension_pool_size: int,
+    rul_target_standardization: list[bool],
     # Others
     datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
@@ -96,6 +98,7 @@ def train_model(
         'return_sequence_label': return_sequence_label,
         'batch_size': batch_size,
         'sequence_len': sequence_len,
+        'counter_mode': counter_mode,
     }
 
     print("Creating data loader with the following parameters :")
@@ -115,6 +118,7 @@ def train_model(
         return_sequence_label=return_sequence_label,
         batch_size=batch_size,
         sequence_len=sequence_len,
+        counter_mode=counter_mode,
     )
 
     scania_data_module.setup()
@@ -130,12 +134,37 @@ def train_model(
     first_model_params, first_model_version = _extract_model_coprog_params(first_model)
     second_model_params, second_model_version = _extract_model_coprog_params(second_model)
 
+    targets_means = []
+    targets_stds = []
+
+    for i in range(2):
+        if rul_target_standardization[i]:
+        # Standardize the RUL target: the network trains/predicts in normalized
+        # target space (see BasicLightningModule) so the MSE gradient is not
+        # dominated by the raw target magnitude. Stats are computed on the training
+        # (uncensored) window labels only, via the public train dataloader, to avoid
+        # leakage and without touching the dataset classes. BasicLightningModule
+        # de-normalizes predictions back to real RUL units for all metrics/outputs.
+            target_mean = float(targets_uncensored.mean())
+            target_std = float(targets_uncensored.std())
+            if target_std < 1e-6:
+                target_std = 1.0
+            print(f"RUL target standardization for model {i+1}: mean={target_mean:.4f} std={target_std:.4f}")
+        else:
+            target_mean = 0.0
+            target_std = 1.0
+        targets_means.append(target_mean)
+        targets_stds.append(target_std)
+
     training_kwargs = {
         "lr": lr,
         "patiences": patiences,
         "max_epochs": max_epochs,
         "coprog_iterations": coprog_iterations,
-        "coprog_suspension_pool_size": coprog_suspension_pool_size
+        "coprog_suspension_pool_size": coprog_suspension_pool_size,
+        "rul_target_standardization": rul_target_standardization,
+        "target_mean": targets_means,
+        "target_std": targets_stds,
     }
 
     model_kwargs = {
@@ -165,8 +194,18 @@ def train_model(
     )
 
     # Wrap each model in a Lightning module.
-    first_module = BasicLightningModule(lr=lr[0], model=first_model)
-    second_module = BasicLightningModule(lr=lr[1], model=second_model)
+    first_module = BasicLightningModule(
+        lr=lr[0],
+        model=first_model,
+        target_mean=targets_means[0],
+        target_std=targets_stds[0],
+    )
+    second_module = BasicLightningModule(
+        lr=lr[1],
+        model=second_model,
+        target_mean=targets_means[1],
+        target_std=targets_stds[1],
+    )
 
     # Each _train_fun call builds a fresh Trainer from these factories. The ModelCheckpoint
     # lets Coprog reload the best (val_loss) weights instead of the last-epoch ones, and
