@@ -60,6 +60,7 @@ class CoTrainingEnsemble:
         self.number_of_models = len(self.models)
         self.lightning_modules = None
         self.trainer_factories = None
+        self.fine_tune_trainer_factories = None
         self.batchs_size = None
         self.shuffle_dataloaders = None
         self.fine_tune_trainable_params = None
@@ -87,6 +88,7 @@ class CoTrainingEnsemble:
             batchs_size: list[int],
             shuffle_dataloaders: list[bool],
             fine_tune_trainable_params: list[Callable[[LightningModule], list[nn.Parameter]] | None] | None = None,
+            fine_tune_trainer_factories: list[Callable[[], Trainer]] | None = None,
     ) -> None:
         r"""Setup training for the models.
 
@@ -122,6 +124,11 @@ class CoTrainingEnsemble:
                     fine_tune_trainable_params = [
                         lambda lm: list(lm.net.regressor.parameters()),
                     ] * models_number
+            fine_tune_trainer_factories (list[Callable[[], Trainer]] | None):
+                Optional, one entry per model. When provided, ``_fine_tune_fun`` builds its
+                Trainer from these factories instead of ``trainer_factories`` — e.g. to cap the
+                fine-tuning epoch budget below the from-scratch ``max_epochs``. When ``None``
+                (default) fine-tuning reuses ``trainer_factories``, preserving prior behaviour.
         """
         if (len(lightning_modules) != len(self.models) or
                 len(trainer_factories) != len(self.models) or
@@ -134,8 +141,13 @@ class CoTrainingEnsemble:
             raise ValueError(
                 f"The number of fine_tune_trainable_params (size={len(fine_tune_trainable_params)}) must be the same as the number of models.")
 
+        if fine_tune_trainer_factories is not None and len(fine_tune_trainer_factories) != len(self.models):
+            raise ValueError(
+                f"The number of fine_tune_trainer_factories (size={len(fine_tune_trainer_factories)}) must be the same as the number of models.")
+
         self.lightning_modules = lightning_modules
         self.trainer_factories = trainer_factories
+        self.fine_tune_trainer_factories = fine_tune_trainer_factories
         self.batchs_size = batchs_size
         self.shuffle_dataloaders = shuffle_dataloaders
         self.fine_tune_trainable_params = fine_tune_trainable_params
@@ -151,7 +163,8 @@ class CoTrainingEnsemble:
             suspension_data: torch.Tensor,
             suspension_ids: torch.Tensor,
             iterations: int,
-            suspension_pool_size: int,
+            suspension_pool_size: float,
+            add_ratio: float,
             val_data: torch.Tensor | None = None,
             val_label: torch.Tensor | None = None,
             test_data: torch.Tensor | None = None,
@@ -189,7 +202,14 @@ class CoTrainingEnsemble:
             iterations:
                 The number of iteration for training models on suspension data
             suspension_pool_size:
-                The number of suspension data selected for each iteration. If -1 then all censored data are selected
+                Fraction (in ``(0, 1]``) of the total censored units to draw at random as the
+                candidate pool each iteration. ``>= 1.0`` means the whole remaining set is used.
+                The pool is re-sampled every iteration so the same units are not always scored.
+            add_ratio:
+                Fraction (in ``(0, 1]``) of the sampled pool to actually add per iteration. The
+                per-iteration add count is ``max(1, round(add_ratio * pool_size))`` units, shared
+                across all models and handed out round-robin (with a rotating starting model) so no
+                single model consistently gets first pick of the best censored units.
             val_data:
                 Optional validation features used for early stopping / best-checkpoint
                 selection during every training call.
@@ -245,11 +265,23 @@ class CoTrainingEnsemble:
                     "val_data and val_label are required to log per-stage metrics "
                     "(the 'with weights' metrics weight the models on the validation set).")
 
+        if not (0 < suspension_pool_size <= 1):
+            raise ValueError("suspension_pool_size must be a fraction in (0, 1].")
+        if not (0 < add_ratio <= 1):
+            raise ValueError("add_ratio must be a fraction in (0, 1].")
+
         total_suspension_units = len(torch.unique(suspension_ids))
+        # Candidate pool size (a count of units) derived once from the fraction; the actual pool is
+        # re-sampled at random from the remaining units every iteration.
+        if suspension_pool_size >= 1.0:
+            pool_size = total_suspension_units
+        else:
+            pool_size = max(1, round(suspension_pool_size * total_suspension_units))
         self._log(1, f"[CoTraining] Starting training | models: {self.number_of_models} | "
                      f"failure samples: {len(failure_data)} | "
                      f"censored units: {total_suspension_units} | "
-                     f"max iterations: {iterations} | pool size: {suspension_pool_size} | "
+                     f"max iterations: {iterations} | pool fraction: {suspension_pool_size} "
+                     f"(size: {pool_size}) | add ratio: {add_ratio} | "
                      f"selection: {selection_mode.name}")
 
         models_datasets = []
@@ -300,12 +332,9 @@ class CoTrainingEnsemble:
                 self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
                 break
 
-            if suspension_pool_size == -1:
-                pool_size = len(remaining_suspension_ids)
-            else:
-                pool_size = min(suspension_pool_size, len(remaining_suspension_ids))
+            pool_size_iter = min(pool_size, len(remaining_suspension_ids))
             shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
-            pool_ids = shuffled_ids[:pool_size]  # U'
+            pool_ids = shuffled_ids[:pool_size_iter]  # U'
 
             self._log(1, f"[CoTraining] --- Iteration {i + 1}/{iterations} | "
                          f"remaining censored units: {len(remaining_suspension_ids)} | "
@@ -370,71 +399,94 @@ class CoTrainingEnsemble:
                     self._log(2, f"[CoTraining]   Model {j} candidate ranking (best first): "
                                  f"{[(uid, round(d, 4)) for uid, d in ranking]}")
 
-            # Phase 2 — for each model k, pick the best available candidate using the
-            # selection mode. When a candidate is chosen it is removed from every model's
-            # map so no other model k can reuse the same suspension unit.
-            censored_data_selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [
-                None for _ in range(self.number_of_models)
+            # Phase 2 — hand out a shared per-iteration budget of censored units round-robin
+            # over the models, rotating the starting model each iteration so no single model
+            # consistently gets first pick of the best units. Each model still selects from its
+            # peers' scores (co-training); a chosen unit is removed from every model's map so it
+            # cannot be reused this iteration. A model may receive more than one unit per iteration.
+            n_add = max(1, round(add_ratio * len(pool_ids)))
+            selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = [
+                [] for _ in range(self.number_of_models)
             ]
 
-            for k in range(self.number_of_models):
+            start = i % self.number_of_models
+            added = 0
+            slot = 0
+            consecutive_failures = 0
+            self._log(1, f"[CoTraining]   Adding up to {n_add} unit(s) this iteration "
+                         f"(round-robin from model {start}).")
+            while added < n_add and consecutive_failures < self.number_of_models:
+                k = (start + slot) % self.number_of_models
+                slot += 1
+
                 match selection_mode:
                     case SelectionMode.VOTING:
-                        censored_data_selected[k] = self._voting_censored_data_selection(
+                        picked = self._voting_censored_data_selection(
                             all_preds=all_preds,
                             model_index_to_exclude=k,
                         )
                     case SelectionMode.EVIDENCE:
-                        censored_data_selected[k] = self._evidential_censored_data_selection()
+                        picked = self._evidential_censored_data_selection()
                     case _:
                         raise ValueError(f"Unknown selection mode: {selection_mode.name}")
 
-                if censored_data_selected[k] is not None:
-                    selected_id = censored_data_selected[k][0].item()
-                    self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} "
-                                 f"(mode: {selection_mode.name})")
+                if picked is None:
+                    # No beneficial (positive-delta) unit currently available for model k.
+                    consecutive_failures += 1
+                    continue
 
-                    # Remove the selected unit from every model's candidate map so it
-                    # cannot be assigned to another model in this iteration.
-                    for j in range(self.number_of_models):
-                        all_preds[j].pop(selected_id, None)
+                consecutive_failures = 0
+                selected_id = picked[0].item()
+                selected_per_model[k].append(picked)
+                added += 1
+                self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} "
+                             f"(mode: {selection_mode.name})")
 
-                    remaining_suspension_ids = remaining_suspension_ids[
-                        remaining_suspension_ids != censored_data_selected[k][0]
-                        ]
-                else:
-                    self._log(1, f"[CoTraining]   Model {k}: no unit selected (no positive delta found).")
+                # Remove the selected unit from every model's candidate map so it
+                # cannot be assigned again this iteration.
+                for j in range(self.number_of_models):
+                    all_preds[j].pop(selected_id, None)
 
-            if all(x is None for x in censored_data_selected):
+                remaining_suspension_ids = remaining_suspension_ids[
+                    remaining_suspension_ids != picked[0]
+                    ]
+
+            if added == 0:
                 self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: "
                              f"no model found a beneficial censored unit.")
                 break
 
             for j in range(self.number_of_models):
-                if censored_data_selected[j] is not None:
-                    _, xu, lu = censored_data_selected[j]
+                if selected_per_model[j]:
                     xj, yj = models_datasets[j]
 
-                    lu2_reshaped = lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1)
+                    # Concatenate every unit newly assigned to model j this iteration.
+                    new_xu = torch.cat([xu for _, xu, _ in selected_per_model[j]], dim=0)
+                    new_lu = torch.cat(
+                        [lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1)
+                         for _, _, lu in selected_per_model[j]],
+                        dim=0,
+                    )
 
-                    xj = torch.cat([xj, xu], dim=0)
-                    yj = torch.cat([yj, lu2_reshaped], dim=0)
+                    xj = torch.cat([xj, new_xu], dim=0)
+                    yj = torch.cat([yj, new_lu], dim=0)
 
                     models_datasets[j] = (xj, yj)
 
                     self._log(1, f"[CoTraining]   Retraining model {j} | "
+                                 f"added {len(selected_per_model[j])} unit(s) | "
                                  f"dataset size: {len(xj)} samples "
                                  f"({'fine-tune' if is_fine_tuning_for_last_step else 'from scratch'})")
 
                     if is_fine_tuning_for_last_step:
-                        # Fine-tuning warm-starts from h[j], so only the newly selected
-                        # unit's data is passed in, not the full accumulated (xj, yj) —
-                        # that's what makes fine-tuning cheaper than retraining from scratch.
+                        # Fine-tuning warm-starts from h[j], so only the newly selected units'
+                        # data is passed in, not the full accumulated (xj, yj) — that's what
+                        # makes fine-tuning cheaper than retraining from scratch.
                         h[j] = self._fine_tune_fun(
                             model=copy.deepcopy(h[j]),
                             model_index=j,
-                            x=xu,
-                            y=lu2_reshaped,
+                            x=new_xu,
+                            y=new_lu,
                             val_x=val_data,
                             val_y=val_label,
                         )
@@ -603,6 +655,20 @@ class CoTrainingEnsemble:
 
         return result
 
+    def predict_per_model(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """
+        Per-model (unweighted) predictions, one tensor per model in the ensemble.
+
+        Unlike :meth:`predict`, no weighting is applied — this is used to report each model's
+        own test metrics (e.g. the per-model test RMSE columns of the summary CSV).
+
+        :param x: torch.Tensor
+            Input features of shape ``(N, *feature_dims)``.
+        :return: list[torch.Tensor]
+            One prediction tensor per model, each of shape ``(N, *output_dims)``.
+        """
+        return [self._predict(model, x) for model in self.lightning_modules]
+
     def _train_fun(
             self,
             model: LightningModule,
@@ -645,15 +711,24 @@ class CoTrainingEnsemble:
             y: torch.Tensor,
             val_x: torch.Tensor | None,
             val_y: torch.Tensor | None,
+            use_fine_tune_trainer: bool = False,
     ) -> LightningModule:
         """
         Fit ``model`` (whatever its current weights are) on ``(x, y)`` and reload the
         best checkpoint (as tracked by the trainer's ``ModelCheckpoint`` callback) so
         we never keep the potentially worse last-epoch weights. Shared by
         ``_train_fun`` (fresh model) and ``_fine_tune_fun`` (warm-started model).
+
+        :param use_fine_tune_trainer: bool
+            When ``True`` and fine-tune trainer factories were supplied to
+            ``setup_training``, the Trainer is built from ``self.fine_tune_trainer_factories``
+            (e.g. a smaller ``max_epochs``); otherwise ``self.trainer_factories`` is used.
         """
         # Trainer can save some state then we create a new one
-        trainer: Trainer = self.trainer_factories[model_index]()
+        if use_fine_tune_trainer and self.fine_tune_trainer_factories is not None:
+            trainer: Trainer = self.fine_tune_trainer_factories[model_index]()
+        else:
+            trainer: Trainer = self.trainer_factories[model_index]()
 
         batch_size: int = self.batchs_size[model_index]
 
@@ -744,7 +819,8 @@ class CoTrainingEnsemble:
         val_mse_before = self._mse_on(model, val_x, val_y) if has_val_data else None
 
         try:
-            model = self._fit_and_reload_best(model, model_index, x, y, val_x, val_y)
+            model = self._fit_and_reload_best(
+                model, model_index, x, y, val_x, val_y, use_fine_tune_trainer=True)
         finally:
             if original_lr is not None:
                 model.lr = original_lr

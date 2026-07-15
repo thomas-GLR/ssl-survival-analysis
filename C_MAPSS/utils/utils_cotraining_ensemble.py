@@ -27,7 +27,9 @@ def train_model(
         model_version: str,
         # Training
         coprog_iterations: int,
-        coprog_suspension_pool_size: int,
+        coprog_suspension_pool_size: float,
+        coprog_add_ratio: float,
+        coprog_fine_tune_max_epochs: int,
         is_fine_tuning_during_finding_best_suspension_data: bool,
         is_fine_tuning_for_last_step: bool,
         selection_mode_str: str,
@@ -263,6 +265,12 @@ def train_model(
         make_trainer_factory(patiences[j], max_epochs[j]) for j in range(models_number)
     ]
 
+    # Separate factories for fine-tuning, capped at coprog_fine_tune_max_epochs so the many
+    # per-candidate / per-step fine-tune fits stay cheap relative to the from-scratch max_epochs.
+    fine_tune_trainer_factories: list[Callable[[], Trainer]] = [
+        make_trainer_factory(patiences[j], coprog_fine_tune_max_epochs) for j in range(models_number)
+    ]
+
     fine_tune_trainable_params: list[Callable[[LightningModule], list[nn.Parameter]]] = [
         lambda lm: list(lm.net.regressor.parameters()),
         lambda lm: list(lm.net.linear.parameters()),
@@ -275,7 +283,8 @@ def train_model(
         trainer_factories=trainer_factories,
         batchs_size=batchs_size,
         shuffle_dataloaders=shuffle_dataloaders,
-        fine_tune_trainable_params=fine_tune_trainable_params
+        fine_tune_trainable_params=fine_tune_trainable_params,
+        fine_tune_trainer_factories=fine_tune_trainer_factories,
     )
 
     print(f"Training Coprog model...")
@@ -303,6 +312,7 @@ def train_model(
             suspension_ids=ids_censored,
             iterations=coprog_iterations,
             suspension_pool_size=coprog_suspension_pool_size,
+            add_ratio=coprog_add_ratio,
             val_data=val_features,
             val_label=val_targets,
             test_data=features_tensor,
@@ -345,14 +355,27 @@ def train_model(
     rmse = torch.sqrt(torch.mean((targets_flat - y_hat) ** 2))
     score = utils_cmapss.cmapss_score(y_hat.numpy(), targets_flat.numpy())
 
+    # Per-model (unweighted) test RMSE, reported alongside the ensemble RMSE in the summary CSV.
+    per_model_preds = cotraining_ensemble.predict_per_model(features_tensor)
+    per_model_test_rmse = [
+        torch.sqrt(torch.mean((targets_flat - pred.detach().cpu().view(-1)) ** 2)).item()
+        for pred in per_model_preds
+    ]
+
     columns = ['test_rmse', 'test_score']
+
+    for j in range(models_number):
+        columns.append(f"test_rmse_{j}")
 
     for j in range(models_number):
         columns.append(f"weight_{j}")
 
     scores = pd.DataFrame(columns=columns)
 
-    row = [rmse, score]
+    row = [rmse.item(), score]
+
+    for j in range(models_number):
+        row.append(per_model_test_rmse[j])
 
     for j in range(models_number):
         if cotraining_ensemble is not None:
@@ -366,6 +389,7 @@ def train_model(
     scores.to_csv(f'{results_path}/{model_version}-turbofan-{sub_dataset}.csv', index=False)
 
     print(f"Test RMSE: {rmse}")
+    print(f"Per-model test RMSE: {per_model_test_rmse}")
     print(f"Score: {score}")
 
     return rmse.item(), score
@@ -377,6 +401,8 @@ def train_model_v2(
         model_version: str,
         # Training
         coprog_iterations: int,
+        coprog_suspension_pool_size: float,
+        coprog_add_ratio: float,
         max_epochs: list[int],
         patiences: list[int],
         batchs_size: list[int],
@@ -614,6 +640,8 @@ def train_model_v2(
             suspension_data=features_censored,
             suspension_ids=ids_censored,
             iterations=coprog_iterations,
+            suspension_pool_size=coprog_suspension_pool_size,
+            add_ratio=coprog_add_ratio,
             val_data=val_features,
             val_label=val_targets,
             test_data=features_tensor,
@@ -654,14 +682,27 @@ def train_model_v2(
     rmse = torch.sqrt(torch.mean((targets_flat - y_hat) ** 2))
     score = utils_cmapss.cmapss_score(y_hat.numpy(), targets_flat.numpy())
 
+    # Per-model (unweighted) test RMSE, reported alongside the ensemble RMSE in the summary CSV.
+    per_model_preds = cotraining_ensemble.predict_per_model(features_tensor)
+    per_model_test_rmse = [
+        torch.sqrt(torch.mean((targets_flat - pred.detach().cpu().view(-1)) ** 2)).item()
+        for pred in per_model_preds
+    ]
+
     columns = ['test_rmse', 'test_score']
+
+    for j in range(models_number):
+        columns.append(f"test_rmse_{j}")
 
     for j in range(models_number):
         columns.append(f"weight_{j}")
 
     scores = pd.DataFrame(columns=columns)
 
-    row = [rmse, score]
+    row = [rmse.item(), score]
+
+    for j in range(models_number):
+        row.append(per_model_test_rmse[j])
 
     for j in range(models_number):
         row.append(cotraining_ensemble.weights[j])
@@ -671,6 +712,7 @@ def train_model_v2(
     scores.to_csv(f'{results_path}/{model_version}-turbofan-{sub_dataset}.csv', index=False)
 
     print(f"Test RMSE: {rmse}")
+    print(f"Per-model test RMSE: {per_model_test_rmse}")
     print(f"Score: {score}")
 
     return rmse.item(), score
@@ -718,8 +760,9 @@ if __name__ == "__main__":
     # [CNN1D, Simple_LSTM, TransformerFeatures, TransformerTimeSequence].
     # Small values here are for a quick end-to-end smoke test.
     coprog_iterations = 2
+    coprog_suspension_pool_size = 1.0
+    coprog_add_ratio = 0.5
     confidence = 0.95
-    selection_mode_str = "voting"
     max_epochs = [2, 2, 2, 2]
     patiences = [2, 2, 2, 2]
     batchs_size = [256, 256, 256, 256]
@@ -748,8 +791,9 @@ if __name__ == "__main__":
         model_version=model_version,
         # Training
         coprog_iterations=coprog_iterations,
+        coprog_suspension_pool_size=coprog_suspension_pool_size,
+        coprog_add_ratio=coprog_add_ratio,
         confidence=confidence,
-        selection_mode_str=selection_mode_str,
         max_epochs=max_epochs,
         patiences=patiences,
         batchs_size=batchs_size,

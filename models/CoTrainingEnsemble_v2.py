@@ -145,6 +145,8 @@ class CoTrainingEnsemble_v2:
             suspension_data: torch.Tensor,
             suspension_ids: torch.Tensor,
             iterations: int,
+            suspension_pool_size: float,
+            add_ratio: float,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
             test_data: torch.Tensor | None = None,
@@ -177,6 +179,16 @@ class CoTrainingEnsemble_v2:
                 The ids of each different individual who are censored.
             iterations:
                 The number of iteration for training models on suspension data
+            suspension_pool_size:
+                Fraction (in ``(0, 1]``) of the total censored units to draw at random as the
+                candidate pool each iteration. ``>= 1.0`` means the whole remaining set is used.
+                The pool is re-sampled every iteration so the same units are not always scored
+                (also avoids scoring every remaining unit's conformal interval each iteration).
+            add_ratio:
+                Fraction (in ``(0, 1]``) of the sampled pool to actually add per iteration. The
+                per-iteration add count is ``max(1, round(add_ratio * pool_size))`` units, shared
+                across all models and handed out round-robin (with a rotating starting model) so no
+                single model consistently gets first pick of the most confident censored units.
             val_data:
                 Validation features. Required: used both for early stopping / best-checkpoint
                 selection during every training call and as the calibration set for the
@@ -230,11 +242,24 @@ class CoTrainingEnsemble_v2:
             if metrics_file is None:
                 raise ValueError("metrics_file is required to log per-stage metrics.")
 
+        if not (0 < suspension_pool_size <= 1):
+            raise ValueError("suspension_pool_size must be a fraction in (0, 1].")
+        if not (0 < add_ratio <= 1):
+            raise ValueError("add_ratio must be a fraction in (0, 1].")
+
         total_suspension_units = len(torch.unique(suspension_ids))
+        # Candidate pool size (a count of units) derived once from the fraction; the actual pool is
+        # re-sampled at random from the remaining units every iteration.
+        if suspension_pool_size >= 1.0:
+            pool_size = total_suspension_units
+        else:
+            pool_size = max(1, round(suspension_pool_size * total_suspension_units))
         self._log(1, f"[CoTraining] Starting training | models: {self.number_of_models} | "
                      f"failure samples: {len(failure_data)} | "
                      f"censored units: {total_suspension_units} | "
-                     f"max iterations: {iterations} | confidence: {self.confidence} | ")
+                     f"max iterations: {iterations} | confidence: {self.confidence} | "
+                     f"pool fraction: {suspension_pool_size} (size: {pool_size}) | "
+                     f"add ratio: {add_ratio} | ")
 
         models_datasets = []
         h: list[LightningModule] = []
@@ -284,11 +309,19 @@ class CoTrainingEnsemble_v2:
                 self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
                 break
 
+            # Draw a random candidate pool from the remaining units. Re-sampling every iteration
+            # means the same units are not always scored, and (unlike scoring all remaining units)
+            # it bounds the per-iteration conformal cost.
+            pool_size_iter = min(pool_size, len(remaining_suspension_ids))
+            shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
+            pool_ids = shuffled_ids[:pool_size_iter]
+
             self._log(1, f"[CoTraining] --- Iteration {i + 1}/{iterations} | "
-                         f"remaining censored units: {len(remaining_suspension_ids)} ---")
+                         f"remaining censored units: {len(remaining_suspension_ids)} | "
+                         f"pool: {pool_ids.tolist()} ---")
 
             # Phase 1 — for each model j, build a conformal regressor (calibrated on the
-            # validation set) and score every remaining censored unit by the width of the
+            # validation set) and score every pooled censored unit by the width of the
             # prediction interval at the unit's last window (narrower = more confident).
             # Results are stored in an OrderedDict (sorted by width ascending) so the most
             # confident candidate is always first.
@@ -301,13 +334,13 @@ class CoTrainingEnsemble_v2:
                 xj, yj = models_datasets[j]
 
                 self._log(2, f"[CoTraining]   Model {j}: calibrating conformal regressor and "
-                             f"scoring {len(remaining_suspension_ids)} censored units...")
+                             f"scoring {len(pool_ids)} pooled censored units...")
 
                 wrapper = self._build_calibrated_regressor(hj, xj, val_data, val_label)
 
                 # Collect each unit's rows, its per-window pseudo-labels and its last window
                 # (the interval of that final window is the unit's "range").
-                unit_ids = list(remaining_suspension_ids)
+                unit_ids = list(pool_ids)
                 xus: list[torch.Tensor] = []
                 lu_ps: list[torch.Tensor] = []
                 last_windows: list[torch.Tensor] = []
@@ -347,54 +380,77 @@ class CoTrainingEnsemble_v2:
             # own median before comparing them across models.
             norm_width = self._normalized_widths(all_preds)
 
-            # Phase 2 — for each model k, pick the most confident available candidate using the
-            # selection mode. When a candidate is chosen it is removed from every model's
-            # map so no other model k can reuse the same suspension unit.
-            censored_data_selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [
-                None for _ in range(self.number_of_models)
+            # Phase 2 — hand out a shared per-iteration budget of censored units round-robin
+            # over the models, rotating the starting model each iteration so no single model
+            # consistently gets first pick of the most confident units. Each model still selects
+            # from its peers' scores (co-training); a chosen unit is removed from every model's
+            # map so it cannot be reused this iteration. A model may receive more than one unit.
+            n_add = max(1, round(add_ratio * len(pool_ids)))
+            selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = [
+                [] for _ in range(self.number_of_models)
             ]
 
-            for k in range(self.number_of_models):
-                censored_data_selected[k] = self._voting_censored_data_selection(
+            start = i % self.number_of_models
+            added = 0
+            slot = 0
+            consecutive_failures = 0
+            self._log(1, f"[CoTraining]   Adding up to {n_add} unit(s) this iteration "
+                         f"(round-robin from model {start}).")
+            while added < n_add and consecutive_failures < self.number_of_models:
+                k = (start + slot) % self.number_of_models
+                slot += 1
+
+                picked = self._voting_censored_data_selection(
                     all_preds=all_preds,
                     norm_width=norm_width,
                     model_index_to_exclude=k,
                 )
 
-                if censored_data_selected[k] is not None:
-                    selected_id = censored_data_selected[k][0].item()
-                    self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} ")
+                if picked is None:
+                    # No censored unit currently available for model k.
+                    consecutive_failures += 1
+                    continue
 
-                    # Remove the selected unit from every model's candidate map so it
-                    # cannot be assigned to another model in this iteration.
-                    for j in range(self.number_of_models):
-                        all_preds[j].pop(selected_id, None)
-                        norm_width[j].pop(selected_id, None)
+                consecutive_failures = 0
+                selected_id = picked[0].item()
+                selected_per_model[k].append(picked)
+                added += 1
+                self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} ")
 
-                    remaining_suspension_ids = remaining_suspension_ids[
-                        remaining_suspension_ids != censored_data_selected[k][0]
-                        ]
-                else:
-                    self._log(1, f"[CoTraining]   Model {k}: no unit selected (no censored units available).")
+                # Remove the selected unit from every model's candidate map so it
+                # cannot be assigned again this iteration.
+                for j in range(self.number_of_models):
+                    all_preds[j].pop(selected_id, None)
+                    norm_width[j].pop(selected_id, None)
 
-            if all(x is None for x in censored_data_selected):
+                remaining_suspension_ids = remaining_suspension_ids[
+                    remaining_suspension_ids != picked[0]
+                    ]
+
+            if added == 0:
                 self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: "
                              f"no censored unit available for any model.")
                 break
 
             for j in range(self.number_of_models):
-                if censored_data_selected[j] is not None:
-                    _, xu, lu = censored_data_selected[j]
+                if selected_per_model[j]:
                     xj, yj = models_datasets[j]
 
-                    lu_reshaped = lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1)
+                    # Concatenate every unit newly assigned to model j this iteration.
+                    new_xu = torch.cat([xu for _, xu, _ in selected_per_model[j]], dim=0)
+                    new_lu = torch.cat(
+                        [lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1)
+                         for _, _, lu in selected_per_model[j]],
+                        dim=0,
+                    )
 
-                    xj = torch.cat([xj, xu], dim=0)
-                    yj = torch.cat([yj, lu_reshaped], dim=0)
+                    xj = torch.cat([xj, new_xu], dim=0)
+                    yj = torch.cat([yj, new_lu], dim=0)
 
                     models_datasets[j] = (xj, yj)
 
                     self._log(1, f"[CoTraining]   Retraining model {j} from scratch | "
+                                 f"added {len(selected_per_model[j])} unit(s) | "
                                  f"dataset size: {len(xj)} samples")
 
                     h[j] = self._train_fun(
@@ -560,6 +616,20 @@ class CoTrainingEnsemble_v2:
             result = result.squeeze(0)
 
         return result
+
+    def predict_per_model(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """
+        Per-model (unweighted) predictions, one tensor per model in the ensemble.
+
+        Unlike :meth:`predict`, no weighting is applied — this is used to report each model's
+        own test metrics (e.g. the per-model test RMSE columns of the summary CSV).
+
+        :param x: torch.Tensor
+            Input features of shape ``(N, *feature_dims)``.
+        :return: list[torch.Tensor]
+            One prediction tensor per model, each of shape ``(N, *output_dims)``.
+        """
+        return [self._predict(model, x) for model in self.lightning_modules]
 
     def _train_fun(
             self,
