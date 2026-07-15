@@ -14,28 +14,13 @@ from crepes.extras import DifficultyEstimator
 from lightning import LightningModule, Trainer
 from torch.utils.data import TensorDataset, DataLoader
 
-
-class _TorchRegressorAdapter:
-    """Minimal sklearn-style learner exposing only ``predict`` for ``crepes.WrapRegressor``.
-
-    ``WrapRegressor``/``DifficultyEstimator`` only ever call ``learner.predict(X)`` (never
-    ``.fit``) and work with 2-D numpy arrays, whereas the wrapped torch model expects a
-    ``(N, seq_len, n_features)`` tensor. This adapter bridges the two: it reshapes the
-    flattened features back to the model layout, runs the ensemble's ``_predict`` and
-    returns a 1-D numpy array aligned with the numpy labels crepes uses for residuals.
-    """
-
-    def __init__(self, predict_fn, model, seq_len: int, n_features: int):
-        self._predict_fn = predict_fn
-        self._model = model
-        self._seq_len = seq_len
-        self._n_features = n_features
-
-    def predict(self, X):
-        x = torch.from_numpy(np.asarray(X, dtype=np.float32))
-        x = x.view(-1, self._seq_len, self._n_features)
-        preds = self._predict_fn(self._model, x)
-        return preds.detach().cpu().numpy().reshape(-1)
+from models.coprog_gpu_pool import TrainingSpec, run_training_job
+from models.cotraining_gpu_pool import (
+    CoTrainingGpuPool,
+    ConformalScoreSpec,
+    _TorchRegressorAdapter,
+    run_conformal_score_job,
+)
 
 
 class CoTrainingEnsemble_v2:
@@ -85,6 +70,20 @@ class CoTrainingEnsemble_v2:
         self.weights = weights
         self.verbose = verbose
         self.confidence = confidence
+
+        # Builder-style config (set through setup_training_builder), required for multi-GPU
+        # parallel training. Mirrors models.Coprog / CoTrainingEnsemble (v1).
+        self.module_builders: list[Callable[[], LightningModule]] | None = None
+        self.max_epochs: list[int] | None = None
+        self.patiences: list[int] | None = None
+        self.gpu_ids: list[int] | None = None
+        self._initial_state_dicts: list[dict[str, torch.Tensor]] | None = None
+        self._use_builders: bool = False
+        self._parallel: bool = False
+        self._inline_accelerator: str = "auto"
+        self._inline_devices = None
+        self._configured: bool = False
+
         # Optional path to a .txt log file (set by ``train``). When not None, every
         # ``_log`` message is appended to it regardless of ``verbose``.
         self._log_file_path: str | None = None
@@ -136,6 +135,82 @@ class CoTrainingEnsemble_v2:
         self.trainer_factories = trainer_factories
         self.batchs_size = batchs_size
         self.shuffle_dataloaders = shuffle_dataloaders
+
+        # Legacy style: sequential training in the current process.
+        self._use_builders = False
+        self._parallel = False
+        self._configured = True
+
+    def setup_training_builder(
+            self,
+            module_builders: list[Callable[[], LightningModule]],
+            max_epochs: list[int],
+            patiences: list[int],
+            batchs_size: list[int],
+            shuffle_dataloaders: list[bool],
+            gpu_ids: list[int] | None = None,
+    ) -> None:
+        r"""Setup **builder-style** training, the style required for multi-GPU parallel training.
+
+        A fresh module is built from a *picklable* builder, its initial weights are pinned to a
+        one-time snapshot, and the ``Trainer`` is built internally. Each list has one entry per
+        model (same order as ``models``). v2 always trains from scratch (no fine-tuning), so —
+        unlike v1 — there are no fine-tune epoch/patience or freezing arguments.
+
+        Args:
+            module_builders: Picklable callables (module-level functions or ``functools.partial``
+                — no lambdas/closures) each returning a *fresh* ``LightningModule``.
+            max_epochs: Max training epochs per model.
+            patiences: ``EarlyStopping`` patience per model.
+            batchs_size: Batch size used to train each model.
+            shuffle_dataloaders: Whether to shuffle each training ``DataLoader``.
+            gpu_ids: Physical GPU ids to train on. ``None`` → auto (one GPU), sequential;
+                ``[g]`` → pin to GPU ``g``, sequential; ``[g0, g1, ...]`` (>=2) → parallel:
+                every independent job (per-model training, per-model conformal scoring) is
+                distributed round-robin across all listed GPUs.
+
+        Raises:
+            ValueError: If a list does not have one entry per model.
+        """
+        model_number = len(self.models)
+        if (len(module_builders) != model_number or len(max_epochs) != model_number
+                or len(patiences) != model_number or len(batchs_size) != model_number
+                or len(shuffle_dataloaders) != model_number):
+            raise ValueError(
+                f"module_builders, max_epochs, patiences, batchs_size and shuffle_dataloaders "
+                f"must all have length {model_number}.")
+
+        self.module_builders = module_builders
+        self.max_epochs = max_epochs
+        self.patiences = patiences
+        self.batchs_size = batchs_size
+        self.shuffle_dataloaders = shuffle_dataloaders
+        self.gpu_ids = list(gpu_ids) if gpu_ids else None
+
+        # Snapshot one initial weight set per model so every from-scratch training starts from
+        # identical weights and workers can reproduce that init across process boundaries.
+        self._initial_state_dicts = []
+        for builder in module_builders:
+            template = builder()
+            self._initial_state_dicts.append(
+                {k: v.detach().cpu().clone() for k, v in template.state_dict().items()}
+            )
+
+        if self.gpu_ids is None:
+            self._parallel = False
+            self._inline_accelerator = "auto"
+            self._inline_devices = None
+        elif len(self.gpu_ids) == 1:
+            self._parallel = False
+            self._inline_accelerator = "gpu"
+            self._inline_devices = [self.gpu_ids[0]]
+        else:
+            self._parallel = True
+            self._inline_accelerator = "gpu"
+            self._inline_devices = [self.gpu_ids[0]]
+
+        self._use_builders = True
+        self._configured = True
 
     def train(
             self,
@@ -259,7 +334,28 @@ class CoTrainingEnsemble_v2:
                      f"censored units: {total_suspension_units} | "
                      f"max iterations: {iterations} | confidence: {self.confidence} | "
                      f"pool fraction: {suspension_pool_size} (size: {pool_size}) | "
-                     f"add ratio: {add_ratio} | ")
+                     f"add ratio: {add_ratio} | "
+                     f"mode: {'parallel(' + str(self.gpu_ids) + ')' if self._parallel else 'sequential'}")
+
+        if self._parallel:
+            self._train_parallel(
+                failure_data=failure_data,
+                failure_label=failure_label,
+                suspension_data=suspension_data,
+                suspension_ids=suspension_ids,
+                iterations=iterations,
+                pool_size=pool_size,
+                add_ratio=add_ratio,
+                val_data=val_data,
+                val_label=val_label,
+                metrics_enabled=metrics_enabled,
+                test_data=test_data,
+                test_label=test_label,
+                criteria_callback=criteria_callback,
+                weight_mode=weight_mode,
+                metrics_file=metrics_file,
+            )
+            return
 
         models_datasets = []
         h: list[LightningModule] = []
@@ -275,14 +371,7 @@ class CoTrainingEnsemble_v2:
             models_datasets.append((x_i, y_i))
 
             self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure samples...")
-            h_j = self._train_fun(
-                model=copy.deepcopy(self.lightning_modules[j]),
-                model_index=j,
-                x=x_i,
-                y=y_i,
-                val_x=val_data,
-                val_y=val_label,
-            )
+            h_j = self._fit_from_scratch(j, x_i, y_i, val_data, val_label)
 
             h.append(h_j)
 
@@ -386,46 +475,14 @@ class CoTrainingEnsemble_v2:
             # from its peers' scores (co-training); a chosen unit is removed from every model's
             # map so it cannot be reused this iteration. A model may receive more than one unit.
             n_add = max(1, round(add_ratio * len(pool_ids)))
-            selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = [
-                [] for _ in range(self.number_of_models)
-            ]
-
             start = i % self.number_of_models
-            added = 0
-            slot = 0
-            consecutive_failures = 0
-            self._log(1, f"[CoTraining]   Adding up to {n_add} unit(s) this iteration "
-                         f"(round-robin from model {start}).")
-            while added < n_add and consecutive_failures < self.number_of_models:
-                k = (start + slot) % self.number_of_models
-                slot += 1
-
-                picked = self._voting_censored_data_selection(
-                    all_preds=all_preds,
-                    norm_width=norm_width,
-                    model_index_to_exclude=k,
-                )
-
-                if picked is None:
-                    # No censored unit currently available for model k.
-                    consecutive_failures += 1
-                    continue
-
-                consecutive_failures = 0
-                selected_id = picked[0].item()
-                selected_per_model[k].append(picked)
-                added += 1
-                self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} ")
-
-                # Remove the selected unit from every model's candidate map so it
-                # cannot be assigned again this iteration.
-                for j in range(self.number_of_models):
-                    all_preds[j].pop(selected_id, None)
-                    norm_width[j].pop(selected_id, None)
-
-                remaining_suspension_ids = remaining_suspension_ids[
-                    remaining_suspension_ids != picked[0]
-                    ]
+            selected_per_model, remaining_suspension_ids, added = self._assign_units_round_robin(
+                all_preds=all_preds,
+                norm_width=norm_width,
+                n_add=n_add,
+                start=start,
+                remaining_suspension_ids=remaining_suspension_ids,
+            )
 
             if added == 0:
                 self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: "
@@ -436,13 +493,7 @@ class CoTrainingEnsemble_v2:
                 if selected_per_model[j]:
                     xj, yj = models_datasets[j]
 
-                    # Concatenate every unit newly assigned to model j this iteration.
-                    new_xu = torch.cat([xu for _, xu, _ in selected_per_model[j]], dim=0)
-                    new_lu = torch.cat(
-                        [lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1)
-                         for _, _, lu in selected_per_model[j]],
-                        dim=0,
-                    )
+                    new_xu, new_lu = self._concat_selected_units(selected_per_model[j], yj)
 
                     xj = torch.cat([xj, new_xu], dim=0)
                     yj = torch.cat([yj, new_lu], dim=0)
@@ -453,14 +504,7 @@ class CoTrainingEnsemble_v2:
                                  f"added {len(selected_per_model[j])} unit(s) | "
                                  f"dataset size: {len(xj)} samples")
 
-                    h[j] = self._train_fun(
-                        model=copy.deepcopy(self.lightning_modules[j]),
-                        model_index=j,
-                        x=xj,
-                        y=yj,
-                        val_x=val_data,
-                        val_y=val_label,
-                    )
+                    h[j] = self._fit_from_scratch(j, xj, yj, val_data, val_label)
 
             if metrics_enabled:
                 self._log_stage_metrics(
@@ -492,6 +536,326 @@ class CoTrainingEnsemble_v2:
 
         self._log(1, f"[CoTraining] Training complete.")
         self.lightning_modules = h
+
+    # ------------------------------------------------------------------ #
+    # Shared phase helpers (used by both the sequential and parallel paths)
+    # ------------------------------------------------------------------ #
+
+    def _assign_units_round_robin(
+            self,
+            all_preds: dict[int, OrderedDict],
+            norm_width: dict[int, dict[int, float]],
+            n_add: int,
+            start: int,
+            remaining_suspension_ids: torch.Tensor,
+    ) -> tuple[list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]], torch.Tensor, int]:
+        """Phase 2: hand out a shared per-iteration budget of censored units round-robin.
+
+        Rotating the starting model each iteration so no single model consistently gets first
+        pick of the most confident units. A chosen unit is removed from every model's candidate
+        and normalized-width maps so it cannot be reused this iteration.
+
+        Returns ``(selected_per_model, remaining_suspension_ids, added)``.
+        """
+        selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = [
+            [] for _ in range(self.number_of_models)
+        ]
+        added = 0
+        slot = 0
+        consecutive_failures = 0
+        self._log(1, f"[CoTraining]   Adding up to {n_add} unit(s) this iteration "
+                     f"(round-robin from model {start}).")
+        while added < n_add and consecutive_failures < self.number_of_models:
+            k = (start + slot) % self.number_of_models
+            slot += 1
+
+            picked = self._voting_censored_data_selection(
+                all_preds=all_preds,
+                norm_width=norm_width,
+                model_index_to_exclude=k,
+            )
+
+            if picked is None:
+                # No censored unit currently available for model k.
+                consecutive_failures += 1
+                continue
+
+            consecutive_failures = 0
+            selected_id = picked[0].item()
+            selected_per_model[k].append(picked)
+            added += 1
+            self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} ")
+
+            for j in range(self.number_of_models):
+                all_preds[j].pop(selected_id, None)
+                norm_width[j].pop(selected_id, None)
+
+            remaining_suspension_ids = remaining_suspension_ids[
+                remaining_suspension_ids != picked[0]
+                ]
+
+        return selected_per_model, remaining_suspension_ids, added
+
+    @staticmethod
+    def _concat_selected_units(
+            selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+            yj: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Concatenate every ``(unit_id, xu, lu)`` newly assigned to a model into ``(new_xu, new_lu)``."""
+        new_xu = torch.cat([xu for _, xu, _ in selected], dim=0)
+        new_lu = torch.cat(
+            [lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1) for _, _, lu in selected],
+            dim=0,
+        )
+        return new_xu, new_lu
+
+    # ------------------------------------------------------------------ #
+    # Training dispatcher + builder-style spec helpers
+    # ------------------------------------------------------------------ #
+
+    def _fit_from_scratch(
+            self,
+            model_index: int,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            val_x: torch.Tensor | None,
+            val_y: torch.Tensor | None,
+    ) -> LightningModule:
+        """Train one model from scratch (inline, this process).
+
+        Uses the builder path (:func:`run_training_job` + rebuild from the returned CPU state
+        dict) when configured via :meth:`setup_training_builder`, otherwise the legacy path
+        (:meth:`_train_fun` on a deep-copied template).
+        """
+        if self._use_builders:
+            spec = self._make_fit_spec(model_index, x, y, self._cpu_pair(val_x, val_y))
+            spec.accelerator = self._inline_accelerator
+            spec.devices = self._inline_devices
+            result = run_training_job(spec)
+            return self._rebuild_module(model_index, result["state_dict"])
+        return self._train_fun(
+            copy.deepcopy(self.lightning_modules[model_index]), model_index, x, y, val_x, val_y)
+
+    def _make_fit_spec(
+            self,
+            model_index: int,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            val_cpu: tuple[torch.Tensor | None, torch.Tensor | None],
+    ) -> TrainingSpec:
+        """Build a picklable :class:`TrainingSpec` for a from-scratch training that returns state."""
+        return TrainingSpec(
+            module_builder=self.module_builders[model_index],
+            initial_state_dict=self._initial_state_dicts[model_index],
+            max_epochs=self.max_epochs[model_index],
+            patience=self.patiences[model_index],
+            batch_size=self.batchs_size[model_index],
+            shuffle=self.shuffle_dataloaders[model_index],
+            train_x=x.detach().cpu(),
+            train_y=y.detach().cpu(),
+            val_x=val_cpu[0],
+            val_y=val_cpu[1],
+            return_state=True,
+            accelerator="gpu",
+            devices=1,
+        )
+
+    def _rebuild_module(self, model_index: int, state_dict: dict[str, torch.Tensor]) -> LightningModule:
+        """Rebuild a model in this (main) process from a CPU state dict, for inference only."""
+        module = self.module_builders[model_index]()
+        module.load_state_dict(state_dict)
+        return module
+
+    @staticmethod
+    def _cpu_pair(
+            a: torch.Tensor | None,
+            b: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Detach-and-move an optional tensor pair to CPU (for picklable specs)."""
+        a_cpu = a.detach().cpu() if a is not None else None
+        b_cpu = b.detach().cpu() if b is not None else None
+        return a_cpu, b_cpu
+
+    # ------------------------------------------------------------------ #
+    # Parallel training path
+    # ------------------------------------------------------------------ #
+
+    def _train_parallel(
+            self,
+            failure_data: torch.Tensor,
+            failure_label: torch.Tensor,
+            suspension_data: torch.Tensor,
+            suspension_ids: torch.Tensor,
+            iterations: int,
+            pool_size: int,
+            add_ratio: float,
+            val_data: torch.Tensor,
+            val_label: torch.Tensor,
+            metrics_enabled: bool,
+            test_data: torch.Tensor | None,
+            test_label: torch.Tensor | None,
+            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
+            weight_mode: str,
+            metrics_file: str | None,
+    ) -> None:
+        """Multi-GPU parallel version of :meth:`train`'s algorithm.
+
+        The three per-model phases — initial from-scratch training, conformal scoring
+        (prediction on the censored units + ``crepes`` interval computation), and the
+        end-of-iteration from-scratch retrain — each run concurrently across all ``gpu_ids``
+        via a :class:`~models.cotraining_gpu_pool.CoTrainingGpuPool`, distributed round-robin.
+        Width normalization and the round-robin voting selection stay in the main process.
+        Only CPU state dicts / small per-unit results cross the process boundary.
+        """
+        n = self.number_of_models
+        val_cpu = self._cpu_pair(val_data, val_label)
+
+        pool = CoTrainingGpuPool(self.gpu_ids)
+        pool.start()
+        try:
+            models_datasets: list[tuple[torch.Tensor, torch.Tensor]] = [
+                (failure_data, failure_label) for _ in range(n)
+            ]
+
+            # --- Initial training: one from-scratch job per model, round-robin. ---
+            self._log(1, f"[CoTraining] Initial parallel training of {n} models...")
+            job_ids = {
+                j: pool.submit_job(pool.round_robin_gpu(j), self._make_fit_spec(j, failure_data, failure_label, val_cpu))
+                for j in range(n)
+            }
+            results = pool.gather(list(job_ids.values()))
+            h = [self._rebuild_module(j, results[job_ids[j]]["state_dict"]) for j in range(n)]
+            self._log(1, f"[CoTraining] Initial training done.")
+
+            if metrics_enabled:
+                self._log_stage_metrics(
+                    stage="initial", h=h, models_datasets=models_datasets,
+                    test_data=test_data, test_label=test_label, val_data=val_data,
+                    val_label=val_label, criteria_callback=criteria_callback,
+                    weight_mode=weight_mode, metrics_file=metrics_file,
+                )
+
+            remaining_suspension_ids = torch.unique(suspension_ids)
+
+            for i in range(iterations):
+                if len(remaining_suspension_ids) == 0:
+                    self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
+                    break
+
+                pool_size_iter = min(pool_size, len(remaining_suspension_ids))
+                shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
+                pool_ids = shuffled_ids[:pool_size_iter]
+
+                self._log(1, f"[CoTraining] --- Iteration {i + 1}/{iterations} | "
+                             f"remaining censored units: {len(remaining_suspension_ids)} | "
+                             f"pool: {pool_ids.tolist()} ---")
+
+                # --- Phase 1: per-model conformal scoring in parallel (one job per model). ---
+                unit_ids_int = [int(uid.item()) for uid in pool_ids]
+                # xu is identical across models for a given unit, so build the per-unit
+                # sequences once and reuse them for every model's job and for all_preds.
+                unit_x = [suspension_data[suspension_ids == uid].detach().cpu() for uid in pool_ids]
+
+                score_jobs: dict[int, int] = {}
+                for j in range(n):
+                    xj, yj = models_datasets[j]
+                    self._log(2, f"[CoTraining]   Model {j}: submitting conformal scoring of "
+                                 f"{len(pool_ids)} pooled units on GPU "
+                                 f"{pool.round_robin_gpu(j)}...")
+                    spec = ConformalScoreSpec(
+                        module_builder=self.module_builders[j],
+                        state_dict={k: v.detach().cpu().clone() for k, v in h[j].state_dict().items()},
+                        train_x=xj.detach().cpu(),
+                        val_x=val_cpu[0],
+                        val_y=val_cpu[1],
+                        unit_ids=unit_ids_int,
+                        unit_x=unit_x,
+                        confidence=self.confidence,
+                        accelerator="gpu",
+                        devices=1,
+                    )
+                    score_jobs[j] = pool.submit_conformal(pool.round_robin_gpu(j), spec)
+
+                results = pool.gather(list(score_jobs.values()))
+
+                # Rebuild all_preds[j] from each worker's per-unit (unit_id, lu_p, lower, upper, width).
+                all_preds: dict[int, OrderedDict] = {}
+                xu_by_unit = {uid: xu for uid, xu in zip(unit_ids_int, unit_x)}
+                for j in range(n):
+                    units = results[score_jobs[j]]["units"]
+                    candidates = []
+                    for unit_id_int, lu_p, lower, upper, width in units:
+                        uid_tensor = torch.tensor(unit_id_int)
+                        candidates.append(
+                            (uid_tensor, xu_by_unit[unit_id_int], lu_p, lower, upper, width))
+                    candidates.sort(key=lambda e: e[5])
+                    all_preds[j] = OrderedDict(
+                        (uid.item(), (uid, xu, lu_p, lower, upper, width))
+                        for uid, xu, lu_p, lower, upper, width in candidates
+                    )
+                    if self.verbose >= 2:
+                        ranking = [(uid.item(), round(w, 4)) for uid, _, _, _, _, w in candidates]
+                        self._log(2, f"[CoTraining]   Model {j} candidate ranking "
+                                     f"(most confident first): {ranking}")
+
+                norm_width = self._normalized_widths(all_preds)
+
+                # --- Phase 2: selection (main process). ---
+                n_add = max(1, round(add_ratio * len(pool_ids)))
+                start = i % n
+                selected_per_model, remaining_suspension_ids, added = self._assign_units_round_robin(
+                    all_preds=all_preds,
+                    norm_width=norm_width,
+                    n_add=n_add,
+                    start=start,
+                    remaining_suspension_ids=remaining_suspension_ids,
+                )
+
+                if added == 0:
+                    self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: "
+                                 f"no censored unit available for any model.")
+                    break
+
+                # --- Phase 3: retrain the updated models from scratch, in parallel. ---
+                retrain_jobs: dict[int, int] = {}
+                for j in range(n):
+                    if selected_per_model[j]:
+                        xj, yj = models_datasets[j]
+                        new_xu, new_lu = self._concat_selected_units(selected_per_model[j], yj)
+                        xj = torch.cat([xj, new_xu], dim=0)
+                        yj = torch.cat([yj, new_lu], dim=0)
+                        models_datasets[j] = (xj, yj)
+
+                        self._log(1, f"[CoTraining]   Retraining model {j} from scratch | "
+                                     f"added {len(selected_per_model[j])} unit(s) | "
+                                     f"dataset size: {len(xj)} samples")
+                        retrain_jobs[j] = pool.submit_job(
+                            pool.round_robin_gpu(j), self._make_fit_spec(j, xj, yj, val_cpu))
+
+                results = pool.gather(list(retrain_jobs.values()))
+                for j, jid in retrain_jobs.items():
+                    h[j] = self._rebuild_module(j, results[jid]["state_dict"])
+
+                if metrics_enabled:
+                    self._log_stage_metrics(
+                        stage=f"iteration_{i + 1}", h=h, models_datasets=models_datasets,
+                        test_data=test_data, test_label=test_label, val_data=val_data,
+                        val_label=val_label, criteria_callback=criteria_callback,
+                        weight_mode=weight_mode, metrics_file=metrics_file,
+                    )
+
+            if metrics_enabled:
+                self._log_stage_metrics(
+                    stage="final", h=h, models_datasets=models_datasets,
+                    test_data=test_data, test_label=test_label, val_data=val_data,
+                    val_label=val_label, criteria_callback=criteria_callback,
+                    weight_mode=weight_mode, metrics_file=metrics_file,
+                )
+
+            self._log(1, f"[CoTraining] Training complete.")
+            self.lightning_modules = h
+        finally:
+            pool.shutdown()
 
     def _log_stage_metrics(
             self,
@@ -899,11 +1263,8 @@ class CoTrainingEnsemble_v2:
         return unit_id, xu, lu_p
 
     def _check_if_training_is_possible(self):
-        if (self.lightning_modules is None
-                or self.trainer_factories is None
-                or self.batchs_size is None
-                or self.shuffle_dataloaders is None):
-            raise ValueError("You need to call setup_training before calling train.")
+        if not self._configured:
+            raise ValueError("You need to call setup_training or setup_training_builder before calling train.")
 
     def calculate_weights(
             self,
