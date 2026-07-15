@@ -138,6 +138,8 @@ NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
     "sequence_len",
     "coprog_iterations",
     "coprog_suspension_pool_size",
+    "coprog_add_ratio",
+    "coprog_fine_tune_max_epochs",
     "is_fine_tuning_during_finding_best_suspension_data",
     "is_fine_tuning_for_last_step",
     "selection_mode_str",
@@ -159,11 +161,15 @@ NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
     "transformer_encoder_head_num_transformer_time_series",
     "fc_layer_dim_transformer_time_series",
     "fc_dropout_transformer_time_series",
+    "num_layers_transformer_features",
+    "num_layers_transformer_time_series",
 ]
 
 NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
     "sequence_len",
     "coprog_iterations",
+    "coprog_suspension_pool_size",
+    "coprog_add_ratio",
     "max_epochs",
     "patiences",
     "batchs_size",
@@ -181,4 +187,6 @@ NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
     "transformer_encoder_head_num_transformer_time_series",
     "fc_layer_dim_transformer_time_series",
     "fc_dropout_transformer_time_series",
+    "num_layers_transformer_features",
+    "num_layers_transformer_time_series",
 ]
