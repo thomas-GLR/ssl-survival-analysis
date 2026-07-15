@@ -1,4 +1,6 @@
 import copy
+import csv
+import os
 from typing import Callable
 
 import torch
@@ -234,6 +236,12 @@ class Coprog:
             suspension_pool_size: int,
             val_data: torch.Tensor | None = None,
             val_label: torch.Tensor | None = None,
+            test_data: torch.Tensor | None = None,
+            test_label: torch.Tensor | None = None,
+            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            weight_mode: str = "min",
+            metrics_file: str | None = None,
     ) -> None:
         """
         Full COPROG training procedure (Algorithm 1 in the paper).
@@ -251,11 +259,40 @@ class Coprog:
                                     best-checkpoint selection during every training call.
         :param val_label:           Optional validation labels associated with ``val_data``.
                                     Must be provided together with ``val_data``.
+        :param test_data:           Optional test features. When provided, per-stage metrics
+                                    (``initial``, ``iteration_k``, ``final``) are appended to
+                                    ``metrics_file``. Enables the whole metrics facility.
+        :param test_label:          Test labels associated with ``test_data`` (required when
+                                    ``test_data`` is given).
+        :param score_callback:      Callable ``(pred, target) -> float`` used for the
+                                    ``test_score`` columns (e.g. the Scania / C-MAPSS score).
+                                    Required when ``test_data`` is given.
+        :param weight_callback:     Callable ``(pred, target) -> float`` used to compute the
+                                    per-stage ensemble weights on the validation set (matching
+                                    :meth:`calculate_weights`). Required when ``test_data`` is given.
+        :param weight_mode:         ``"min"`` or ``"max"``, passed to the weight computation.
+        :param metrics_file:        Destination CSV for the per-stage metrics. Header is written
+                                    only when the file does not yet exist. Required when
+                                    ``test_data`` is given.
         """
         self._check_if_training_is_possible()
 
         if (val_data is None) != (val_label is None):
             raise ValueError("val_data and val_label must both be provided or both be None.")
+
+        metrics_enabled = test_data is not None
+        if metrics_enabled:
+            if test_label is None or score_callback is None or weight_callback is None \
+                    or metrics_file is None:
+                raise ValueError(
+                    "When test_data is provided, test_label, score_callback, weight_callback "
+                    "and metrics_file are all required for per-stage metrics logging."
+                )
+            if val_data is None or val_label is None:
+                raise ValueError(
+                    "Per-stage metrics logging needs a validation set (val_data/val_label) "
+                    "for the per-model val RMSE and the ensemble weights."
+                )
 
         total_suspension_units = len(torch.unique(suspension_ids))
         self._log(1, f"[Coprog] Starting training | failure samples: {len(failure_data)} | "
@@ -264,15 +301,27 @@ class Coprog:
                      f"validation: {'yes' if val_data is not None else 'no'} | "
                      f"mode: {'parallel(' + str(self.gpu_ids) + ')' if self._parallel else 'sequential'}")
 
+        metrics_kwargs = {
+            "metrics_enabled": metrics_enabled,
+            "test_data": test_data,
+            "test_label": test_label,
+            "score_callback": score_callback,
+            "weight_callback": weight_callback,
+            "weight_mode": weight_mode,
+            "metrics_file": metrics_file,
+        }
+
         if self._parallel:
             self._train_parallel(
                 failure_data, failure_label, suspension_data, suspension_ids,
                 iterations, suspension_pool_size, val_data, val_label,
+                **metrics_kwargs,
             )
         else:
             self._train_sequential(
                 failure_data, failure_label, suspension_data, suspension_ids,
                 iterations, suspension_pool_size, val_data, val_label,
+                **metrics_kwargs,
             )
 
     def _train_sequential(
@@ -285,6 +334,13 @@ class Coprog:
             suspension_pool_size: int,
             val_data: torch.Tensor | None,
             val_label: torch.Tensor | None,
+            metrics_enabled: bool = False,
+            test_data: torch.Tensor | None = None,
+            test_label: torch.Tensor | None = None,
+            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            weight_mode: str = "min",
+            metrics_file: str | None = None,
     ) -> None:
         """Sequential COPROG training (single GPU / auto / legacy style)."""
         # Line 1 – L1 = L2 = L  (we split L into two views)
@@ -297,6 +353,21 @@ class Coprog:
         self._log(1, f"[Coprog] Initial training of h2 on {len(x2)} failure samples...")
         h2 = self._fit_one(1, x2, y2, val_data, val_label)
         self._log(1, f"[Coprog] Initial training done.")
+
+        if metrics_enabled:
+            self._log_stage_metrics(
+                stage="initial",
+                models=[h1, h2],
+                models_datasets=[(x1, y1), (x2, y2)],
+                test_data=test_data,
+                test_label=test_label,
+                val_data=val_data,
+                val_label=val_label,
+                score_callback=score_callback,
+                weight_callback=weight_callback,
+                weight_mode=weight_mode,
+                metrics_file=metrics_file,
+            )
 
         remaining_suspension_ids = torch.unique(suspension_ids)
 
@@ -394,7 +465,37 @@ class Coprog:
             self._log(1, f"[Coprog]   Retraining h2 | dataset size: {len(x2)} samples")
             h2 = self._fit_one(1, x2, y2, val_data, val_label)
 
+            if metrics_enabled:
+                self._log_stage_metrics(
+                    stage=f"iteration_{i + 1}",
+                    models=[h1, h2],
+                    models_datasets=[(x1, y1), (x2, y2)],
+                    test_data=test_data,
+                    test_label=test_label,
+                    val_data=val_data,
+                    val_label=val_label,
+                    score_callback=score_callback,
+                    weight_callback=weight_callback,
+                    weight_mode=weight_mode,
+                    metrics_file=metrics_file,
+                )
+
         self._log(1, f"[Coprog] Training complete.")
+
+        if metrics_enabled:
+            self._log_stage_metrics(
+                stage="final",
+                models=[h1, h2],
+                models_datasets=[(x1, y1), (x2, y2)],
+                test_data=test_data,
+                test_label=test_label,
+                val_data=val_data,
+                val_label=val_label,
+                score_callback=score_callback,
+                weight_callback=weight_callback,
+                weight_mode=weight_mode,
+                metrics_file=metrics_file,
+            )
 
         # Save final trained models
         self._h1 = h1
@@ -434,6 +535,13 @@ class Coprog:
             suspension_pool_size: int,
             val_data: torch.Tensor | None,
             val_label: torch.Tensor | None,
+            metrics_enabled: bool = False,
+            test_data: torch.Tensor | None = None,
+            test_label: torch.Tensor | None = None,
+            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            weight_mode: str = "min",
+            metrics_file: str | None = None,
     ) -> None:
         """Multi-GPU parallel COPROG training.
 
@@ -472,6 +580,21 @@ class Coprog:
             results = pool.gather(list(job_ids.values()))
             h = [self._rebuild_module(j, results[job_ids[j]]["state_dict"]) for j in range(2)]
             self._log(1, f"[Coprog] Initial training done.")
+
+            if metrics_enabled:
+                self._log_stage_metrics(
+                    stage="initial",
+                    models=h,
+                    models_datasets=[(xs[0], ys[0]), (xs[1], ys[1])],
+                    test_data=test_data,
+                    test_label=test_label,
+                    val_data=val_data,
+                    val_label=val_label,
+                    score_callback=score_callback,
+                    weight_callback=weight_callback,
+                    weight_mode=weight_mode,
+                    metrics_file=metrics_file,
+                )
 
             remaining_suspension_ids = torch.unique(suspension_ids)
 
@@ -573,7 +696,38 @@ class Coprog:
                 results = pool.gather(list(job_ids.values()))
                 h = [self._rebuild_module(j, results[job_ids[j]]["state_dict"]) for j in range(2)]
 
+                if metrics_enabled:
+                    self._log_stage_metrics(
+                        stage=f"iteration_{i + 1}",
+                        models=h,
+                        models_datasets=[(xs[0], ys[0]), (xs[1], ys[1])],
+                        test_data=test_data,
+                        test_label=test_label,
+                        val_data=val_data,
+                        val_label=val_label,
+                        score_callback=score_callback,
+                        weight_callback=weight_callback,
+                        weight_mode=weight_mode,
+                        metrics_file=metrics_file,
+                    )
+
             self._log(1, f"[Coprog] Training complete.")
+
+            if metrics_enabled:
+                self._log_stage_metrics(
+                    stage="final",
+                    models=h,
+                    models_datasets=[(xs[0], ys[0]), (xs[1], ys[1])],
+                    test_data=test_data,
+                    test_label=test_label,
+                    val_data=val_data,
+                    val_label=val_label,
+                    score_callback=score_callback,
+                    weight_callback=weight_callback,
+                    weight_mode=weight_mode,
+                    metrics_file=metrics_file,
+                )
+
             self._h1 = h[0]
             self._h2 = h[1]
         finally:
@@ -851,11 +1005,51 @@ class Coprog:
                 "min" mean that more the score is little more the model is good.
                 "max" mean that more the score is high more the model is good.
         """
-        if mode not in ["min", "max"]:
-            raise ValueError("Mode must be either 'min' or 'max'.")
-
         if self._h1 is None or self._h2 is None:
             raise RuntimeError("Call .train() before .calculate_weights().")
+
+        weights = self._compute_weights(
+            models=[self._h1, self._h2],
+            x_test=x_test,
+            target=target,
+            criteria_callback=criteria_callback,
+            mode=mode,
+        )
+
+        self.w1, self.w2 = weights
+
+        self._log(1, f"[Coprog] Weights assigned: h1={round(self.w1, 4)}, h2={round(self.w2, 4)}")
+
+    def _compute_weights(
+            self,
+            models: list[LightningModule],
+            x_test: torch.Tensor,
+            target: torch.Tensor,
+            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            mode: str,
+    ) -> list[float]:
+        """Compute ensemble weights from each model's score on a held-out set (no mutation).
+
+        This is the pure computation used by :meth:`calculate_weights` (which assigns the
+        result to ``self.w1/self.w2``) and by :meth:`_log_stage_metrics` (which reports the
+        weights per stage on the *current* models without touching ``self.w1/self.w2``).
+
+        Args:
+            models: The models to weight (typically the two co-trained models of a stage).
+            x_test: Features of the held-out (ideally validation) set.
+            target: Labels of the held-out set.
+            criteria_callback: Callable returning a scalar score from ``(prediction, target)``.
+            mode: ``"min"`` (lower score is better, inverse weighting) or ``"max"`` (higher
+                score is better, normalized weighting).
+
+        Returns:
+            One weight per model, summing to 1.
+
+        Raises:
+            ValueError: If ``mode`` is invalid or the weighting is undefined (zero scores).
+        """
+        if mode not in ["min", "max"]:
+            raise ValueError("Mode must be either 'min' or 'max'.")
 
         scores = []
 
@@ -863,11 +1057,9 @@ class Coprog:
         # instead of broadcasting (N, 1) against (N,) into an (N, N) matrix.
         target_flat = target.view(-1).float()
 
-        pred_h1 = self._predict(self._h1, x_test).view(-1).to(target_flat.device)
-        scores.append(criteria_callback(pred_h1, target_flat))
-
-        pred_h2 = self._predict(self._h2, x_test).view(-1).to(target_flat.device)
-        scores.append(criteria_callback(pred_h2, target_flat))
+        for model in models:
+            pred = self._predict(model, x_test).view(-1).to(target_flat.device)
+            scores.append(criteria_callback(pred, target_flat))
 
         self._log(1, f"[Coprog] Calculating weights (mode={mode}) | "
                      f"scores per model: {[round(s, 4) for s in scores]}")
@@ -885,6 +1077,115 @@ class Coprog:
                 raise ValueError(f"The sum of scores from all models is zero, cannot calculate weights : {scores}")
             weights = [s / total for s in scores]
 
-        self.w1, self.w2 = weights
+        return weights
 
-        self._log(1, f"[Coprog] Weights assigned: h1={round(self.w1, 4)}, h2={round(self.w2, 4)}")
+    def _rmse_on(self, model: LightningModule, x: torch.Tensor, y: torch.Tensor) -> float:
+        """Root-mean-squared error of ``model`` on ``(x, y)``.
+
+        :param model: A trained ``LightningModule`` (``forward`` returns real-unit predictions).
+        :param x: Evaluation features.
+        :param y: Evaluation targets.
+        :return: ``sqrt(mean((y - pred) ** 2))`` as a Python float.
+        """
+        y_flat = y.view(-1).float()
+        pred = self._predict(model, x).view(-1).to(y_flat.device)
+        return (((y_flat - pred) ** 2).mean().item()) ** 0.5
+
+    def _log_stage_metrics(
+            self,
+            stage: str,
+            models: list[LightningModule],
+            models_datasets: list[tuple[torch.Tensor, torch.Tensor]],
+            test_data: torch.Tensor,
+            test_label: torch.Tensor,
+            val_data: torch.Tensor,
+            val_label: torch.Tensor,
+            score_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            weight_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            weight_mode: str,
+            metrics_file: str,
+    ) -> None:
+        """
+        Compute and append one row of per-stage metrics to ``metrics_file``.
+
+        For the current ``models`` this records, per model, the train RMSE (on that model's
+        own accumulated ``models_datasets`` split), the validation RMSE, the test RMSE and
+        the test score (via ``score_callback``); then the arithmetic averages of the
+        per-model test RMSE / test score; and finally the test RMSE / test score of the
+        weighted-ensemble prediction, whose weights are computed on the validation set via
+        ``_compute_weights`` (so ``self.w1/self.w2`` are left untouched).
+
+        The row is appended (header written only when the file does not yet exist), so the
+        call is crash-safe and works identically for the sequential and parallel training
+        paths — it always runs in the main process on main-process tensors.
+
+        Args:
+            stage: label for the row ("initial", "iteration_<k>" or "final").
+            models: the current model per index.
+            models_datasets: per-model ``(x, y)`` accumulated training split.
+            test_data, test_label: test set used only for the metrics.
+            val_data, val_label: validation set (used for val RMSE and the weights).
+            score_callback: score used for the per-model / averaged / weighted test score.
+            weight_callback: score used to compute the reported ensemble weights.
+            weight_mode: "min"/"max" passed to ``_compute_weights``.
+            metrics_file: destination CSV; header written only when it does not yet exist.
+        """
+        test_label_flat = test_label.view(-1).float()
+
+        train_rmses: list[float] = []
+        val_rmses: list[float] = []
+        test_rmses: list[float] = []
+        test_scores: list[float] = []
+        test_preds: list[torch.Tensor] = []
+
+        for j, model in enumerate(models):
+            xj, yj = models_datasets[j]
+            train_rmses.append(self._rmse_on(model, xj, yj))
+            val_rmses.append(self._rmse_on(model, val_data, val_label))
+
+            pred_j = self._predict(model, test_data).view(-1).to(test_label_flat.device)
+            test_preds.append(pred_j)
+            test_rmses.append((((test_label_flat - pred_j) ** 2).mean().item()) ** 0.5)
+            test_scores.append(score_callback(pred_j, test_label_flat))
+
+        n = len(models)
+        avg_test_rmse = sum(test_rmses) / n
+        avg_test_score = sum(test_scores) / n
+
+        # Weights come from the validation set (no test leakage) and do NOT mutate
+        # self.w1/self.w2 — they exist only to report the weighted-ensemble metrics for
+        # this stage's models (self._h1/_h2 are not set until train() finishes).
+        weights = self._compute_weights(models, val_data, val_label, weight_callback, weight_mode)
+        weighted_pred = torch.stack(
+            [w * pred for w, pred in zip(weights, test_preds)], dim=0
+        ).sum(dim=0).view(-1)
+        weighted_test_rmse = (((test_label_flat - weighted_pred) ** 2).mean().item()) ** 0.5
+        weighted_test_score = score_callback(weighted_pred, test_label_flat)
+
+        header = ["stage"]
+        for j in range(n):
+            header += [f"train_rmse_{j}", f"val_rmse_{j}", f"test_rmse_{j}", f"test_score_{j}"]
+        header += ["avg_test_rmse", "avg_test_score", "weighted_test_rmse", "weighted_test_score"]
+        for j in range(n):
+            header += [f"weight_{j}"]
+
+        row = [stage]
+        for j in range(n):
+            row += [train_rmses[j], val_rmses[j], test_rmses[j], test_scores[j]]
+        row += [avg_test_rmse, avg_test_score, weighted_test_rmse, weighted_test_score]
+        for j in range(n):
+            row += [weights[j]]
+
+        # Append per call (crash-safe, no file-handle lifecycle), writing the header only
+        # the first time the file is created.
+        write_header = not os.path.exists(metrics_file)
+        with open(metrics_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(header)
+            writer.writerow(row)
+
+        self._log(1, f"[Coprog] Metrics [{stage}] | "
+                     f"avg test RMSE: {avg_test_rmse:.4f} | avg test score: {avg_test_score:.4f} | "
+                     f"weighted test RMSE: {weighted_test_rmse:.4f} | "
+                     f"weighted test score: {weighted_test_score:.4f}")

@@ -16,7 +16,8 @@ from scania.utils.utils_scania import (
     assert_data_is_valid,
     create_and_get_checkpoints_results_path,
     save_train_parameters,
-    generate_and_save_model_prediction
+    generate_and_save_model_prediction,
+    _scania_score,
 )
 from shared.utils import ModelVersion
 
@@ -245,6 +246,15 @@ def train_model(
         suspension_pool_size=coprog_suspension_pool_size,
         val_data=val_features,
         val_label=val_targets,
+        # Per-stage metrics tracking (initial / iteration_k / final). The score columns use
+        # the Scania score; the reported weights use RMSE + "min", matching calculate_weights
+        # below. Runs in the main process, so it is safe for the parallel training path too.
+        test_data=test_features,
+        test_label=test_targets,
+        score_callback=_score_callback_for_coprog,
+        weight_callback=_criteria_callback_for_coprog,
+        weight_mode="min",
+        metrics_file=f"{results_path}/{model_version.value}-per-stage-scania.csv",
     )
 
     # Ensemble weights are computed on the validation set, not the test set,
@@ -331,6 +341,23 @@ def _criteria_callback_for_coprog(preds: torch.Tensor, target: torch.Tensor) -> 
     # Calculate Root Mean Squared Error
     rmse = torch.sqrt(mse)
     return rmse.item()
+
+
+def _score_callback_for_coprog(preds: torch.Tensor, target: torch.Tensor) -> float:
+    """Scania score (a1=13, a2=10) for a prediction/target tensor pair.
+
+    Wraps the numpy-based :func:`_scania_score` so it can be used as the ``score_callback``
+    for Coprog's per-stage metrics (the ``test_score`` columns), matching the score reported
+    by :func:`generate_and_save_model_prediction`.
+
+    :param preds: Predicted RUL, shape (N,).
+    :param target: True RUL, shape (N,).
+    :return: The Scania score as a Python float.
+    """
+    return _scania_score(
+        preds.detach().cpu().numpy().flatten(),
+        target.detach().cpu().numpy().flatten(),
+    )
 
 
 def _extract_model_coprog_params(model_params: dict) -> tuple[dict, ModelVersion]:
