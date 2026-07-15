@@ -180,7 +180,7 @@ def train_model(
 
         return factory
 
-    coprog.setup_training(
+    coprog.setup_training_legacy(
         lightning_modules=[cnn_module, lstm_module],
         trainer_factories=[
             make_trainer_factory(epochs_first_model),
