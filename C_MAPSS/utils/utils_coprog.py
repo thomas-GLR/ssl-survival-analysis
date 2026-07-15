@@ -202,6 +202,15 @@ def train_model(
             suspension_pool_size=coprog_suspension_pool_size,
             val_data=val_features,
             val_label=val_targets,
+            # Per-stage metrics tracking (initial / iteration_k / final). Both the score
+            # columns and the reported weights use the C-MAPSS score + "min", matching the
+            # calculate_weights call below.
+            test_data=features_tensor,
+            test_label=targets_tensor,
+            score_callback=cmapss_score,
+            weight_callback=cmapss_score,
+            weight_mode="min",
+            metrics_file=f"{final_results_path}/{model_version}-per-stage-turbofan-{sub_dataset}.csv",
         )
 
         # Ensemble weights are computed on the validation set, not the test set,

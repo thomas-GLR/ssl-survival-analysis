@@ -11,7 +11,7 @@
     "return_sequence_label": false,
     "batch_size": 128,
     "shuffle_loader": true,
-    "counter_mode": "cumulative"
+    "counter_mode": "both"
   },
   "model_params": {
     "first_model": {
@@ -19,9 +19,10 @@
       }
     },
     "second_model": {
-      "transformer_features": {
-        "transformer_encoder_head_num": 8,
-        "transformer_num_layer": 2,
+      "lstm": {
+        "hidden_dim": 256,
+        "lstm_num_layers": 3,
+        "lstm_dropout": 0.3,
         "fc_layer_dim": 128,
         "fc_dropout": 0.2
       }
