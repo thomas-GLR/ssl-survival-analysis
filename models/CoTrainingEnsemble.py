@@ -12,6 +12,14 @@ from enum import Enum
 from lightning import LightningModule, Trainer
 from torch.utils.data import TensorDataset, DataLoader
 
+from models.coprog_gpu_pool import CandidateContext, TrainingSpec, run_training_job
+from models.cotraining_gpu_pool import (
+    CoTrainingGpuPool,
+    FineTuneCandidateContext,
+    FineTuneSpec,
+    run_finetune_job,
+)
+
 
 class SelectionMode(Enum):
     VOTING = "voting"
@@ -68,6 +76,26 @@ class CoTrainingEnsemble:
         self.verbose = verbose
         self.fine_tune_lr_factor = fine_tune_lr_factor
         self.forgetting_warning_tolerance = forgetting_warning_tolerance
+
+        # Builder-style config (set through setup_training_builder), the style required for
+        # multi-GPU parallel training. Mirrors models.Coprog.
+        self.module_builders: list[Callable[[], LightningModule]] | None = None
+        self.max_epochs: list[int] | None = None
+        self.patiences: list[int] | None = None
+        self.ft_max_epochs: list[int] | None = None
+        self.ft_patiences: list[int] | None = None
+        self.gpu_ids: list[int] | None = None
+        # Per-model set of parameter NAMES to keep trainable during a fine-tune (the picklable
+        # resolution of ``fine_tune_trainable_params``); None means fine-tune all params.
+        self._trainable_param_names: list[set[str] | None] | None = None
+        self._initial_state_dicts: list[dict[str, torch.Tensor]] | None = None
+        self._use_builders: bool = False
+        self._parallel: bool = False
+        # Accelerator/devices used for inline (single-GPU / auto) builder-style training.
+        self._inline_accelerator: str = "auto"
+        self._inline_devices = None
+        self._configured: bool = False
+
         # Optional path to a .txt log file (set by ``train``). When not None, every
         # ``_log`` message is appended to it regardless of ``verbose``.
         self._log_file_path: str | None = None
@@ -151,6 +179,135 @@ class CoTrainingEnsemble:
         self.batchs_size = batchs_size
         self.shuffle_dataloaders = shuffle_dataloaders
         self.fine_tune_trainable_params = fine_tune_trainable_params
+
+        # Legacy style: sequential training in the current process.
+        self._use_builders = False
+        self._parallel = False
+        self._configured = True
+
+    def setup_training_builder(
+            self,
+            module_builders: list[Callable[[], LightningModule]],
+            max_epochs: list[int],
+            patiences: list[int],
+            batchs_size: list[int],
+            shuffle_dataloaders: list[bool],
+            fine_tune_trainable_params: list[Callable[[LightningModule], list[nn.Parameter]] | None] | None = None,
+            fine_tune_max_epochs: list[int] | None = None,
+            fine_tune_patiences: list[int] | None = None,
+            gpu_ids: list[int] | None = None,
+    ) -> None:
+        r"""Setup **builder-style** training, the style required for multi-GPU parallel training.
+
+        A fresh module is built from a *picklable* builder, its initial weights are pinned to a
+        one-time snapshot, and the ``Trainer`` is built internally. Each list has one entry per
+        model (same order as ``models``). This mirrors :meth:`models.Coprog.setup_training_builder`
+        but generalizes to ``N`` models and distributes jobs **round-robin** across ``gpu_ids``.
+
+        Args:
+            module_builders: Picklable callables (module-level functions or ``functools.partial``
+                — no lambdas/closures) each returning a *fresh* ``LightningModule``. Must be
+                picklable because parallel workers rebuild modules across a process boundary.
+            max_epochs: Max from-scratch training epochs per model.
+            patiences: ``EarlyStopping`` patience per model (from-scratch training).
+            batchs_size: Batch size used to train each model.
+            shuffle_dataloaders: Whether to shuffle each training ``DataLoader``.
+            fine_tune_trainable_params: Optional, one entry per model. Each entry is ``None``
+                (fine-tune all parameters) or a callable that, given a freshly built module,
+                returns the subset of its parameters that should stay trainable during a
+                fine-tune. Resolved **here** to a set of parameter names (by identity against
+                ``named_parameters``) so it can cross a process boundary — the callable itself
+                need not be picklable.
+            fine_tune_max_epochs: Optional per-model fine-tune epoch budget. Defaults to
+                ``max_epochs`` when ``None``.
+            fine_tune_patiences: Optional per-model fine-tune ``EarlyStopping`` patience.
+                Defaults to ``patiences`` when ``None``.
+            gpu_ids: Physical GPU ids to train on. ``None`` → auto (Lightning picks one GPU),
+                sequential; ``[g]`` → pin to GPU ``g``, sequential; ``[g0, g1, ...]`` (>=2) →
+                parallel: every independent job is distributed round-robin across all listed
+                GPUs (one persistent worker process per GPU).
+
+        Raises:
+            ValueError: If a list does not have one entry per model.
+        """
+        model_number = len(self.models)
+        if (len(module_builders) != model_number or len(max_epochs) != model_number
+                or len(patiences) != model_number or len(batchs_size) != model_number
+                or len(shuffle_dataloaders) != model_number):
+            raise ValueError(
+                f"module_builders, max_epochs, patiences, batchs_size and shuffle_dataloaders "
+                f"must all have length {model_number}.")
+
+        if fine_tune_trainable_params is not None and len(fine_tune_trainable_params) != model_number:
+            raise ValueError(
+                f"fine_tune_trainable_params must have length {model_number}.")
+        if fine_tune_max_epochs is not None and len(fine_tune_max_epochs) != model_number:
+            raise ValueError(f"fine_tune_max_epochs must have length {model_number}.")
+        if fine_tune_patiences is not None and len(fine_tune_patiences) != model_number:
+            raise ValueError(f"fine_tune_patiences must have length {model_number}.")
+
+        self.module_builders = module_builders
+        self.max_epochs = max_epochs
+        self.patiences = patiences
+        self.ft_max_epochs = fine_tune_max_epochs if fine_tune_max_epochs is not None else list(max_epochs)
+        self.ft_patiences = fine_tune_patiences if fine_tune_patiences is not None else list(patiences)
+        self.batchs_size = batchs_size
+        self.shuffle_dataloaders = shuffle_dataloaders
+        self.fine_tune_trainable_params = fine_tune_trainable_params
+        self.gpu_ids = list(gpu_ids) if gpu_ids else None
+
+        # Snapshot one initial weight set per model so every from-scratch training starts from
+        # identical weights (matching the legacy deep-copy-of-template behaviour) and so workers
+        # can reproduce that init across process boundaries. Also resolve the fine-tune freeze
+        # callables to picklable parameter-name sets using the same fresh template.
+        self._initial_state_dicts = []
+        self._trainable_param_names = []
+        for j, builder in enumerate(module_builders):
+            template = builder()
+            self._initial_state_dicts.append(
+                {k: v.detach().cpu().clone() for k, v in template.state_dict().items()}
+            )
+            self._trainable_param_names.append(
+                self._resolve_trainable_names(
+                    template,
+                    fine_tune_trainable_params[j] if fine_tune_trainable_params is not None else None,
+                )
+            )
+
+        # Decide inline accelerator/devices and whether to run in parallel (mirrors Coprog).
+        if self.gpu_ids is None:
+            self._parallel = False
+            self._inline_accelerator = "auto"
+            self._inline_devices = None
+        elif len(self.gpu_ids) == 1:
+            self._parallel = False
+            self._inline_accelerator = "gpu"
+            self._inline_devices = [self.gpu_ids[0]]
+        else:
+            self._parallel = True
+            self._inline_accelerator = "gpu"
+            self._inline_devices = [self.gpu_ids[0]]
+
+        self._use_builders = True
+        self._configured = True
+
+    @staticmethod
+    def _resolve_trainable_names(
+            template: LightningModule,
+            trainable_params_fn: Callable[[LightningModule], list[nn.Parameter]] | None,
+    ) -> set[str] | None:
+        """Resolve a fine-tune ``trainable_params`` callable to a set of parameter names.
+
+        The callable returns ``nn.Parameter`` objects; a worker cannot receive those (nor,
+        usually, the callable, which is often a lambda). We therefore map the returned params
+        to their names by identity against ``template.named_parameters()`` in the main process
+        and ship the resulting name set. The worker then freezes every parameter *not* in the
+        set. Returns ``None`` when no freezing is requested (fine-tune all parameters).
+        """
+        if trainable_params_fn is None:
+            return None
+        trainable = set(trainable_params_fn(template))
+        return {name for name, p in template.named_parameters() if p in trainable}
 
     def train(
             self,
@@ -282,7 +439,31 @@ class CoTrainingEnsemble:
                      f"censored units: {total_suspension_units} | "
                      f"max iterations: {iterations} | pool fraction: {suspension_pool_size} "
                      f"(size: {pool_size}) | add ratio: {add_ratio} | "
-                     f"selection: {selection_mode.name}")
+                     f"selection: {selection_mode.name} | "
+                     f"mode: {'parallel(' + str(self.gpu_ids) + ')' if self._parallel else 'sequential'}")
+
+        if self._parallel:
+            self._train_parallel(
+                is_fine_tuning_during_finding_best_suspension_data=is_fine_tuning_during_finding_best_suspension_data,
+                is_fine_tuning_for_last_step=is_fine_tuning_for_last_step,
+                selection_mode=selection_mode,
+                failure_data=failure_data,
+                failure_label=failure_label,
+                suspension_data=suspension_data,
+                suspension_ids=suspension_ids,
+                iterations=iterations,
+                pool_size=pool_size,
+                add_ratio=add_ratio,
+                val_data=val_data,
+                val_label=val_label,
+                metrics_enabled=metrics_enabled,
+                test_data=test_data,
+                test_label=test_label,
+                criteria_callback=criteria_callback,
+                weight_mode=weight_mode,
+                metrics_file=metrics_file,
+            )
+            return
 
         models_datasets = []
         h: list[LightningModule] = []
@@ -298,14 +479,7 @@ class CoTrainingEnsemble:
             models_datasets.append((x_i, y_i))
 
             self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure samples...")
-            h_j = self._train_fun(
-                model=copy.deepcopy(self.lightning_modules[j]),
-                model_index=j,
-                x=x_i,
-                y=y_i,
-                val_x=val_data,
-                val_y=val_label,
-            )
+            h_j = self._fit_from_scratch(j, x_i, y_i, val_data, val_label)
 
             h.append(h_j)
 
@@ -360,31 +534,17 @@ class CoTrainingEnsemble:
                     lu_p = self._predict(hj, xu)
                     lu_p_reshaped = lu_p.view(-1, yj.shape[1]) if yj.dim() > 1 else lu_p.view(-1)
 
-                    if is_fine_tuning_during_finding_best_suspension_data:
-                        # Fine-tuning warm-starts from hj, so only the new candidate's
-                        # data needs to be passed in — the whole point of fine-tuning
-                        # here is to avoid re-training on the full accumulated dataset.
-                        hj_prime = self._fine_tune_fun(
-                            model=copy.deepcopy(hj),
-                            model_index=j,
-                            x=xu,
-                            y=lu_p_reshaped,
-                            val_x=val_data,
-                            val_y=val_label,
-                        )
-                    else:
-                        x_augmented = torch.cat([xj, xu], dim=0)
-                        y_augmented = torch.cat([yj, lu_p_reshaped], dim=0)
-                        hj_prime = self._train_fun(
-                            model=copy.deepcopy(self.lightning_modules[j]),
-                            model_index=j,
-                            x=x_augmented,
-                            y=y_augmented,
-                            val_x=val_data,
-                            val_y=val_label,
-                        )
-
-                    delta = self._confidence_measure(xj, yj, hj, hj_prime)
+                    delta = self._candidate_delta(
+                        model_index=j,
+                        hj=hj,
+                        xj=xj,
+                        yj=yj,
+                        xu=xu,
+                        lu_p_reshaped=lu_p_reshaped,
+                        is_fine_tuning=is_fine_tuning_during_finding_best_suspension_data,
+                        val_data=val_data,
+                        val_label=val_label,
+                    )
                     candidates.append((unit_id, xu, lu_p, delta))
                     self._log(2, f"[CoTraining]     candidate {unit_idx + 1}/{len(pool_ids)} unit {unit_id.item()}: delta = {delta:.4f}")
 
@@ -405,51 +565,14 @@ class CoTrainingEnsemble:
             # peers' scores (co-training); a chosen unit is removed from every model's map so it
             # cannot be reused this iteration. A model may receive more than one unit per iteration.
             n_add = max(1, round(add_ratio * len(pool_ids)))
-            selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = [
-                [] for _ in range(self.number_of_models)
-            ]
-
             start = i % self.number_of_models
-            added = 0
-            slot = 0
-            consecutive_failures = 0
-            self._log(1, f"[CoTraining]   Adding up to {n_add} unit(s) this iteration "
-                         f"(round-robin from model {start}).")
-            while added < n_add and consecutive_failures < self.number_of_models:
-                k = (start + slot) % self.number_of_models
-                slot += 1
-
-                match selection_mode:
-                    case SelectionMode.VOTING:
-                        picked = self._voting_censored_data_selection(
-                            all_preds=all_preds,
-                            model_index_to_exclude=k,
-                        )
-                    case SelectionMode.EVIDENCE:
-                        picked = self._evidential_censored_data_selection()
-                    case _:
-                        raise ValueError(f"Unknown selection mode: {selection_mode.name}")
-
-                if picked is None:
-                    # No beneficial (positive-delta) unit currently available for model k.
-                    consecutive_failures += 1
-                    continue
-
-                consecutive_failures = 0
-                selected_id = picked[0].item()
-                selected_per_model[k].append(picked)
-                added += 1
-                self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} "
-                             f"(mode: {selection_mode.name})")
-
-                # Remove the selected unit from every model's candidate map so it
-                # cannot be assigned again this iteration.
-                for j in range(self.number_of_models):
-                    all_preds[j].pop(selected_id, None)
-
-                remaining_suspension_ids = remaining_suspension_ids[
-                    remaining_suspension_ids != picked[0]
-                    ]
+            selected_per_model, remaining_suspension_ids, added = self._assign_units_round_robin(
+                all_preds=all_preds,
+                selection_mode=selection_mode,
+                n_add=n_add,
+                start=start,
+                remaining_suspension_ids=remaining_suspension_ids,
+            )
 
             if added == 0:
                 self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: "
@@ -460,13 +583,7 @@ class CoTrainingEnsemble:
                 if selected_per_model[j]:
                     xj, yj = models_datasets[j]
 
-                    # Concatenate every unit newly assigned to model j this iteration.
-                    new_xu = torch.cat([xu for _, xu, _ in selected_per_model[j]], dim=0)
-                    new_lu = torch.cat(
-                        [lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1)
-                         for _, _, lu in selected_per_model[j]],
-                        dim=0,
-                    )
+                    new_xu, new_lu = self._concat_selected_units(selected_per_model[j], yj)
 
                     xj = torch.cat([xj, new_xu], dim=0)
                     yj = torch.cat([yj, new_lu], dim=0)
@@ -482,23 +599,9 @@ class CoTrainingEnsemble:
                         # Fine-tuning warm-starts from h[j], so only the newly selected units'
                         # data is passed in, not the full accumulated (xj, yj) — that's what
                         # makes fine-tuning cheaper than retraining from scratch.
-                        h[j] = self._fine_tune_fun(
-                            model=copy.deepcopy(h[j]),
-                            model_index=j,
-                            x=new_xu,
-                            y=new_lu,
-                            val_x=val_data,
-                            val_y=val_label,
-                        )
+                        h[j] = self._fine_tune(j, h[j], new_xu, new_lu, val_data, val_label)
                     else:
-                        h[j] = self._train_fun(
-                            model=copy.deepcopy(self.lightning_modules[j]),
-                            model_index=j,
-                            x=xj,
-                            y=yj,
-                            val_x=val_data,
-                            val_y=val_label,
-                        )
+                        h[j] = self._fit_from_scratch(j, xj, yj, val_data, val_label)
 
             if metrics_enabled:
                 self._log_stage_metrics(
@@ -530,6 +633,535 @@ class CoTrainingEnsemble:
 
         self._log(1, f"[CoTraining] Training complete.")
         self.lightning_modules = h
+
+    # ------------------------------------------------------------------ #
+    # Shared phase helpers (used by both the sequential and parallel paths)
+    # ------------------------------------------------------------------ #
+
+    def _assign_units_round_robin(
+            self,
+            all_preds: dict[int, OrderedDict],
+            selection_mode: SelectionMode,
+            n_add: int,
+            start: int,
+            remaining_suspension_ids: torch.Tensor,
+    ) -> tuple[list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]], torch.Tensor, int]:
+        """Phase 2: hand out a shared per-iteration budget of censored units round-robin.
+
+        Rotating the starting model each iteration so no single model consistently gets first
+        pick of the best units. Each model still selects from its peers' scores (co-training);
+        a chosen unit is removed from every model's map so it cannot be reused this iteration.
+
+        Returns ``(selected_per_model, remaining_suspension_ids, added)``.
+        """
+        selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = [
+            [] for _ in range(self.number_of_models)
+        ]
+        added = 0
+        slot = 0
+        consecutive_failures = 0
+        self._log(1, f"[CoTraining]   Adding up to {n_add} unit(s) this iteration "
+                     f"(round-robin from model {start}).")
+        while added < n_add and consecutive_failures < self.number_of_models:
+            k = (start + slot) % self.number_of_models
+            slot += 1
+
+            match selection_mode:
+                case SelectionMode.VOTING:
+                    picked = self._voting_censored_data_selection(
+                        all_preds=all_preds,
+                        model_index_to_exclude=k,
+                    )
+                case SelectionMode.EVIDENCE:
+                    picked = self._evidential_censored_data_selection()
+                case _:
+                    raise ValueError(f"Unknown selection mode: {selection_mode.name}")
+
+            if picked is None:
+                # No beneficial (positive-delta) unit currently available for model k.
+                consecutive_failures += 1
+                continue
+
+            consecutive_failures = 0
+            selected_id = picked[0].item()
+            selected_per_model[k].append(picked)
+            added += 1
+            self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} "
+                         f"(mode: {selection_mode.name})")
+
+            for j in range(self.number_of_models):
+                all_preds[j].pop(selected_id, None)
+
+            remaining_suspension_ids = remaining_suspension_ids[
+                remaining_suspension_ids != picked[0]
+                ]
+
+        return selected_per_model, remaining_suspension_ids, added
+
+    @staticmethod
+    def _concat_selected_units(
+            selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+            yj: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Concatenate every ``(unit_id, xu, lu)`` newly assigned to a model into ``(new_xu, new_lu)``."""
+        new_xu = torch.cat([xu for _, xu, _ in selected], dim=0)
+        new_lu = torch.cat(
+            [lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1) for _, _, lu in selected],
+            dim=0,
+        )
+        return new_xu, new_lu
+
+    # ------------------------------------------------------------------ #
+    # Training dispatchers (legacy templates vs builder-style, inline)
+    # ------------------------------------------------------------------ #
+
+    def _fit_from_scratch(
+            self,
+            model_index: int,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            val_x: torch.Tensor | None,
+            val_y: torch.Tensor | None,
+    ) -> LightningModule:
+        """Train one model from scratch (inline, this process).
+
+        Uses the builder path (:func:`run_training_job` + rebuild from the returned CPU state
+        dict) when configured via :meth:`setup_training_builder`, otherwise the legacy path
+        (:meth:`_train_fun` on a deep-copied template).
+        """
+        if self._use_builders:
+            spec = self._make_fit_spec(model_index, x, y, self._cpu_pair(val_x, val_y))
+            spec.accelerator = self._inline_accelerator
+            spec.devices = self._inline_devices
+            result = run_training_job(spec)
+            return self._rebuild_module(model_index, result["state_dict"])
+        return self._train_fun(
+            copy.deepcopy(self.lightning_modules[model_index]), model_index, x, y, val_x, val_y)
+
+    def _fine_tune(
+            self,
+            model_index: int,
+            current_model: LightningModule,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            val_x: torch.Tensor | None,
+            val_y: torch.Tensor | None,
+    ) -> LightningModule:
+        """Fine-tune one warm-started model (inline, this process).
+
+        Builder path: run :func:`run_finetune_job` (warm-start from ``current_model``'s state,
+        reduced LR, name-based freezing) then rebuild and run the forgetting check here (the
+        legacy :meth:`_fine_tune_fun` does the check internally).
+        """
+        if self._use_builders:
+            has_val = val_x is not None and val_y is not None
+            val_mse_before = self._mse_on(current_model, val_x, val_y) if has_val else None
+            spec = self._make_finetune_spec(
+                model_index, current_model, x, y, self._cpu_pair(val_x, val_y), return_state=True)
+            spec.accelerator = self._inline_accelerator
+            spec.devices = self._inline_devices
+            result = run_finetune_job(spec)
+            tuned = self._rebuild_module(model_index, result["state_dict"])
+            if has_val:
+                self._maybe_warn_forgetting(model_index, val_mse_before, tuned, val_x, val_y, len(x))
+            return tuned
+        return self._fine_tune_fun(copy.deepcopy(current_model), model_index, x, y, val_x, val_y)
+
+    def _candidate_delta(
+            self,
+            model_index: int,
+            hj: LightningModule,
+            xj: torch.Tensor,
+            yj: torch.Tensor,
+            xu: torch.Tensor,
+            lu_p_reshaped: torch.Tensor,
+            is_fine_tuning: bool,
+            val_data: torch.Tensor | None,
+            val_label: torch.Tensor | None,
+    ) -> float:
+        """Confidence delta of adding candidate ``xu`` to model ``model_index`` (inline).
+
+        Legacy: build a temporary ``hj_prime`` (fine-tune or from-scratch on the augmented set)
+        and return :meth:`_confidence_measure`. Builder: train the temporary model in one
+        :func:`run_training_job`/:func:`run_finetune_job` that also evaluates its summed
+        squared error on ``(xj, yj)`` and return ``sse(hj) - sse(hj_prime)`` — the same
+        quantity, without keeping the temporary model.
+        """
+        if self._use_builders:
+            mse_orig = self._summed_squared_error(hj, xj, yj)
+            if is_fine_tuning:
+                spec = self._make_finetune_spec(
+                    model_index, hj, xu, lu_p_reshaped, self._cpu_pair(val_data, val_label),
+                    return_state=False, eval_pair=(xj, yj))
+                spec.accelerator = self._inline_accelerator
+                spec.devices = self._inline_devices
+                result = run_finetune_job(spec)
+            else:
+                x_aug = torch.cat([xj, xu], dim=0)
+                y_aug = torch.cat([yj, lu_p_reshaped], dim=0)
+                spec = self._make_fit_spec(
+                    model_index, x_aug, y_aug, self._cpu_pair(val_data, val_label),
+                    eval_pair=(xj, yj))
+                spec.accelerator = self._inline_accelerator
+                spec.devices = self._inline_devices
+                result = run_training_job(spec)
+            return mse_orig - result["sse"]
+
+        if is_fine_tuning:
+            hj_prime = self._fine_tune_fun(
+                copy.deepcopy(hj), model_index, xu, lu_p_reshaped, val_data, val_label)
+        else:
+            x_aug = torch.cat([xj, xu], dim=0)
+            y_aug = torch.cat([yj, lu_p_reshaped], dim=0)
+            hj_prime = self._train_fun(
+                copy.deepcopy(self.lightning_modules[model_index]), model_index,
+                x_aug, y_aug, val_data, val_label)
+        return self._confidence_measure(xj, yj, hj, hj_prime)
+
+    def _maybe_warn_forgetting(
+            self,
+            model_index: int,
+            val_mse_before: float,
+            tuned_model: LightningModule,
+            val_x: torch.Tensor,
+            val_y: torch.Tensor,
+            n_new: int,
+    ) -> None:
+        """Warn if a fine-tune worsened the validation MSE beyond the tolerance.
+
+        Mirrors the forgetting check inside :meth:`_fine_tune_fun` for the builder-style
+        (inline and parallel) paths, where the fine-tune runs out-of-process so the check
+        cannot happen inside the training call.
+        """
+        val_mse_after = self._mse_on(tuned_model, val_x, val_y)
+        if val_mse_after > val_mse_before * (1 + self.forgetting_warning_tolerance):
+            message = (
+                f"[CoTraining] Possible forgetting detected for model {model_index}: "
+                f"validation MSE went from {val_mse_before:.4f} to {val_mse_after:.4f} "
+                f"after fine-tuning on {n_new} new sample(s)."
+            )
+            warnings.warn(message)
+            self._log(1, message)
+
+    def _summed_squared_error(self, model: LightningModule, x: torch.Tensor, y: torch.Tensor) -> float:
+        """Summed squared error of ``model`` on ``(x, y)`` — the term of the confidence delta."""
+        y_flat = y.view(-1).to(next(model.parameters()).device)
+        pred = self._predict(model, x).view(-1)
+        return ((y_flat - pred) ** 2).sum().item()
+
+    # ------------------------------------------------------------------ #
+    # Builder-style spec helpers (picklable jobs for the pool / inline)
+    # ------------------------------------------------------------------ #
+
+    def _make_fit_spec(
+            self,
+            model_index: int,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            val_cpu: tuple[torch.Tensor | None, torch.Tensor | None],
+            eval_pair: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> TrainingSpec:
+        """Build a picklable :class:`TrainingSpec` for a from-scratch training.
+
+        With ``eval_pair`` given (candidate scoring) the job returns only ``sse`` on that pair;
+        without it (initial / retrain) the job returns the trained CPU ``state_dict``.
+        """
+        eval_x, eval_y = self._cpu_pair(*eval_pair) if eval_pair is not None else (None, None)
+        return TrainingSpec(
+            module_builder=self.module_builders[model_index],
+            initial_state_dict=self._initial_state_dicts[model_index],
+            max_epochs=self.max_epochs[model_index],
+            patience=self.patiences[model_index],
+            batch_size=self.batchs_size[model_index],
+            shuffle=self.shuffle_dataloaders[model_index],
+            train_x=x.detach().cpu(),
+            train_y=y.detach().cpu(),
+            val_x=val_cpu[0],
+            val_y=val_cpu[1],
+            eval_x=eval_x,
+            eval_y=eval_y,
+            return_state=eval_pair is None,
+            accelerator="gpu",
+            devices=1,
+        )
+
+    def _make_finetune_spec(
+            self,
+            model_index: int,
+            current_model: LightningModule,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            val_cpu: tuple[torch.Tensor | None, torch.Tensor | None],
+            return_state: bool,
+            eval_pair: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> FineTuneSpec:
+        """Build a picklable :class:`FineTuneSpec` warm-starting from ``current_model``'s weights.
+
+        With ``eval_pair`` given (candidate scoring) the job returns ``sse`` on that pair;
+        ``return_state`` requests the trained CPU ``state_dict`` (used by the retrain step).
+        """
+        eval_x, eval_y = self._cpu_pair(*eval_pair) if eval_pair is not None else (None, None)
+        current_state = {k: v.detach().cpu().clone() for k, v in current_model.state_dict().items()}
+        return FineTuneSpec(
+            module_builder=self.module_builders[model_index],
+            current_state_dict=current_state,
+            lr_factor=self.fine_tune_lr_factor,
+            trainable_param_names=self._trainable_param_names[model_index],
+            max_epochs=self.ft_max_epochs[model_index],
+            patience=self.ft_patiences[model_index],
+            batch_size=self.batchs_size[model_index],
+            shuffle=self.shuffle_dataloaders[model_index],
+            train_x=x.detach().cpu(),
+            train_y=y.detach().cpu(),
+            val_x=val_cpu[0],
+            val_y=val_cpu[1],
+            eval_x=eval_x,
+            eval_y=eval_y,
+            return_state=return_state,
+            accelerator="gpu",
+            devices=1,
+        )
+
+    def _rebuild_module(self, model_index: int, state_dict: dict[str, torch.Tensor]) -> LightningModule:
+        """Rebuild a model in this (main) process from a CPU state dict, for inference only."""
+        module = self.module_builders[model_index]()
+        module.load_state_dict(state_dict)
+        return module
+
+    @staticmethod
+    def _cpu_pair(
+            a: torch.Tensor | None,
+            b: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Detach-and-move an optional tensor pair to CPU (for picklable specs)."""
+        a_cpu = a.detach().cpu() if a is not None else None
+        b_cpu = b.detach().cpu() if b is not None else None
+        return a_cpu, b_cpu
+
+    # ------------------------------------------------------------------ #
+    # Parallel training path
+    # ------------------------------------------------------------------ #
+
+    def _train_parallel(
+            self,
+            is_fine_tuning_during_finding_best_suspension_data: bool,
+            is_fine_tuning_for_last_step: bool,
+            selection_mode: SelectionMode,
+            failure_data: torch.Tensor,
+            failure_label: torch.Tensor,
+            suspension_data: torch.Tensor,
+            suspension_ids: torch.Tensor,
+            iterations: int,
+            pool_size: int,
+            add_ratio: float,
+            val_data: torch.Tensor | None,
+            val_label: torch.Tensor | None,
+            metrics_enabled: bool,
+            test_data: torch.Tensor | None,
+            test_label: torch.Tensor | None,
+            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
+            weight_mode: str,
+            metrics_file: str | None,
+    ) -> None:
+        """Multi-GPU parallel version of :meth:`train`'s algorithm.
+
+        Same three phases as the sequential body, but every independent per-model (and, in the
+        candidate search, per-``(model, unit)``) job runs concurrently across all ``gpu_ids``
+        via a :class:`~models.cotraining_gpu_pool.CoTrainingGpuPool`, distributed round-robin.
+        The selection between phases 1 and 3 stays in the main process (shared helper
+        :meth:`_assign_units_round_robin`). Only CPU state dicts / scalar ``sse`` cross the
+        process boundary; models are rebuilt on CPU for inference.
+        """
+        n = self.number_of_models
+        val_cpu = self._cpu_pair(val_data, val_label)
+
+        pool = CoTrainingGpuPool(self.gpu_ids)
+        pool.start()
+        try:
+            models_datasets: list[tuple[torch.Tensor, torch.Tensor]] = [
+                (failure_data, failure_label) for _ in range(n)
+            ]
+
+            # --- Initial training: one from-scratch job per model, round-robin. ---
+            self._log(1, f"[CoTraining] Initial parallel training of {n} models...")
+            job_ids = {
+                j: pool.submit_job(pool.round_robin_gpu(j), self._make_fit_spec(j, failure_data, failure_label, val_cpu))
+                for j in range(n)
+            }
+            results = pool.gather(list(job_ids.values()))
+            h = [self._rebuild_module(j, results[job_ids[j]]["state_dict"]) for j in range(n)]
+            self._log(1, f"[CoTraining] Initial training done.")
+
+            if metrics_enabled:
+                self._log_stage_metrics(
+                    stage="initial", h=h, models_datasets=models_datasets,
+                    test_data=test_data, test_label=test_label, val_data=val_data,
+                    val_label=val_label, criteria_callback=criteria_callback,
+                    weight_mode=weight_mode, metrics_file=metrics_file,
+                )
+
+            remaining_suspension_ids = torch.unique(suspension_ids)
+
+            for i in range(iterations):
+                if len(remaining_suspension_ids) == 0:
+                    self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
+                    break
+
+                pool_size_iter = min(pool_size, len(remaining_suspension_ids))
+                shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
+                pool_ids = shuffled_ids[:pool_size_iter]
+
+                self._log(1, f"[CoTraining] --- Iteration {i + 1}/{iterations} | "
+                             f"remaining censored units: {len(remaining_suspension_ids)} | "
+                             f"pool: {pool_ids.tolist()} ---")
+
+                # --- Phase 1: score every (model, unit) candidate in parallel. ---
+                candidate_info: dict[int, list[dict]] = {j: [] for j in range(n)}
+                ctx_ids = [f"ctx_{i}_{j}" for j in range(n)]
+                rr = 0  # global round-robin counter across all candidate jobs
+                for j in range(n):
+                    hj = h[j]
+                    xj, yj = models_datasets[j]
+
+                    if is_fine_tuning_during_finding_best_suspension_data:
+                        context = FineTuneCandidateContext(
+                            module_builder=self.module_builders[j],
+                            current_state_dict={k: v.detach().cpu().clone() for k, v in hj.state_dict().items()},
+                            lr_factor=self.fine_tune_lr_factor,
+                            trainable_param_names=self._trainable_param_names[j],
+                            max_epochs=self.ft_max_epochs[j],
+                            patience=self.ft_patiences[j],
+                            batch_size=self.batchs_size[j],
+                            shuffle=self.shuffle_dataloaders[j],
+                            eval_x=xj.detach().cpu(),
+                            eval_y=yj.detach().cpu(),
+                            val_x=val_cpu[0],
+                            val_y=val_cpu[1],
+                        )
+                        pool.set_finetune_context(self.gpu_ids, ctx_ids[j], context)
+                    else:
+                        context = CandidateContext(
+                            module_builder=self.module_builders[j],
+                            initial_state_dict=self._initial_state_dicts[j],
+                            max_epochs=self.max_epochs[j],
+                            patience=self.patiences[j],
+                            batch_size=self.batchs_size[j],
+                            shuffle=self.shuffle_dataloaders[j],
+                            labelled_x=xj.detach().cpu(),
+                            labelled_y=yj.detach().cpu(),
+                            val_x=val_cpu[0],
+                            val_y=val_cpu[1],
+                        )
+                        pool.set_context(self.gpu_ids, ctx_ids[j], context)
+
+                    self._log(2, f"[CoTraining]   Model {j}: submitting {len(pool_ids)} candidates "
+                                 f"across GPUs {self.gpu_ids}...")
+                    for unit_id in pool_ids:
+                        mask = (suspension_ids == unit_id)
+                        xu = suspension_data[mask].detach().cpu()
+                        lu_p = self._predict(hj, xu).detach().cpu()
+                        gpu_id = pool.round_robin_gpu(rr)
+                        rr += 1
+                        if is_fine_tuning_during_finding_best_suspension_data:
+                            job_id = pool.submit_finetune_candidate(gpu_id, ctx_ids[j], xu, lu_p)
+                        else:
+                            job_id = pool.submit_candidate(gpu_id, ctx_ids[j], xu, lu_p)
+                        candidate_info[j].append(
+                            {"unit_id": unit_id, "xu": xu, "lu_p": lu_p, "job_id": job_id}
+                        )
+
+                all_job_ids = [c["job_id"] for j in range(n) for c in candidate_info[j]]
+                results = pool.gather(all_job_ids)
+                for j in range(n):
+                    pool.clear_context(self.gpu_ids, ctx_ids[j])
+
+                # Build all_preds with delta = sse(hj) - sse(hj_prime), per model.
+                all_preds: dict[int, OrderedDict] = {}
+                for j in range(n):
+                    xj, yj = models_datasets[j]
+                    mse_orig = self._summed_squared_error(h[j], xj, yj)
+                    candidates = []
+                    for c in candidate_info[j]:
+                        delta = mse_orig - results[c["job_id"]]["sse"]
+                        candidates.append((c["unit_id"], c["xu"], c["lu_p"], delta))
+                    candidates.sort(key=lambda e: e[3], reverse=True)
+                    all_preds[j] = OrderedDict(
+                        (uid.item(), (uid, xu, lu_p, delta))
+                        for uid, xu, lu_p, delta in candidates
+                    )
+                    if self.verbose >= 2:
+                        ranking = [(uid.item(), round(d, 4)) for uid, _, _, d in candidates]
+                        self._log(2, f"[CoTraining]   Model {j} candidate ranking (best first): {ranking}")
+
+                # --- Phase 2: selection (main process). ---
+                n_add = max(1, round(add_ratio * len(pool_ids)))
+                start = i % n
+                selected_per_model, remaining_suspension_ids, added = self._assign_units_round_robin(
+                    all_preds=all_preds,
+                    selection_mode=selection_mode,
+                    n_add=n_add,
+                    start=start,
+                    remaining_suspension_ids=remaining_suspension_ids,
+                )
+
+                if added == 0:
+                    self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: "
+                                 f"no model found a beneficial censored unit.")
+                    break
+
+                # --- Phase 3: retrain / fine-tune the updated models in parallel. ---
+                retrain_jobs: dict[int, int] = {}
+                before_val: dict[int, float] = {}
+                n_new: dict[int, int] = {}
+                for j in range(n):
+                    if selected_per_model[j]:
+                        xj, yj = models_datasets[j]
+                        new_xu, new_lu = self._concat_selected_units(selected_per_model[j], yj)
+                        xj = torch.cat([xj, new_xu], dim=0)
+                        yj = torch.cat([yj, new_lu], dim=0)
+                        models_datasets[j] = (xj, yj)
+
+                        self._log(1, f"[CoTraining]   Retraining model {j} | "
+                                     f"added {len(selected_per_model[j])} unit(s) | "
+                                     f"dataset size: {len(xj)} samples "
+                                     f"({'fine-tune' if is_fine_tuning_for_last_step else 'from scratch'})")
+
+                        if is_fine_tuning_for_last_step:
+                            if val_data is not None and val_label is not None:
+                                before_val[j] = self._mse_on(h[j], val_data, val_label)
+                            n_new[j] = len(new_xu)
+                            spec = self._make_finetune_spec(j, h[j], new_xu, new_lu, val_cpu, return_state=True)
+                            retrain_jobs[j] = pool.submit_finetune(pool.round_robin_gpu(j), spec)
+                        else:
+                            spec = self._make_fit_spec(j, xj, yj, val_cpu)
+                            retrain_jobs[j] = pool.submit_job(pool.round_robin_gpu(j), spec)
+
+                results = pool.gather(list(retrain_jobs.values()))
+                for j, jid in retrain_jobs.items():
+                    h[j] = self._rebuild_module(j, results[jid]["state_dict"])
+                    if is_fine_tuning_for_last_step and j in before_val:
+                        self._maybe_warn_forgetting(j, before_val[j], h[j], val_data, val_label, n_new[j])
+
+                if metrics_enabled:
+                    self._log_stage_metrics(
+                        stage=f"iteration_{i + 1}", h=h, models_datasets=models_datasets,
+                        test_data=test_data, test_label=test_label, val_data=val_data,
+                        val_label=val_label, criteria_callback=criteria_callback,
+                        weight_mode=weight_mode, metrics_file=metrics_file,
+                    )
+
+            if metrics_enabled:
+                self._log_stage_metrics(
+                    stage="final", h=h, models_datasets=models_datasets,
+                    test_data=test_data, test_label=test_label, val_data=val_data,
+                    val_label=val_label, criteria_callback=criteria_callback,
+                    weight_mode=weight_mode, metrics_file=metrics_file,
+                )
+
+            self._log(1, f"[CoTraining] Training complete.")
+            self.lightning_modules = h
+        finally:
+            pool.shutdown()
 
     def _log_stage_metrics(
             self,
@@ -1004,11 +1636,8 @@ class CoTrainingEnsemble:
         raise NotImplementedError("Evidential censored data selection is not implemented yet.")
 
     def _check_if_training_is_possible(self):
-        if (self.lightning_modules is None
-                or self.trainer_factories is None
-                or self.batchs_size is None
-                or self.shuffle_dataloaders is None):
-            raise ValueError("You need to call setup_training before calling train.")
+        if not self._configured:
+            raise ValueError("You need to call setup_training or setup_training_builder before calling train.")
 
     def calculate_weights(
             self,
