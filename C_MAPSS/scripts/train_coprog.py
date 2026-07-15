@@ -147,7 +147,7 @@ if __name__ == "__main__":
 
         return factory
 
-    coprog.setup_training(
+    coprog.setup_training_legacy(
         lightning_modules=[cnn_module, lstm_module],
         trainer_factories=[make_trainer_factory(args.epochs), make_trainer_factory(args.epochs)],
         batch_sizes=[args.batch_size, args.batch_size],

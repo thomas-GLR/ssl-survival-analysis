@@ -32,6 +32,7 @@ def reproduce_result(
         model_version: ModelVersion,
         benchmark_version: str = "default",
         run_name: str = "",
+        gpu_ids: list[int] | None = None,
 ):
     config_path = f"{config_path}/{benchmark_version}"
     config_model_file_path = f"{config_path}/{model_version.value}.json"
@@ -74,6 +75,10 @@ def reproduce_result(
 
     log_file_path = os.path.join(results_path, f"log_model_{model_version.value}_{benchmark_datetime}.txt")
 
+    # GPU selection is only meaningful for COPROG (multi-model parallel training). The other
+    # train_model functions don't accept it, so forward it only for COPROG to avoid TypeError.
+    extra_params = {"gpu_ids": gpu_ids} if model_version is ModelVersion.COPROG else {}
+
     try:
         rmse, score = train_model(
             checkpoints_path=checkpoints_path,
@@ -84,7 +89,8 @@ def reproduce_result(
             datetime_for_folders=benchmark_datetime,
             **dataset_params,
             **training_params,
-            **model_params
+            **model_params,
+            **extra_params,
         )
     except Exception as e:
         rmse = None
@@ -183,6 +189,17 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="The name of the RUN"
     )
+    parser.add_argument(
+        "--gpu-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "GPU id(s) to train on (COPROG only). Omit to use a single GPU (auto). "
+            "Give one id (e.g. --gpu-ids 0) to pin to that GPU, or several "
+            "(e.g. --gpu-ids 0 1) to train the two COPROG models in parallel on separate GPUs."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -209,6 +226,7 @@ def main() -> None:
         model_version=model_version,
         benchmark_version=args.benchmark_version,
         run_name=args.run_name,
+        gpu_ids=args.gpu_ids,
     )
 
 if __name__ == "__main__":

@@ -1,13 +1,10 @@
-import shutil
-import tempfile
+import functools
 from datetime import datetime
-from typing import Callable
 
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from lightning import Trainer
-from lightning.pytorch import callbacks
+from lightning import LightningModule
 from torch import nn
 
 from constants import necessary_keys_scania
@@ -54,6 +51,7 @@ def train_model(
     coprog_suspension_pool_size: int,
     rul_target_standardization: list[bool],
     # Others
+    gpu_ids: list[int] | None = None,
     datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
     assert_data_is_valid(
@@ -181,11 +179,13 @@ def train_model(
 
     print(f"Creating first model ({first_model_version.value})...")
 
-    first_model = _creating_model(first_model_params, first_model_version, feature_num, sequence_len)
+    # dict(...) copies: _creating_model mutates its params dict via .update, so we keep the
+    # extracted params pristine for the (picklable) builders used below.
+    first_model = _creating_model(dict(first_model_params), first_model_version, feature_num, sequence_len)
 
     print(f"Creating second model ({second_model_version.value})...")
 
-    second_model = _creating_model(second_model_params, second_model_version, feature_num, sequence_len)
+    second_model = _creating_model(dict(second_model_params), second_model_version, feature_num, sequence_len)
 
     coprog = Coprog(
         first_model=first_model,
@@ -193,93 +193,68 @@ def train_model(
         verbose=1,
     )
 
-    # Wrap each model in a Lightning module.
-    first_module = BasicLightningModule(
-        lr=lr[0],
-        model=first_model,
-        target_mean=targets_means[0],
-        target_std=targets_stds[0],
-    )
-    second_module = BasicLightningModule(
-        lr=lr[1],
-        model=second_model,
-        target_mean=targets_means[1],
-        target_std=targets_stds[1],
-    )
+    # Builder-style setup: Coprog rebuilds a fresh module (and its Trainer) for every
+    # from-scratch training. The builders MUST be picklable (module-level function +
+    # functools.partial, no closures) so they survive the process boundary when training
+    # is distributed across GPUs. Coprog snapshots the initial weights once so every
+    # training starts from identical weights.
+    module_builders = [
+        functools.partial(
+            _build_scania_module,
+            model_params=dict(first_model_params),
+            model_version_value=first_model_version.value,
+            feature_num=feature_num,
+            sequence_len=sequence_len,
+            lr=lr[0],
+            target_mean=targets_means[0],
+            target_std=targets_stds[0],
+        ),
+        functools.partial(
+            _build_scania_module,
+            model_params=dict(second_model_params),
+            model_version_value=second_model_version.value,
+            feature_num=feature_num,
+            sequence_len=sequence_len,
+            lr=lr[1],
+            target_mean=targets_means[1],
+            target_std=targets_stds[1],
+        ),
+    ]
 
-    # Each _train_fun call builds a fresh Trainer from these factories. The ModelCheckpoint
-    # lets Coprog reload the best (val_loss) weights instead of the last-epoch ones, and
-    # EarlyStopping avoids over/under-training. Checkpoints go to throwaway temp dirs that
-    # we remove at the end (there is one fit per candidate, so this can be a lot of files).
-    created_ckpt_dirs: list[str] = []
+    # gpu_ids (from the --gpu-ids CLI option): None -> single GPU / auto; [g] -> pinned to
+    # GPU g; [g0, g1, ...] -> train the two models in parallel on separate GPUs.
+    print(f"COPROG GPU selection: {gpu_ids if gpu_ids else 'auto (single GPU)'}")
 
-    def make_trainer_factory(max_epochs: int, patience: int) -> Callable[[], Trainer]:
-        def factory() -> Trainer:
-            ckpt_dir = tempfile.mkdtemp(prefix="coprog_ckpt_")
-            created_ckpt_dirs.append(ckpt_dir)
-
-            early_stop_callback = callbacks.EarlyStopping(
-                monitor='val_loss',
-                min_delta=0.00,
-                patience=patience,
-                verbose=False,
-                mode='min',
-            )
-            checkpoint_callback = callbacks.ModelCheckpoint(
-                dirpath=ckpt_dir,
-                monitor='val_loss',
-                filename='best-{epoch:02d}-{val_loss:.4f}',
-                save_top_k=1,
-                mode='min',
-            )
-
-            return Trainer(
-                default_root_dir=ckpt_dir,
-                accelerator="auto",
-                max_epochs=max_epochs,
-                callbacks=[early_stop_callback, checkpoint_callback],
-                logger=False,
-                enable_progress_bar=False,
-                enable_model_summary=False,
-            )
-
-        return factory
-
-    coprog.setup_training(
-        lightning_modules=[first_module, second_module],
-        trainer_factories=[
-            make_trainer_factory(max_epochs=max_epochs[0], patience=patiences[0]),
-            make_trainer_factory(max_epochs=max_epochs[1], patience=patiences[1]),
-        ],
+    coprog.setup_training_builder(
+        module_builders=module_builders,
+        max_epochs=max_epochs,
+        patiences=patiences,
         batch_sizes=[batch_size, batch_size],
         shuffle_dataloaders=[True, True],
+        gpu_ids=gpu_ids,
     )
 
     print(f"Training Coprog model...")
 
-    try:
-        coprog.train(
-            failure_data=features_uncensored,
-            failure_label=targets_uncensored,
-            suspension_data=features_censored,
-            suspension_ids=ids_censored,
-            iterations=coprog_iterations,
-            suspension_pool_size=coprog_suspension_pool_size,
-            val_data=val_features,
-            val_label=val_targets,
-        )
+    coprog.train(
+        failure_data=features_uncensored,
+        failure_label=targets_uncensored,
+        suspension_data=features_censored,
+        suspension_ids=ids_censored,
+        iterations=coprog_iterations,
+        suspension_pool_size=coprog_suspension_pool_size,
+        val_data=val_features,
+        val_label=val_targets,
+    )
 
-        # Ensemble weights are computed on the validation set, not the test set,
-        # to avoid leaking test information into the weighting.
-        coprog.calculate_weights(
-            x_test=val_features,
-            target=val_targets,
-            criteria_callback=_criteria_callback_for_coprog,
-            mode="min",
-        )
-    finally:
-        for ckpt_dir in created_ckpt_dirs:
-            shutil.rmtree(ckpt_dir, ignore_errors=True)
+    # Ensemble weights are computed on the validation set, not the test set,
+    # to avoid leaking test information into the weighting.
+    coprog.calculate_weights(
+        x_test=val_features,
+        target=val_targets,
+        criteria_callback=_criteria_callback_for_coprog,
+        mode="min",
+    )
 
     print("Saving first and second trained models...")
 
@@ -386,6 +361,42 @@ def _extract_model_coprog_params(model_params: dict) -> tuple[dict, ModelVersion
             raise KeyError(f"{key} is missing in 'model_params' for {model_version.value}")
 
     return model_params[model_key], model_version
+
+
+def _build_scania_module(
+    model_params: dict,
+    model_version_value: str,
+    feature_num: int,
+    sequence_len: int,
+    lr: float,
+    target_mean: float,
+    target_std: float,
+) -> LightningModule:
+    """Build a fresh ``BasicLightningModule`` wrapping a fresh Scania model.
+
+    This is a **module-level** function (not a closure) so that, wrapped in
+    ``functools.partial``, it is picklable and can be sent to per-GPU worker processes for
+    parallel COPROG training. It rebuilds the underlying ``nn.Module`` from its config via
+    :func:`_creating_model` and wraps it in :class:`BasicLightningModule`.
+
+    :param model_params: The model's constructor params (inner config dict). Copied before
+        use because :func:`_creating_model` mutates it via ``.update``.
+    :param model_version_value: The model version string (e.g. ``"cnn"``), converted back to
+        a :class:`ModelVersion` (an enum is passed as its value to keep the partial picklable).
+    :param feature_num: Number of input features.
+    :param sequence_len: Input sequence length.
+    :param lr: Learning rate for the wrapping module.
+    :param target_mean: RUL target mean for standardization (0.0 disables it).
+    :param target_std: RUL target std for standardization (1.0 disables it).
+    :return: A fresh ``BasicLightningModule`` ready to train.
+    """
+    model = _creating_model(dict(model_params), ModelVersion(model_version_value), feature_num, sequence_len)
+    return BasicLightningModule(
+        lr=lr,
+        model=model,
+        target_mean=target_mean,
+        target_std=target_std,
+    )
 
 
 def _creating_model(model_params: dict, model_version: ModelVersion, num_features: int, sequence_len: int) -> nn.Module:
