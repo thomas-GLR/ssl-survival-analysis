@@ -454,6 +454,11 @@ def _creating_model(model_params: dict, model_version: ModelVersion, num_feature
                 "sequence_len": sequence_len,
                 "d_model": sequence_len,
             })
+            # Configs expose the layer count as ``transformer_num_layer`` (like
+            # TransformerFeatures), but TransformerTimeSequence's constructor calls it
+            # ``num_layers`` — map it so the config schema stays consistent across models.
+            if "transformer_num_layer" in model_params:
+                model_params["num_layers"] = model_params.pop("transformer_num_layer")
             return TransformerTimeSequence(**model_params)
         case _:
             raise ValueError(f"{model_version.value} is not a valid model version for COPROG")

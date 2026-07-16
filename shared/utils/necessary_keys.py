@@ -82,9 +82,9 @@ def get_necessary_training_keys(model_version: ModelVersion, necessary_keys_modu
         case ModelVersion.CNN:
             return necessary_keys_module.NECESSARY_TRAINING_CNN_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE:
-            raise NotImplementedError(f"Model {model_version.value} is not yet implemented")
+            return necessary_keys_module.NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
-            raise NotImplementedError(f"Model {model_version.value} is not yet implemented")
+            return necessary_keys_module.NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS
         case ModelVersion.TRANSFORMER_FEATURES:
             return necessary_keys_module.NECESSARY_TRAINING_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:

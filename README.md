@@ -181,6 +181,370 @@ sub-folder if given):
 and, under `--checkpoints-path`, the two trained models `coprog_cnn.pth` and
 `coprog_lstm.pth`.
 
+### CoTrainingEnsemble (v1)
+
+CoTrainingEnsemble is the generalisation of Coprog to a **configurable number of
+base models** (2 or more) drawn from the four allowed architectures (`cnn`,
+`lstm`, `transformer_features`, `transformer_time_sequence`). Like Coprog, the
+models are trained on the labelled (uncensored) samples and then iteratively
+**self-label the censored / suspension samples** for each other; final
+predictions are a validation-weighted ensemble of all models. **v1 selects which
+self-labelled censored units to add by voting** across the models
+(`SelectionMode.VOTING`) and can optionally **fine-tune** rather than retrain
+from scratch at each step. The base models can be trained **in parallel across
+several GPUs** to speed up the process.
+
+#### 1. Running the script
+
+```bash
+python run_train_scania.py \
+  --model-version co_training_ensemble \
+  --config-path ./scania/config \
+  --checkpoints-path ./checkpoints \
+  --results-path ./outputs \
+  --dataset-root ./data/Scania_component_X \
+  --dataset-cache-dir ./scania_cache \
+  --benchmark-version default \
+  --run-name my_first_cotraining_run \
+  --gpu-ids 0 1
+```
+
+Inline command :
+```bash
+python run_train_scania.py --model-version co_training_ensemble --config-path ./scania/config --checkpoints-path ./checkpoints --results-path ./outputs --dataset-root ./data/Scania_component_X --dataset-cache-dir ./scania_cache --benchmark-version default --run-name my_first_cotraining_run --gpu-ids 0 1
+```
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `--model-version` | yes | The model to train. Use `co_training_ensemble` for CoTrainingEnsemble v1. |
+| `--config-path` | yes | Path to the config **root** folder (the folder that contains the benchmark-version sub-folders, e.g. `./scania/config`). |
+| `--checkpoints-path` | yes | Where the trained models (one `.pth` per base model, e.g. `co_training_ensemble_cnn_0.pth`) are saved. Created if missing. |
+| `--results-path` | yes | Where the metrics CSVs and the run log are written. Created if missing. |
+| `--dataset-root` | yes | Root folder of the Scania Component X data files (readouts / TTE / specifications CSVs). |
+| `--dataset-cache-dir` | yes | Folder used to cache the processed dataset splits (built once, reused afterwards). |
+| `--benchmark-version` | no (default `default`) | Selects the config **sub-folder** to read, i.e. `<config-path>/<benchmark-version>/co_training_ensemble.json`. `default` is the full run; `test` is a fast smoke-test config (1 epoch, 2 iterations). |
+| `--run-name` | no (default `""`) | Optional name; when set, results and checkpoints are written under a sub-folder of this name. |
+| `--gpu-ids` | no (default `None`) | GPU selection — see below. |
+
+The actual config file loaded by the command above is
+`./scania/config/default/co_training_ensemble.json` (i.e.
+`<config-path>/<benchmark-version>/<model-version>.json`).
+
+#### 2. How `--gpu-ids` works
+
+`--gpu-ids` accepts zero, one, or several integer GPU ids (space-separated). For
+the co-training ensembles it distributes the base models **round-robin** across
+the given GPUs.
+
+| Value | Behaviour |
+| --- | --- |
+| *(omitted)* | `None` → single GPU / automatic device selection. The models are trained **sequentially**. |
+| `--gpu-ids 0` | Pin all training to GPU `0`. The models are trained **sequentially** on that GPU. |
+| `--gpu-ids 0 1` | Train the models **in parallel**, distributed round-robin across GPUs `0` and `1`. This is the fastest option when several GPUs are available. |
+
+Notes:
+- Unlike Coprog (exactly two models), CoTrainingEnsemble can have any number of
+  models, so you may pass as many ids as you have GPUs; models are assigned
+  round-robin (extra ids beyond the model count are simply unused).
+- The ids are physical GPU indices as seen by CUDA (`nvidia-smi`). On a
+  single-GPU machine, simply omit the flag (or pass `--gpu-ids 0`).
+
+#### 3. The CoTrainingEnsemble config file
+
+The config is a single JSON file with three top-level blocks:
+`dataset_params`, `model_params`, and `training_params`. All keys listed below
+are **required** (see `constants/necessary_keys_scania.py`).
+
+##### `dataset_params` — how the data is loaded and windowed
+
+Identical to Coprog (see the Coprog table above). `val_rate` **must be > 0** (the
+ensemble needs a validation set for early stopping / best-model selection and for
+the ensemble weights).
+
+##### `model_params` — the list of base models
+
+`model_params` has exactly one key, `models`, whose value is a **list of at least
+two** model entries. Each entry is a **single-key dict** `{model_version: {...}}`
+where `model_version` is one of `cnn`, `lstm`, `transformer_features`,
+`transformer_time_sequence`. Adding a model to the ensemble is just adding an
+entry to this list.
+
+Each entry is **self-contained** and must provide these keys:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `model_params` | dict | The architecture hyper-parameters for that model version (`{}` for `cnn`; the transformer/LSTM keys otherwise — see the Coprog `model_params` notes). |
+| `lr` | float | Learning rate for this model. |
+| `max_epochs` | int | Max training epochs for this model. |
+| `patience` | int | Early-stopping patience (in epochs) for this model. |
+| `rul_target_standardization` | bool | Whether to standardize (z-score) the RUL target for this model. Stats are computed on the uncensored training labels only; predictions are de-normalized back to real RUL units for all metrics. |
+
+(`feature_num`, `sequence_len`, and `d_model` are injected automatically from the
+dataset, so you don't set them here.)
+
+##### `training_params` — the co-training loop
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `iterations` | int | Number of co-training rounds (self-labelling passes). |
+| `suspension_pool_size` | float in `(0, 1]` | Fraction of censored/suspension units sampled into the self-labelling pool each iteration. (Note: a **fraction**, unlike Coprog's integer count.) |
+| `add_ratio` | float in `(0, 1]` | Fraction of the pool actually added (self-labelled) per iteration. |
+| `is_fine_tuning_during_finding_best_suspension_data` | bool | Fine-tune (vs. retrain from scratch) while searching for the best censored candidates. |
+| `is_fine_tuning_for_last_step` | bool | Fine-tune (vs. retrain from scratch) after the censored data has been selected. |
+| `fine_tune_lr_factor` | float | LR multiplier applied while fine-tuning. |
+| `fine_tune_max_epochs` | int | Max epochs for fine-tuning. |
+
+##### Full example (`scania/config/default/co_training_ensemble.json`)
+
+A four-model ensemble (CNN + LSTM + two transformers), trained in a 10-round
+co-training loop with fine-tuning disabled:
+
+```json
+{
+  "dataset_params": {
+    "sequence_len": 32,
+    "seed": 42,
+    "val_rate": 0.2,
+    "test_rate": 0.1,
+    "stratify": true,
+    "norm_type": "z-score",
+    "num_workers": 4,
+    "pin_memory": true,
+    "return_sequence_label": false,
+    "batch_size": 128,
+    "shuffle_loader": true,
+    "counter_mode": "both"
+  },
+  "model_params": {
+    "models": [
+      {
+        "cnn": {
+          "model_params": {},
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      },
+      {
+        "lstm": {
+          "model_params": {
+            "hidden_dim": 256,
+            "lstm_num_layers": 3,
+            "lstm_dropout": 0.3,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      },
+      {
+        "transformer_features": {
+          "model_params": {
+            "transformer_encoder_head_num": 8,
+            "transformer_num_layer": 2,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      },
+      {
+        "transformer_time_sequence": {
+          "model_params": {
+            "transformer_encoder_head_num": 8,
+            "transformer_num_layer": 2,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      }
+    ]
+  },
+  "training_params": {
+    "iterations": 10,
+    "suspension_pool_size": 0.5,
+    "add_ratio": 0.3,
+    "is_fine_tuning_during_finding_best_suspension_data": false,
+    "is_fine_tuning_for_last_step": false,
+    "fine_tune_lr_factor": 0.1
+  }
+}
+```
+
+For a quick end-to-end check without a long run, use the `test` benchmark
+version (`--benchmark-version test`), which is a smaller config with
+`max_epochs: 1`, `iterations: 2`, and a tiny `suspension_pool_size`.
+
+#### 4. Outputs
+
+After a run you will find, under `--results-path` (inside the `--run-name`
+sub-folder if given):
+
+- `co_training_ensemble-scania.csv` — per-model and weighted-ensemble RMSE /
+  score plus the ensemble weights (`test_rmse_h{i}` / `test_score_h{i}` /
+  `weight_h{i}` per model, and `test_rmse_weighted` / `test_score_weighted`).
+- `co_training_ensemble-per-stage-scania.csv` — metrics tracked at each stage of
+  the co-training loop (initial / per-iteration / final).
+- `predictions_co_training_ensemble_test_h{i}_scania.csv` — one per-model
+  prediction file (targets vs. predictions), plus
+  `predictions_co_training_ensemble_test_weighted_scania.csv` for the weighted
+  ensemble.
+- the saved training parameters and a run log;
+
+and, under `--checkpoints-path`, one trained model per base model, named
+`co_training_ensemble_<version>_<i>.pth` (e.g. `co_training_ensemble_cnn_0.pth`).
+
+### CoTrainingEnsemble v2
+
+CoTrainingEnsemble v2 has the **same structure** as v1 (a configurable list of 2+
+base models, per-model prediction files, validation-weighted ensemble, parallel
+GPU training). The differences are in **how censored units are selected** and in
+the training loop:
+
+- v2 always trains **from scratch** (no fine-tuning), so it drops the
+  fine-tuning knobs.
+- Instead of voting, v2 ranks censored units by **`crepes` conformal-interval
+  width** and self-labels the most confident (narrowest-interval) ones, so it
+  takes a single `confidence` parameter.
+
+#### 1. Running the script
+
+Same as v1, but with `--model-version co_training_ensemble_v2`:
+
+```bash
+python run_train_scania.py \
+  --model-version co_training_ensemble_v2 \
+  --config-path ./scania/config \
+  --checkpoints-path ./checkpoints \
+  --results-path ./outputs \
+  --dataset-root ./data/Scania_component_X \
+  --dataset-cache-dir ./scania_cache \
+  --benchmark-version default \
+  --run-name my_first_cotraining_v2_run \
+  --gpu-ids 0 1
+```
+
+Inline command :
+```bash
+python run_train_scania.py --model-version co_training_ensemble_v2 --config-path ./scania/config --checkpoints-path ./checkpoints --results-path ./outputs --dataset-root ./data/Scania_component_X --dataset-cache-dir ./scania_cache --benchmark-version default --run-name my_first_cotraining_v2_run --gpu-ids 0 1
+```
+
+The arguments are identical to v1 (see the table above); the config file loaded
+is `<config-path>/<benchmark-version>/co_training_ensemble_v2.json`, and the
+checkpoints/outputs are named with the `co_training_ensemble_v2` prefix.
+`--gpu-ids` behaves exactly as for v1.
+
+#### 2. The CoTrainingEnsemble v2 config file
+
+`dataset_params` and `model_params` are **identical to v1** (same `models` list
+of self-contained model entries). Only `training_params` differs:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `iterations` | int | Number of co-training rounds (self-labelling passes). |
+| `suspension_pool_size` | float in `(0, 1]` | Fraction of censored/suspension units sampled into the self-labelling pool each iteration. |
+| `add_ratio` | float in `(0, 1]` | Fraction of the pool actually added (self-labelled) per iteration. |
+| `confidence` | float in `(0, 1)` | Confidence level for the `crepes` conformal intervals used to rank censored units (higher → wider intervals). |
+
+##### Full example (`scania/config/default/co_training_ensemble_v2.json`)
+
+A three-model ensemble with 95%-confidence conformal selection:
+
+```json
+{
+  "dataset_params": {
+    "sequence_len": 32,
+    "seed": 42,
+    "val_rate": 0.2,
+    "test_rate": 0.1,
+    "stratify": true,
+    "norm_type": "z-score",
+    "num_workers": 4,
+    "pin_memory": true,
+    "return_sequence_label": false,
+    "batch_size": 128,
+    "shuffle_loader": true,
+    "counter_mode": "both"
+  },
+  "model_params": {
+    "models": [
+      {
+        "cnn": {
+          "model_params": {},
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      },
+      {
+        "lstm": {
+          "model_params": {
+            "hidden_dim": 256,
+            "lstm_num_layers": 3,
+            "lstm_dropout": 0.3,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      },
+      {
+        "transformer_features": {
+          "model_params": {
+            "transformer_encoder_head_num": 8,
+            "transformer_num_layer": 2,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      }
+    ]
+  },
+  "training_params": {
+    "iterations": 10,
+    "suspension_pool_size": 0.5,
+    "add_ratio": 0.3,
+    "confidence": 0.95
+  }
+}
+```
+
+As for v1, `--benchmark-version test` runs a fast smoke-test config
+(`max_epochs: 1`, `iterations: 2`, small `suspension_pool_size`).
+
+#### 3. Outputs
+
+Same as v1, but with the `co_training_ensemble_v2` prefix:
+
+- `co_training_ensemble_v2-scania.csv` — per-model and weighted-ensemble RMSE /
+  score plus the ensemble weights.
+- `co_training_ensemble_v2-per-stage-scania.csv` — per-stage co-training metrics.
+- `predictions_co_training_ensemble_v2_test_h{i}_scania.csv` (per model) and
+  `predictions_co_training_ensemble_v2_test_weighted_scania.csv`.
+- the saved training parameters and a run log;
+
+and, under `--checkpoints-path`, one trained model per base model, named
+`co_training_ensemble_v2_<version>_<i>.pth`.
+
 ### Hyperparameter optimisation (HPO)
 
 Hyperparameter search on the Scania Component X dataset is driven by
