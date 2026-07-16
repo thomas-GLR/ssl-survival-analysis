@@ -16,7 +16,7 @@ from datetime import datetime
 from models.CoTrainingEnsemble import CoTrainingEnsemble, SelectionMode
 from scania.dataset import ScaniaDataModule
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
-from scania.utils.utils_coprog import _criteria_callback_for_coprog
+from scania.utils.utils_coprog import _criteria_callback_for_coprog, _score_callback_for_coprog
 from scania.utils.utils_scania import (
     assert_data_is_valid,
     create_and_get_checkpoints_results_path,
@@ -226,12 +226,13 @@ def train_model(
         add_ratio=add_ratio,
         val_data=val_features,
         val_label=val_targets,
-        # Per-stage metrics (initial / iteration_k / final). The single criteria_callback is
-        # RMSE and drives both the per-model score and the ensemble weights (weight_mode="min"),
-        # matching calculate_weights below. Runs in the main process (safe for the parallel path).
+        # Per-stage metrics (initial / iteration_k / final). The score columns use the Scania
+        # score, while the reported weights use RMSE + "min" (matching calculate_weights below).
+        # Runs in the main process (safe for the parallel path).
         test_data=test_features,
         test_label=test_targets,
-        criteria_callback=_criteria_callback_for_coprog,
+        score_callback=_score_callback_for_coprog,
+        weight_callback=_criteria_callback_for_coprog,
         weight_mode="min",
         metrics_file=f"{results_path}/{model_version.value}-per-stage-scania.csv",
         log_file=log_file_path,
