@@ -236,7 +236,8 @@ class CoTrainingEnsemble_v2:
             val_label: torch.Tensor,
             test_data: torch.Tensor | None = None,
             test_label: torch.Tensor | None = None,
-            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
             weight_mode: str = "min",
             metrics_file: str | None = None,
             log_file: str | None = None,
@@ -285,17 +286,23 @@ class CoTrainingEnsemble_v2:
                 ``metrics_file``. Never used for training or model selection.
             test_label:
                 Optional test labels associated with ``test_data``.
-            criteria_callback:
-                Score used both per model (test score) and to compute the ensemble
-                weights on the validation set for the "with weights" metrics. Same
-                callback the caller passes to ``calculate_weights`` (lower is better
-                for ``weight_mode="min"``). Required when metrics logging is enabled.
+            score_callback:
+                Score reported per model, averaged and for the weighted ensemble in the
+                ``test_score`` columns of the metrics file (e.g. the Scania score). Only
+                used for reporting, never for weighting. Required when metrics logging is
+                enabled.
+            weight_callback:
+                Score used to compute the per-stage ensemble weights on the validation
+                set (e.g. RMSE). Should match the callback the caller passes to
+                ``calculate_weights`` (lower is better for ``weight_mode="min"``).
+                Required when metrics logging is enabled.
             weight_mode:
                 "min" or "max", passed to ``_compute_weights`` when deriving the
                 per-stage ensemble weights (defaults to "min").
             metrics_file:
                 Optional path to a ``.csv`` file. When given (together with the test
-                set, the validation set and ``criteria_callback``), per-stage metrics
+                set, the validation set, ``score_callback`` and ``weight_callback``),
+                per-stage metrics
                 are appended: one row after the initial training, one after each
                 iteration that retrains, and one final row. Enables metrics logging.
             log_file:
@@ -322,8 +329,10 @@ class CoTrainingEnsemble_v2:
         if metrics_enabled:
             if test_label is None:
                 raise ValueError("test_label must be provided together with test_data.")
-            if criteria_callback is None:
-                raise ValueError("criteria_callback is required to log per-stage metrics (per-model test score).")
+            if score_callback is None:
+                raise ValueError("score_callback is required to log per-stage metrics (per-model test score).")
+            if weight_callback is None:
+                raise ValueError("weight_callback is required to log per-stage metrics (per-stage ensemble weights).")
             if metrics_file is None:
                 raise ValueError("metrics_file is required to log per-stage metrics.")
 
@@ -361,7 +370,8 @@ class CoTrainingEnsemble_v2:
                 metrics_enabled=metrics_enabled,
                 test_data=test_data,
                 test_label=test_label,
-                criteria_callback=criteria_callback,
+                score_callback=score_callback,
+                weight_callback=weight_callback,
                 weight_mode=weight_mode,
                 metrics_file=metrics_file,
             )
@@ -396,7 +406,8 @@ class CoTrainingEnsemble_v2:
                 test_label=test_label,
                 val_data=val_data,
                 val_label=val_label,
-                criteria_callback=criteria_callback,
+                score_callback=score_callback,
+                weight_callback=weight_callback,
                 weight_mode=weight_mode,
                 metrics_file=metrics_file,
             )
@@ -531,7 +542,8 @@ class CoTrainingEnsemble_v2:
                     test_label=test_label,
                     val_data=val_data,
                     val_label=val_label,
-                    criteria_callback=criteria_callback,
+                    score_callback=score_callback,
+                    weight_callback=weight_callback,
                     weight_mode=weight_mode,
                     metrics_file=metrics_file,
                 )
@@ -551,7 +563,8 @@ class CoTrainingEnsemble_v2:
                 test_label=test_label,
                 val_data=val_data,
                 val_label=val_label,
-                criteria_callback=criteria_callback,
+                score_callback=score_callback,
+                weight_callback=weight_callback,
                 weight_mode=weight_mode,
                 metrics_file=metrics_file,
             )
@@ -716,7 +729,8 @@ class CoTrainingEnsemble_v2:
             metrics_enabled: bool,
             test_data: torch.Tensor | None,
             test_label: torch.Tensor | None,
-            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
+            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
+            weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
             weight_mode: str,
             metrics_file: str | None,
     ) -> None:
@@ -753,7 +767,8 @@ class CoTrainingEnsemble_v2:
                 self._log_stage_metrics(
                     stage="initial", h=h, models_datasets=models_datasets,
                     test_data=test_data, test_label=test_label, val_data=val_data,
-                    val_label=val_label, criteria_callback=criteria_callback,
+                    val_label=val_label, score_callback=score_callback,
+                    weight_callback=weight_callback,
                     weight_mode=weight_mode, metrics_file=metrics_file,
                 )
 
@@ -862,7 +877,8 @@ class CoTrainingEnsemble_v2:
                     self._log_stage_metrics(
                         stage=f"iteration_{i + 1}", h=h, models_datasets=models_datasets,
                         test_data=test_data, test_label=test_label, val_data=val_data,
-                        val_label=val_label, criteria_callback=criteria_callback,
+                        val_label=val_label, score_callback=score_callback,
+                        weight_callback=weight_callback,
                         weight_mode=weight_mode, metrics_file=metrics_file,
                     )
 
@@ -870,7 +886,8 @@ class CoTrainingEnsemble_v2:
                 self._log_stage_metrics(
                     stage="final", h=h, models_datasets=models_datasets,
                     test_data=test_data, test_label=test_label, val_data=val_data,
-                    val_label=val_label, criteria_callback=criteria_callback,
+                    val_label=val_label, score_callback=score_callback,
+                    weight_callback=weight_callback,
                     weight_mode=weight_mode, metrics_file=metrics_file,
                 )
 
@@ -888,7 +905,8 @@ class CoTrainingEnsemble_v2:
             test_label: torch.Tensor,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
-            criteria_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            score_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            weight_callback: Callable[[torch.Tensor, torch.Tensor], float],
             weight_mode: str,
             metrics_file: str,
     ) -> None:
@@ -902,13 +920,19 @@ class CoTrainingEnsemble_v2:
         weighted-ensemble prediction, whose weights are computed on the validation set via
         ``_compute_weights`` (so ``self.weights`` is left untouched).
 
+        The reported test score (per model, averaged and weighted) comes from
+        ``score_callback`` (e.g. the Scania score), while the ensemble weights are derived
+        from ``weight_callback`` (e.g. RMSE) — the two are intentionally decoupled so the
+        score columns are not just the RMSE used for weighting.
+
         Args:
             stage: label for the row ("initial", "iteration_<k>" or "final").
             h: the current best model per index.
             models_datasets: per-model ``(x, y)`` accumulated training split.
             test_data, test_label: test set used only for the metrics.
             val_data, val_label: validation set (used for val RMSE and the weights).
-            criteria_callback: score used for per-model test score and the weights.
+            score_callback: score used for the per-model / averaged / weighted test score.
+            weight_callback: score used to compute the reported ensemble weights.
             weight_mode: "min"/"max" passed to ``_compute_weights``.
             metrics_file: destination CSV; header written only when it does not yet exist.
         """
@@ -928,7 +952,7 @@ class CoTrainingEnsemble_v2:
             pred_j = self._predict(model, test_data).view(-1).to(test_label_flat.device)
             test_preds.append(pred_j)
             test_rmses.append((((test_label_flat - pred_j) ** 2).mean().item()) ** 0.5)
-            test_scores.append(criteria_callback(pred_j, test_label_flat))
+            test_scores.append(score_callback(pred_j, test_label_flat))
 
         n = len(h)
         avg_test_rmse = sum(test_rmses) / n
@@ -940,12 +964,12 @@ class CoTrainingEnsemble_v2:
         # modules at this point (they are only replaced by ``h`` when train() finishes),
         # so weighting against it would give weights unrelated to the trained models —
         # and would not match the caller's post-train ``calculate_weights``.
-        weights = self._compute_weights(val_data, val_label, criteria_callback, weight_mode, models=h)
+        weights = self._compute_weights(val_data, val_label, weight_callback, weight_mode, models=h)
         weighted_pred = torch.stack(
             [w * pred for w, pred in zip(weights, test_preds)], dim=0
         ).sum(dim=0).view(-1)
         weighted_test_rmse = (((test_label_flat - weighted_pred) ** 2).mean().item()) ** 0.5
-        weighted_test_score = criteria_callback(weighted_pred, test_label_flat)
+        weighted_test_score = score_callback(weighted_pred, test_label_flat)
 
         header = ["stage"]
         for j in range(n):
