@@ -17,7 +17,9 @@ from scania.utils import (
 from scania.utils import (
     train_model_lightning,
     train_model_random_survival,
-    train_model_coprog
+    train_model_coprog,
+    train_model_cotraining_ensemble,
+    train_model_cotraining_ensemble_v2,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,9 +77,15 @@ def reproduce_result(
 
     log_file_path = os.path.join(results_path, f"log_model_{model_version.value}_{benchmark_datetime}.txt")
 
-    # GPU selection is only meaningful for COPROG (multi-model parallel training). The other
-    # train_model functions don't accept it, so forward it only for COPROG to avoid TypeError.
-    extra_params = {"gpu_ids": gpu_ids} if model_version is ModelVersion.COPROG else {}
+    # GPU selection is only meaningful for the multi-model parallel trainers (COPROG and the
+    # co-training ensembles). The other train_model functions don't accept it, so forward it
+    # only for those to avoid a TypeError.
+    gpu_aware_versions = {
+        ModelVersion.COPROG,
+        ModelVersion.CO_TRAINING_ENSEMBLE,
+        ModelVersion.CO_TRAINING_ENSEMBLE_V2,
+    }
+    extra_params = {"gpu_ids": gpu_ids} if model_version in gpu_aware_versions else {}
 
     try:
         rmse, score = train_model(
@@ -123,6 +131,10 @@ def _get_train_model_method(model_version: ModelVersion) -> Callable:
             raise NotImplementedError("PYCLUS model training is not implemented yet")
         case ModelVersion.COPROG:
             return train_model_coprog
+        case ModelVersion.CO_TRAINING_ENSEMBLE:
+            return train_model_cotraining_ensemble
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
+            return train_model_cotraining_ensemble_v2
         case ModelVersion.CNN:
             return train_model_lightning
         case ModelVersion.TRANSFORMER_FEATURES:
@@ -148,6 +160,8 @@ def _parse_args() -> argparse.Namespace:
             "rsf",
             "pyclus",
             "coprog",
+            "co_training_ensemble",
+            "co_training_ensemble_v2",
             "cnn",
             "transformer_features",
             "transformer_time_sequence",
@@ -195,9 +209,9 @@ def _parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help=(
-            "GPU id(s) to train on (COPROG only). Omit to use a single GPU (auto). "
-            "Give one id (e.g. --gpu-ids 0) to pin to that GPU, or several "
-            "(e.g. --gpu-ids 0 1) to train the two COPROG models in parallel on separate GPUs."
+            "GPU id(s) to train on (COPROG and co-training ensembles only). Omit to use a "
+            "single GPU (auto). Give one id (e.g. --gpu-ids 0) to pin to that GPU, or several "
+            "(e.g. --gpu-ids 0 1) to train the models in parallel across those GPUs."
         ),
     )
 

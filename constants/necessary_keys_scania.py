@@ -35,6 +35,10 @@ NECESSARY_DATASET_RSF_KEYS = [
 
 NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
+# The co-training ensembles use the same windowed dataset as the supervised deep models.
+NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V2_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+
 NECESSARY_DATASET_PYCLUS_KEYS = NECESSARY_DATASET_RSF_KEYS
 
 NECESSARY_DATASET_TRANSFORMER_FEATURES_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
@@ -95,6 +99,17 @@ NECESSARY_COPROG_KEYS = [
     "second_model"
 ]
 
+# The co-training ensembles take a variable-length list of models; per-model architecture
+# params + per-model lr/max_epochs/patience/rul_target_standardization live inside each list
+# entry (validated in scania.utils.utils_cotraining_common.parse_models_config), so only the
+# list itself is required at the config-block level.
+NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
+    "models",
+]
+NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
+    "models",
+]
+
 NECESSARY_PYCLUS_KEYS = [
     "n_trees",
     "max_depth",
@@ -146,4 +161,23 @@ NECESSARY_TRAINING_COPROG_KEYS = [
     "coprog_iterations",
     "coprog_suspension_pool_size",
     "rul_target_standardization",
+]
+
+# Ensemble-level training params only. suspension_pool_size / add_ratio are fractions in
+# (0, 1] (CoTrainingEnsemble semantics), unlike COPROG's integer pool count.
+NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_KEYS = [
+    "iterations",
+    "suspension_pool_size",
+    "add_ratio",
+    "is_fine_tuning_during_finding_best_suspension_data",
+    "is_fine_tuning_for_last_step",
+    "fine_tune_lr_factor",
+    "fine_tune_max_epochs",
+]
+
+NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
+    "iterations",
+    "suspension_pool_size",
+    "add_ratio",
+    "confidence",
 ]
