@@ -1,5 +1,6 @@
 import copy
 import csv
+import gc
 import os
 import warnings
 from collections import OrderedDict
@@ -38,6 +39,7 @@ class CoTrainingEnsemble:
             verbose: int = 0,
             fine_tune_lr_factor: float = 0.1,
             forgetting_warning_tolerance: float = 0.0,
+            inference_batch_size: int | None = None,
     ):
         """
         :param models: list[nn.Module]
@@ -54,6 +56,12 @@ class CoTrainingEnsemble:
             Relative tolerance (e.g. ``0.05`` = 5%) allowed for the validation MSE
             to increase after a fine-tuning call before a forgetting warning is
             raised. ``0.0`` (default) warns on any increase.
+        :param inference_batch_size: int | None
+            If set, ``_predict`` runs forward passes in chunks of this many samples instead of
+            feeding the whole tensor to the model at once. This caps peak (host/GPU) memory to
+            ``O(batch)`` during candidate scoring and per-stage metrics, keeping the run within a
+            small (e.g. Colab T4, 12.7 GB RAM) budget. ``None`` keeps the legacy single-shot
+            behavior. Numerically identical either way.
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
@@ -76,6 +84,7 @@ class CoTrainingEnsemble:
         self.verbose = verbose
         self.fine_tune_lr_factor = fine_tune_lr_factor
         self.forgetting_warning_tolerance = forgetting_warning_tolerance
+        self._inference_batch_size = inference_batch_size
 
         # Builder-style config (set through setup_training_builder), the style required for
         # multi-GPU parallel training. Mirrors models.Coprog.
@@ -616,6 +625,12 @@ class CoTrainingEnsemble:
                     weight_mode=weight_mode,
                     metrics_file=metrics_file,
                 )
+
+            # Drop this iteration's scoring structures (all_preds holds a full window tensor
+            # per pooled unit per model) before the next iteration allocates its own, so peak
+            # RAM does not accumulate across iterations.
+            del all_preds, selected_per_model
+            gc.collect()
 
         if metrics_enabled:
             self._log_stage_metrics(
@@ -1522,13 +1537,20 @@ class CoTrainingEnsemble:
             The predicted output.
         """
         model.eval()
+        device = next(model.parameters()).device
 
         with torch.no_grad():
-            x = x.to(next(model.parameters()).device)
+            if self._inference_batch_size is None:
+                return model(x.to(device))
 
-            predictions = model(x)
-
-        return predictions
+            # Chunk the forward pass so peak activation memory is O(batch) rather than
+            # O(len(x)). Each chunk's output is moved back to the input's device before
+            # concatenation so the result matches the single-shot path exactly.
+            outputs = []
+            for start in range(0, len(x), self._inference_batch_size):
+                chunk = x[start:start + self._inference_batch_size].to(device)
+                outputs.append(model(chunk).to(x.device))
+            return torch.cat(outputs, dim=0)
 
     def _confidence_measure(
             self,

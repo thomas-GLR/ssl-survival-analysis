@@ -51,6 +51,7 @@ def train_model(
     suspension_pool_size: float,
     add_ratio: float,
     confidence: float,
+    inference_batch_size: int | None = None,
     # Others
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
@@ -73,6 +74,9 @@ def train_model(
         add_ratio: Fraction in ``(0, 1]`` of the pool to add per iteration.
         confidence: Confidence level in ``(0, 1)`` for the ``crepes`` conformal intervals used
             to rank censored units.
+        inference_batch_size: If set, chunk every ``_predict`` forward pass into batches of this
+            size so peak (host) memory during conformal scoring / metrics stays ``O(batch)``.
+            Needed to fit small budgets (e.g. Colab T4). ``None`` keeps single-shot inference.
         gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
             more → parallel training across those GPUs.
         datetime_for_folders: Timestamp used to name the output folders.
@@ -144,6 +148,7 @@ def train_model(
         "suspension_pool_size": suspension_pool_size,
         "add_ratio": add_ratio,
         "confidence": confidence,
+        "inference_batch_size": inference_batch_size,
         "lr": meta["lr"],
         "max_epochs": meta["max_epochs"],
         "patiences": meta["patiences"],
@@ -162,6 +167,7 @@ def train_model(
         models=nn_modules,
         verbose=1,
         confidence=confidence,
+        inference_batch_size=inference_batch_size,
     )
 
     print(f"Co-training ensemble GPU selection: {gpu_ids if gpu_ids else 'auto (single GPU)'}")

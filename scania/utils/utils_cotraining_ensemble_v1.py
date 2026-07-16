@@ -54,6 +54,7 @@ def train_model(
     is_fine_tuning_for_last_step: bool,
     fine_tune_lr_factor: float,
     fine_tune_max_epochs: int,
+    inference_batch_size: int | None = None,
     # Others
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
@@ -81,6 +82,9 @@ def train_model(
         fine_tune_max_epochs: Max epochs per fine-tuning call (candidate search and last-step
             retrain). Capped well below the from-scratch ``max_epochs`` so the many fine-tune
             fits stay cheap; applied to every model.
+        inference_batch_size: If set, chunk every ``_predict`` forward pass into batches of this
+            size so peak (host) memory during candidate scoring / metrics stays ``O(batch)``.
+            Needed to fit small budgets (e.g. Colab T4). ``None`` keeps single-shot inference.
         gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
             more → parallel training across those GPUs.
         datetime_for_folders: Timestamp used to name the output folders.
@@ -155,6 +159,7 @@ def train_model(
         "is_fine_tuning_for_last_step": is_fine_tuning_for_last_step,
         "fine_tune_lr_factor": fine_tune_lr_factor,
         "fine_tune_max_epochs": fine_tune_max_epochs,
+        "inference_batch_size": inference_batch_size,
         "lr": meta["lr"],
         "max_epochs": meta["max_epochs"],
         "patiences": meta["patiences"],
@@ -173,6 +178,7 @@ def train_model(
         models=nn_modules,
         verbose=1,
         fine_tune_lr_factor=fine_tune_lr_factor,
+        inference_batch_size=inference_batch_size,
     )
 
     # gpu_ids (from --gpu-ids): None -> single GPU / auto; [g] -> pinned; [g0, g1, ...] ->

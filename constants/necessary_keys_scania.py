@@ -173,6 +173,8 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_KEYS = [
     "is_fine_tuning_for_last_step",
     "fine_tune_lr_factor",
     "fine_tune_max_epochs",
+    # Chunk size for inference forward passes; caps peak memory during scoring/metrics.
+    "inference_batch_size",
 ]
 
 NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
@@ -180,4 +182,6 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
     "suspension_pool_size",
     "add_ratio",
     "confidence",
+    # Chunk size for inference forward passes; caps peak memory during conformal scoring/metrics.
+    "inference_batch_size",
 ]
