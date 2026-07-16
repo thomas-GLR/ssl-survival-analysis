@@ -35,6 +35,7 @@ def train_model(
     dataset_root: str,
     sequence_len: int,
     seed: int | None,
+    data_fraction: float,
     val_rate: float,
     test_rate: float,
     stratify: bool,
@@ -114,6 +115,7 @@ def train_model(
     dataset_kwargs = {
         "data_dir": dataset_root,
         "seed": seed,
+        "data_fraction": data_fraction,
         "val_rate": val_rate,
         "test_rate": test_rate,
         "stratify": stratify,

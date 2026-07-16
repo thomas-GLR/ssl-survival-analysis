@@ -1,6 +1,7 @@
 {
   "dataset_params": {
     "seed": 42,
+    "data_fraction": 1.0,
     "val_rate": 0.2,
     "test_rate": 0.1,
     "stratify": true,

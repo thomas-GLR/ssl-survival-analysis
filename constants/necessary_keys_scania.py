@@ -5,6 +5,7 @@
 NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
     "sequence_len",
     "seed",
+    "data_fraction",
     "val_rate",
     "test_rate",
     "stratify",
@@ -23,6 +24,7 @@ NECESSARY_DATASET_SELF_SUPERVISED_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
 NECESSARY_DATASET_RSF_KEYS = [
     "seed",
+    "data_fraction",
     "val_rate",
     "test_rate",
     "stratify",

@@ -28,6 +28,7 @@ def train_model(
         cv_for_grid_search: int,
         # Dataset params
         seed: int,
+        data_fraction: float,
         val_rate: float,
         test_rate: float,
         stratify: bool,
@@ -57,6 +58,7 @@ def train_model(
         batch_size=None,
         sequence_len=1,
         seed=seed,
+        data_fraction=data_fraction,
         val_rate=val_rate,
         test_rate=test_rate,
         stratify=stratify,
