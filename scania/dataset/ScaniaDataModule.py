@@ -11,6 +11,9 @@ Pipeline (see the project plan for the rationale):
     2. per-vehicle NaN fill (ffill then bfill) of the raw cumulative counters
     3. per-vehicle differencing counter -> per-step delta (first row = 0)
     4. merge time-to-event info, derive is_censored (in_study_repair == 0)
+    4b. optionally subsample a fraction of vehicles (data_fraction < 1.0),
+        stratified by is_censored so the censored/uncensored ratio is
+        preserved regardless of the `stratify` split setting
     5. split vehicles into train/val/test (all rows of a vehicle stay together)
     5b. truncate a random per-vehicle number of trailing readouts of
         uncensored (failure) vehicles in val/test only, so the RUL target
@@ -61,6 +64,7 @@ class ScaniaDataModule(LightningDataModule):
             batch_size: int | None,
             sequence_len: int,
             seed: int | None = None,
+            data_fraction: float = 1.0,
             val_rate: float = 0.2,
             test_rate: float = 0.1,
             stratify: bool = True,
@@ -79,6 +83,7 @@ class ScaniaDataModule(LightningDataModule):
             "val_rate/test_rate must be in [0, 1) and sum to < 1"
         assert counter_mode in ("delta", "cumulative", "both"), \
             f"Unsupported counter_mode: {counter_mode}"
+        assert 0 < data_fraction <= 1.0, "data_fraction must be in (0, 1]"
         assert histogram_mode in ("sum", "zhist"), \
             f"Unsupported histogram_mode: {histogram_mode}"
 
@@ -86,6 +91,7 @@ class ScaniaDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.sequence_len = sequence_len
         self.seed = seed
+        self.data_fraction = data_fraction
         self.val_rate = val_rate
         self.test_rate = test_rate
         self.stratify = stratify
@@ -219,6 +225,22 @@ class ScaniaDataModule(LightningDataModule):
 
         # Vehicle-level censoring status (constant within a vehicle).
         vehicule_status = readouts[[VEHICLE_ID, IS_CENSORED]].drop_duplicates(VEHICLE_ID)
+
+        # 4b. Optionally subsample a fraction of vehicles to shrink the dataset
+        #     (e.g. for faster iteration on limited compute). Always stratified
+        #     by is_censored -- independent of `self.stratify`, which only
+        #     controls the train/val/test split below -- so the censored/
+        #     uncensored ratio is preserved. Consumes rng draws before the
+        #     split permutations and _truncate_uncensored_tail below.
+        if self.data_fraction < 1.0:
+            kept_ids: set = set()
+            for _, group in vehicule_status.groupby(IS_CENSORED):
+                ids = rng.permutation(group[VEHICLE_ID].to_numpy())
+                n_keep = max(1, round(len(ids) * self.data_fraction))
+                kept_ids.update(ids[:n_keep].tolist())
+            readouts = readouts[readouts[VEHICLE_ID].isin(kept_ids)]
+            vehicule_status = vehicule_status[vehicule_status[VEHICLE_ID].isin(kept_ids)]
+
         if self.stratify:
             # Fixed group order (0 then 1) keeps the sequential RNG deterministic.
             strata = [group[VEHICLE_ID].to_numpy() for _, group in vehicule_status.groupby(IS_CENSORED)]
@@ -282,7 +304,8 @@ class ScaniaDataModule(LightningDataModule):
         ``sequence_len`` rows, drop a random number of trailing rows (drawn
         from ``rng``, so it is reproducible via ``self.seed`` without any new
         cache-config key -- ``rng`` is the same generator already used for the
-        train/val/test vehicle split). The vehicle keeps between
+        (optional) data_fraction subsampling and the train/val/test vehicle
+        split). The vehicle keeps between
         ``sequence_len`` and its original row count, so it still yields a
         full window afterward.
 
@@ -346,6 +369,7 @@ class ScaniaDataModule(LightningDataModule):
             "seed": self.seed,
             "sequence_len": self.sequence_len,
             "counter_mode": self.counter_mode,
+            "data_fraction": self.data_fraction,
             "include_histograms": self.include_histograms,
             "histogram_mode": self.histogram_mode,
         }
