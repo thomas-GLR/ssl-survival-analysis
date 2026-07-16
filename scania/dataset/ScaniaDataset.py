@@ -580,11 +580,14 @@ class ScaniaDataset(Dataset):
         df = self.df.sort_values([VEHICLE_ID, TIME_STEP]).reset_index(drop=True)
 
         vehicules_ids = df[VEHICLE_ID].to_numpy()
-        # Store the features flat and once, as float32 (the model consumes
-        # float32 anyway); this is the only large array kept in memory.
-        self._feat_flat = df[self.feature_cols].to_numpy(dtype=np.float32)
-        rul = df[RUL].to_numpy(dtype=np.float64)
-        rul_lower_bound = df[RUL_LOWER_BOUND].to_numpy(dtype=np.float64)
+        # float32 (not float64): every consumer casts these window arrays to torch .float()
+        # anyway, so the stored precision is identical downstream, while halving the resident
+        # window arrays (the all-strides censored array is the largest) and removing the
+        # float64->float32 conversion peak. Normalization runs on the float64 dataframe before
+        # this, so the z-scores themselves are unchanged.
+        features = df[self.feature_cols].to_numpy(dtype=np.float32)
+        rul = df[RUL].to_numpy(dtype=np.float32)
+        rul_lower_bound = df[RUL_LOWER_BOUND].to_numpy(dtype=np.float32)
         censored = df[IS_CENSORED].to_numpy()
         rows_number = len(df)
 

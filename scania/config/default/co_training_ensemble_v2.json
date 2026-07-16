@@ -73,6 +73,7 @@
     "iterations": 20,
     "suspension_pool_size": 0.1,
     "add_ratio": 0.05,
-    "confidence": 0.95
+    "confidence": 0.95,
+    "inference_batch_size": 1024
   }
 }

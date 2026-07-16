@@ -47,6 +47,7 @@
     "is_fine_tuning_during_finding_best_suspension_data": false,
     "is_fine_tuning_for_last_step": false,
     "fine_tune_lr_factor": 0.1,
-    "fine_tune_max_epochs": 1
+    "fine_tune_max_epochs": 1,
+    "inference_batch_size": 64
   }
 }

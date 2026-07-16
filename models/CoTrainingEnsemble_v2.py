@@ -1,10 +1,12 @@
 import copy
 import csv
+import gc
 import os
 from collections import OrderedDict
 from typing import Callable
 
 import numpy as np
+import sklearn
 import torch
 import torch.nn as nn
 from enum import Enum
@@ -42,6 +44,7 @@ class CoTrainingEnsemble_v2:
             weights: list[float] | None = None,
             verbose: int = 0,
             confidence: float = 0.95,
+            inference_batch_size: int | None = None,
     ):
         """
         :param models: list[nn.Module]
@@ -54,6 +57,12 @@ class CoTrainingEnsemble_v2:
             Confidence level in ``(0, 1)`` passed to ``crepes`` when building the conformal
             prediction intervals used to score censored units. Higher confidence produces
             wider intervals. Defaults to ``0.95``.
+        :param inference_batch_size: int | None
+            If set, ``_predict`` runs forward passes in chunks of this many samples instead of
+            feeding the whole tensor to the model at once. This caps peak (host/GPU) memory to
+            ``O(batch)`` during the conformal scoring and per-stage metrics, which is what keeps
+            the run within a small (e.g. Colab T4, 12.7 GB RAM) budget. ``None`` keeps the
+            legacy single-shot behavior. Numerically identical either way.
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
@@ -70,6 +79,7 @@ class CoTrainingEnsemble_v2:
         self.weights = weights
         self.verbose = verbose
         self.confidence = confidence
+        self._inference_batch_size = inference_batch_size
 
         # Builder-style config (set through setup_training_builder), required for multi-GPU
         # parallel training. Mirrors models.Coprog / CoTrainingEnsemble (v1).
@@ -464,6 +474,12 @@ class CoTrainingEnsemble_v2:
                     self._log(2, f"[CoTraining]   Model {j} candidate ranking (most confident first): "
                                  f"{ranking}")
 
+                # Release this model's calibrated regressor (and the fitted kNN
+                # DifficultyEstimator + train-set copies it holds) before the next model
+                # builds its own, so at most one is alive at a time instead of all four.
+                del wrapper, xus, lu_ps, last_windows, last_windows_tensor, intervals, candidates
+                gc.collect()
+
             # Widths are not comparable across models (each model calibrates its own conformal
             # regressor on its own accumulated data), so normalize each model's widths by its
             # own median before comparing them across models.
@@ -519,6 +535,12 @@ class CoTrainingEnsemble_v2:
                     weight_mode=weight_mode,
                     metrics_file=metrics_file,
                 )
+
+            # Drop this iteration's scoring structures (each holds full per-unit tensors)
+            # before the next iteration allocates its own, so peak RAM does not accumulate
+            # across the 20 iterations.
+            del all_preds, norm_width, selected_per_model
+            gc.collect()
 
         if metrics_enabled:
             self._log_stage_metrics(
@@ -1094,6 +1116,12 @@ class CoTrainingEnsemble_v2:
         """
         seq_len, n_features = train_x.shape[1], train_x.shape[2]
 
+        # Bound the transient (n_query x n_train) distance buffer sklearn allocates inside the
+        # kNN DifficultyEstimator (used by crepes for calibrate / predict_int). The default
+        # working_memory (1024 MB) can spike host RAM well past a small budget; 128 MB only
+        # changes the internal chunk size, not the numerical result.
+        sklearn.set_config(working_memory=128)
+
         de = DifficultyEstimator()
         de.fit(X=self._flatten(train_x))
 
@@ -1127,13 +1155,20 @@ class CoTrainingEnsemble_v2:
             The predicted output.
         """
         model.eval()
+        device = next(model.parameters()).device
 
         with torch.no_grad():
-            x = x.to(next(model.parameters()).device)
+            if self._inference_batch_size is None:
+                return model(x.to(device))
 
-            predictions = model(x)
-
-        return predictions
+            # Chunk the forward pass so peak activation memory is O(batch) rather than
+            # O(len(x)). Each chunk's output is moved back to the input's device before
+            # concatenation so the result matches the single-shot path exactly.
+            outputs = []
+            for start in range(0, len(x), self._inference_batch_size):
+                chunk = x[start:start + self._inference_batch_size].to(device)
+                outputs.append(model(chunk).to(x.device))
+            return torch.cat(outputs, dim=0)
 
     def _normalized_widths(
             self,
