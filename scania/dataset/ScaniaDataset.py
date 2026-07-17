@@ -586,6 +586,7 @@ class ScaniaDataset(Dataset):
         # float64->float32 conversion peak. Normalization runs on the float64 dataframe before
         # this, so the z-scores themselves are unchanged.
         features = df[self.feature_cols].to_numpy(dtype=np.float32)
+        self._feat_flat = features
         rul = df[RUL].to_numpy(dtype=np.float32)
         rul_lower_bound = df[RUL_LOWER_BOUND].to_numpy(dtype=np.float32)
         censored = df[IS_CENSORED].to_numpy()
