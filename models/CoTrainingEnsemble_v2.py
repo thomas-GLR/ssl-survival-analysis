@@ -21,6 +21,7 @@ from models.cotraining_gpu_pool import (
     CoTrainingGpuPool,
     ConformalScoreSpec,
     _TorchRegressorAdapter,
+    _monotone_project,
     run_conformal_score_job,
 )
 
@@ -45,6 +46,8 @@ class CoTrainingEnsemble_v2:
             verbose: int = 0,
             confidence: float = 0.95,
             inference_batch_size: int | None = None,
+            use_monotone_projection: bool = False,
+            monotone_residual_weight: float = 1.0,
     ):
         """
         :param models: list[nn.Module]
@@ -63,12 +66,28 @@ class CoTrainingEnsemble_v2:
             ``O(batch)`` during the conformal scoring and per-stage metrics, which is what keeps
             the run within a small (e.g. Colab T4, 12.7 GB RAM) budget. ``None`` keeps the
             legacy single-shot behavior. Numerically identical either way.
+        :param use_monotone_projection: bool
+            When ``True``, each censored unit's per-window pseudo-labels are projected onto the
+            closest non-increasing sequence (isotonic regression), optionally clipped up to the
+            per-window survival lower bound (when ``suspension_lower_bounds`` is passed to
+            ``train``). The projected sequence becomes the injected pseudo-label, and the
+            projection *residual* (how far the raw predictions had to move to become physically
+            valid) is blended into the unit-selection score. ``False`` (default) keeps the
+            legacy width-only scoring and injects the raw predictions unchanged.
+        :param monotone_residual_weight: float
+            Weight ``lambda`` of the residual term in the blended selection score
+            ``width_norm + lambda * residual_norm`` (both terms per-model normalized). Only used
+            when ``use_monotone_projection`` is ``True``; ``0`` disables the residual term (the
+            projection still cleans the injected labels but selection stays width-only).
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
 
         if not (0 < confidence < 1):
             raise ValueError("confidence must be in the range (0, 1).")
+
+        if monotone_residual_weight < 0:
+            raise ValueError("monotone_residual_weight must be non-negative.")
 
         self.models = models
         self.number_of_models = len(self.models)
@@ -80,6 +99,8 @@ class CoTrainingEnsemble_v2:
         self.verbose = verbose
         self.confidence = confidence
         self._inference_batch_size = inference_batch_size
+        self.use_monotone_projection = use_monotone_projection
+        self.monotone_residual_weight = monotone_residual_weight
 
         # Builder-style config (set through setup_training_builder), required for multi-GPU
         # parallel training. Mirrors models.Coprog / CoTrainingEnsemble (v1).
@@ -234,6 +255,7 @@ class CoTrainingEnsemble_v2:
             add_ratio: float,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
+            suspension_lower_bounds: torch.Tensor | None = None,
             test_data: torch.Tensor | None = None,
             test_label: torch.Tensor | None = None,
             score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
@@ -281,6 +303,13 @@ class CoTrainingEnsemble_v2:
                 conformal regressors.
             val_label:
                 Validation labels associated with ``val_data``. Required.
+            suspension_lower_bounds:
+                Optional per-window survival lower bounds for the censored data, row-aligned
+                with ``suspension_data`` / ``suspension_ids`` (shape ``(N,)`` or ``(N, 1)``;
+                value = time observed until end of study, so a model's predicted RUL should be
+                ``>=`` it). Only used when ``use_monotone_projection`` is enabled, to clip each
+                unit's projected pseudo-labels up to its bound. If projection is enabled but
+                this is ``None``, projection falls back to monotonicity only (no censoring clip).
             test_data:
                 Optional test features used only for the per-stage metrics logged to
                 ``metrics_file``. Never used for training or model selection.
@@ -341,6 +370,14 @@ class CoTrainingEnsemble_v2:
         if not (0 < add_ratio <= 1):
             raise ValueError("add_ratio must be a fraction in (0, 1].")
 
+        # Monotone projection (v2 opt-in): warn once if the censoring clip was requested but no
+        # lower bounds are available, then fall back to monotonicity-only. ``clip_bounds`` gates
+        # the per-unit lower-bound slicing in both the sequential and parallel scoring paths.
+        if self.use_monotone_projection and suspension_lower_bounds is None:
+            self._log(1, "[CoTraining] use_monotone_projection is on but suspension_lower_bounds "
+                         "was not provided; using monotone projection without the censoring clip.")
+        clip_bounds = self.use_monotone_projection and suspension_lower_bounds is not None
+
         total_suspension_units = len(torch.unique(suspension_ids))
         # Candidate pool size (a count of units) derived once from the fraction; the actual pool is
         # re-sampled at random from the remaining units every iteration.
@@ -362,6 +399,7 @@ class CoTrainingEnsemble_v2:
                 failure_label=failure_label,
                 suspension_data=suspension_data,
                 suspension_ids=suspension_ids,
+                suspension_lower_bounds=suspension_lower_bounds if clip_bounds else None,
                 iterations=iterations,
                 pool_size=pool_size,
                 add_ratio=add_ratio,
@@ -436,7 +474,9 @@ class CoTrainingEnsemble_v2:
             # Results are stored in an OrderedDict (sorted by width ascending) so the most
             # confident candidate is always first.
             # Structure:
-            #   all_preds[j] = OrderedDict{ unit_id_int -> (unit_id, xu, lu_p, lower, upper, width) }
+            #   all_preds[j] = OrderedDict{ unit_id_int -> (unit_id, xu, lu_p, lower, upper, width, residual, raw_lu_p) }
+            # (lu_p is the monotone-projected label when projection is on; residual is 0.0 otherwise;
+            #  raw_lu_p is the pre-projection prediction, kept for effectiveness logging)
             all_preds: dict[int, OrderedDict] = {}
 
             for j in range(self.number_of_models):
@@ -448,17 +488,20 @@ class CoTrainingEnsemble_v2:
 
                 wrapper = self._build_calibrated_regressor(hj, xj, val_data, val_label)
 
-                # Collect each unit's rows, its per-window pseudo-labels and its last window
-                # (the interval of that final window is the unit's "range").
+                # Collect each unit's rows, its per-window pseudo-labels, its (optional) per-window
+                # lower bounds and its last window (the interval of that final window is the unit's
+                # "range").
                 unit_ids = list(pool_ids)
                 xus: list[torch.Tensor] = []
                 lu_ps: list[torch.Tensor] = []
+                lb_us: list[torch.Tensor | None] = []
                 last_windows: list[torch.Tensor] = []
                 for unit_id in unit_ids:
                     mask = (suspension_ids == unit_id)
                     xu = suspension_data[mask]
                     xus.append(xu)
                     lu_ps.append(self._predict(hj, xu))
+                    lb_us.append(suspension_lower_bounds[mask] if clip_bounds else None)
                     last_windows.append(xu[-1])
 
                 # One batched conformal call for all units' last windows -> (U, 2) [lower, upper].
@@ -471,30 +514,44 @@ class CoTrainingEnsemble_v2:
                     lower = float(intervals[idx, 0])
                     upper = float(intervals[idx, 1])
                     width = upper - lower
-                    candidates.append((unit_id, xus[idx], lu_ps[idx], lower, upper, width))
+                    # When enabled, project this unit's per-window predictions onto a
+                    # non-increasing (and lower-bound-clipped) sequence; the projected labels
+                    # replace the raw predictions and the residual feeds the selection score.
+                    if self.use_monotone_projection:
+                        label, residual = _monotone_project(lu_ps[idx], lb_us[idx])
+                    else:
+                        label, residual = lu_ps[idx], 0.0
+                    # Keep the raw (pre-projection) prediction as the last field for logging.
+                    candidates.append(
+                        (unit_id, xus[idx], label, lower, upper, width, residual, lu_ps[idx]))
 
                 # Smaller width = more confident, so sort ascending (best candidate first).
                 candidates.sort(key=lambda e: e[5])
                 all_preds[j] = OrderedDict(
-                    (uid.item(), (uid, xu, lu_p, lower, upper, width))
-                    for uid, xu, lu_p, lower, upper, width in candidates
+                    (uid.item(), (uid, xu, lu_p, lower, upper, width, residual, raw_lu_p))
+                    for uid, xu, lu_p, lower, upper, width, residual, raw_lu_p in candidates
                 )
 
                 if self.verbose >= 2:
-                    ranking = [(uid.item(), round(w, 4)) for uid, _, _, _, _, w in candidates]
+                    ranking = [(uid.item(), round(w, 4)) for uid, _, _, _, _, w, _, _ in candidates]
                     self._log(2, f"[CoTraining]   Model {j} candidate ranking (most confident first): "
                                  f"{ranking}")
 
                 # Release this model's calibrated regressor (and the fitted kNN
                 # DifficultyEstimator + train-set copies it holds) before the next model
                 # builds its own, so at most one is alive at a time instead of all four.
-                del wrapper, xus, lu_ps, last_windows, last_windows_tensor, intervals, candidates
+                del wrapper, xus, lu_ps, lb_us, last_windows, last_windows_tensor, intervals, candidates
                 gc.collect()
 
             # Widths are not comparable across models (each model calibrates its own conformal
             # regressor on its own accumulated data), so normalize each model's widths by its
-            # own median before comparing them across models.
-            norm_width = self._normalized_widths(all_preds)
+            # own median before comparing them across models. When monotone projection is on,
+            # the median-normalized projection residual is blended in (see _selection_scores).
+            norm_width = self._selection_scores(all_preds)
+
+            # Log each model's full unit ranking (most confident first) so it can be checked
+            # whether the models agree on which censored units are confident or not.
+            self._log_confidence_ranking(all_preds, norm_width)
 
             # Phase 2 — hand out a shared per-iteration budget of censored units round-robin
             # over the models, rotating the starting model each iteration so no single model
@@ -503,12 +560,16 @@ class CoTrainingEnsemble_v2:
             # map so it cannot be reused this iteration. A model may receive more than one unit.
             n_add = max(1, round(add_ratio * len(pool_ids)))
             start = i % self.number_of_models
+            # Pure width term (over the full pool) passed only so selection logging can show the
+            # score before vs after the residual blend; None when projection is off.
+            width_norm = self._normalized_widths(all_preds) if self.use_monotone_projection else None
             selected_per_model, remaining_suspension_ids, added = self._assign_units_round_robin(
                 all_preds=all_preds,
                 norm_width=norm_width,
                 n_add=n_add,
                 start=start,
                 remaining_suspension_ids=remaining_suspension_ids,
+                width_norm=width_norm,
             )
 
             if added == 0:
@@ -583,6 +644,7 @@ class CoTrainingEnsemble_v2:
             n_add: int,
             start: int,
             remaining_suspension_ids: torch.Tensor,
+            width_norm: dict[int, dict[int, float]] | None = None,
     ) -> tuple[list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]], torch.Tensor, int]:
         """Phase 2: hand out a shared per-iteration budget of censored units round-robin.
 
@@ -608,6 +670,7 @@ class CoTrainingEnsemble_v2:
                 all_preds=all_preds,
                 norm_width=norm_width,
                 model_index_to_exclude=k,
+                width_norm=width_norm,
             )
 
             if picked is None:
@@ -726,6 +789,7 @@ class CoTrainingEnsemble_v2:
             add_ratio: float,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
+            suspension_lower_bounds: torch.Tensor | None,
             metrics_enabled: bool,
             test_data: torch.Tensor | None,
             test_label: torch.Tensor | None,
@@ -745,6 +809,8 @@ class CoTrainingEnsemble_v2:
         """
         n = self.number_of_models
         val_cpu = self._cpu_pair(val_data, val_label)
+        # Whether the censoring clip is active this run (projection on AND bounds available).
+        clip_bounds = self.use_monotone_projection and suspension_lower_bounds is not None
 
         pool = CoTrainingGpuPool(self.gpu_ids)
         pool.start()
@@ -789,9 +855,13 @@ class CoTrainingEnsemble_v2:
 
                 # --- Phase 1: per-model conformal scoring in parallel (one job per model). ---
                 unit_ids_int = [int(uid.item()) for uid in pool_ids]
-                # xu is identical across models for a given unit, so build the per-unit
-                # sequences once and reuse them for every model's job and for all_preds.
+                # xu (and its lower bounds) are identical across models for a given unit, so
+                # build the per-unit sequences once and reuse them for every model's job.
                 unit_x = [suspension_data[suspension_ids == uid].detach().cpu() for uid in pool_ids]
+                unit_lb = (
+                    [suspension_lower_bounds[suspension_ids == uid].detach().cpu() for uid in pool_ids]
+                    if clip_bounds else None
+                )
 
                 score_jobs: dict[int, int] = {}
                 for j in range(n):
@@ -808,6 +878,8 @@ class CoTrainingEnsemble_v2:
                         unit_ids=unit_ids_int,
                         unit_x=unit_x,
                         confidence=self.confidence,
+                        use_monotone_projection=self.use_monotone_projection,
+                        unit_lower_bounds=unit_lb,
                         accelerator="gpu",
                         devices=1,
                     )
@@ -815,37 +887,45 @@ class CoTrainingEnsemble_v2:
 
                 results = pool.gather(list(score_jobs.values()))
 
-                # Rebuild all_preds[j] from each worker's per-unit (unit_id, lu_p, lower, upper, width).
+                # Rebuild all_preds[j] from each worker's per-unit
+                # (unit_id, label, lower, upper, width, residual, raw_label).
                 all_preds: dict[int, OrderedDict] = {}
                 xu_by_unit = {uid: xu for uid, xu in zip(unit_ids_int, unit_x)}
                 for j in range(n):
                     units = results[score_jobs[j]]["units"]
                     candidates = []
-                    for unit_id_int, lu_p, lower, upper, width in units:
+                    for unit_id_int, lu_p, lower, upper, width, residual, raw_lu_p in units:
                         uid_tensor = torch.tensor(unit_id_int)
                         candidates.append(
-                            (uid_tensor, xu_by_unit[unit_id_int], lu_p, lower, upper, width))
+                            (uid_tensor, xu_by_unit[unit_id_int], lu_p, lower, upper, width, residual, raw_lu_p))
                     candidates.sort(key=lambda e: e[5])
                     all_preds[j] = OrderedDict(
-                        (uid.item(), (uid, xu, lu_p, lower, upper, width))
-                        for uid, xu, lu_p, lower, upper, width in candidates
+                        (uid.item(), (uid, xu, lu_p, lower, upper, width, residual, raw_lu_p))
+                        for uid, xu, lu_p, lower, upper, width, residual, raw_lu_p in candidates
                     )
                     if self.verbose >= 2:
-                        ranking = [(uid.item(), round(w, 4)) for uid, _, _, _, _, w in candidates]
+                        ranking = [(uid.item(), round(w, 4)) for uid, _, _, _, _, w, _, _ in candidates]
                         self._log(2, f"[CoTraining]   Model {j} candidate ranking "
                                      f"(most confident first): {ranking}")
 
-                norm_width = self._normalized_widths(all_preds)
+                norm_width = self._selection_scores(all_preds)
+
+                # Log each model's full unit ranking (most confident first) so it can be checked
+                # whether the models agree on which censored units are confident or not.
+                self._log_confidence_ranking(all_preds, norm_width)
 
                 # --- Phase 2: selection (main process). ---
                 n_add = max(1, round(add_ratio * len(pool_ids)))
                 start = i % n
+                # Pure width term (full pool) for selection logging only; None when projection off.
+                width_norm = self._normalized_widths(all_preds) if self.use_monotone_projection else None
                 selected_per_model, remaining_suspension_ids, added = self._assign_units_round_robin(
                     all_preds=all_preds,
                     norm_width=norm_width,
                     n_add=n_add,
                     start=start,
                     remaining_suspension_ids=remaining_suspension_ids,
+                    width_norm=width_norm,
                 )
 
                 if added == 0:
@@ -1209,7 +1289,7 @@ class CoTrainingEnsemble_v2:
 
         Args:
             all_preds: mapping from model index j to an OrderedDict of
-                ``{unit_id_int: (unit_id, xu, lu_p, lower, upper, width)}`` (index 5 = raw width).
+                ``{unit_id_int: (unit_id, xu, lu_p, lower, upper, width, residual, raw_lu_p)}`` (index 5 = raw width).
 
         Returns:
             ``{model_index: {unit_id_int: normalized_width}}``. If a model's widths are degenerate
@@ -1229,11 +1309,95 @@ class CoTrainingEnsemble_v2:
                 norm[j] = {uid: tup[5] / median for uid, tup in preds.items()}
         return norm
 
+    def _log_confidence_ranking(
+            self,
+            all_preds: dict[int, OrderedDict],
+            selection_scores: dict[int, dict[int, float]],
+    ) -> None:
+        r"""Log, one line per model, every pooled censored unit sorted from most to least confident.
+
+        This makes it easy to eyeball whether the models agree on which units are confident
+        (they rank the same unit ids first) or disagree. The score shown is the per-model
+        selection score (:meth:`_selection_scores`): the median-normalized conformal interval
+        width — blended with the median-normalized projection residual when monotone projection
+        is on — so scores are on a comparable, model-relative scale. Smaller = more confident, so
+        units are listed in ascending score order (most confident first).
+
+        Format per model::
+
+            [CoTraining]   Model j confidence ranking (most confident first): [uid: score, uid: score, ...]
+
+        Args:
+            all_preds: mapping from model index j to its OrderedDict of scored units (only its
+                keys are used, to know which units the model scored this iteration).
+            selection_scores: mapping from model index j to ``{unit_id_int: selection_score}``
+                (the output of :meth:`_selection_scores`).
+        """
+        self._log(1, "[CoTraining]   Confidence ranking per model (unit_id: selection_score, "
+                     "smaller = more confident):")
+        for j in range(self.number_of_models):
+            scores_j = selection_scores.get(j, {})
+            ranked = sorted(scores_j.items(), key=lambda kv: kv[1])
+            formatted = ", ".join(f"{uid}: {score:.4f}" for uid, score in ranked)
+            self._log(1, f"[CoTraining]   Model {j} confidence ranking (most confident first): "
+                         f"[{formatted}]")
+
+    def _selection_scores(
+            self,
+            all_preds: dict[int, OrderedDict],
+    ) -> dict[int, dict[int, float]]:
+        r"""Per-model, per-unit score used to rank censored units (smaller = better).
+
+        The base score is the median-normalized conformal interval width
+        (:meth:`_normalized_widths`). When monotone projection is enabled *and*
+        ``monotone_residual_weight`` is non-zero, the median-normalized projection residual is
+        blended in:
+
+            ``score = width_norm + monotone_residual_weight * residual_norm``
+
+        so a unit is preferred only when a model is both *narrow* (a confident interval) and
+        *physically self-consistent* (a small residual — its raw predictions barely had to move
+        to become monotone / above the survival bound). With projection off (or the weight 0)
+        this returns exactly :meth:`_normalized_widths` — the legacy width-only behavior.
+
+        Each model's residuals are normalized by that model's own **mean** (not the median used
+        for widths). Residuals are a mostly-zero-with-spikes quantity: censored pools often have
+        >= half their units at residual 0 (single-window or already-valid units), so a median
+        would be 0 and — with the zero fallback below — the residual term would be silently
+        dropped exactly when some units *do* violate. The mean is > 0 whenever *any* unit has a
+        violation, so the residual signal is applied consistently. The fallback when the mean is
+        ``<= 0`` (all residuals zero) is **0.0**, not the ``1.0`` used for widths: with no
+        violations the residual term must contribute nothing rather than a phantom typical value.
+
+        Args:
+            all_preds: mapping from model index j to an OrderedDict of
+                ``{unit_id_int: (uid, xu, lu_p, lower, upper, width, residual)}``.
+
+        Returns:
+            ``{model_index: {unit_id_int: score}}``.
+        """
+        width_norm = self._normalized_widths(all_preds)
+        if not self.use_monotone_projection or self.monotone_residual_weight == 0:
+            return width_norm
+
+        scores: dict[int, dict[int, float]] = {}
+        for j, preds in all_preds.items():
+            scores[j] = {}
+            if not preds:
+                continue
+            residual_values = [tup[6] for tup in preds.values()]
+            mean = float(np.mean(residual_values))
+            for uid, tup in preds.items():
+                res_norm = tup[6] / mean if mean > 0 else 0.0
+                scores[j][uid] = width_norm[j][uid] + self.monotone_residual_weight * res_norm
+        return scores
+
     def _voting_censored_data_selection(
             self,
             all_preds: dict[int, OrderedDict],
             norm_width: dict[int, dict[int, float]],
             model_index_to_exclude: int,
+            width_norm: dict[int, dict[int, float]] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         r"""Select the censored unit the *other* models are most confident about.
 
@@ -1252,9 +1416,9 @@ class CoTrainingEnsemble_v2:
 
         Args:
             all_preds: mapping from model index j to an OrderedDict of
-                ``{unit_id_int: (unit_id_tensor, xu, lu_p, lower, upper, width)}``.
-            norm_width: mapping from model index j to ``{unit_id_int: normalized_width}``, as
-                returned by ``_normalized_widths``.
+                ``{unit_id_int: (unit_id_tensor, xu, lu_p, lower, upper, width, residual, raw_lu_p)}``.
+            norm_width: mapping from model index j to ``{unit_id_int: score}`` (the blended
+                selection score from ``_selection_scores`` — width-only when projection is off).
             model_index_to_exclude: index k of the model being updated — its own
                 predictions are excluded from both the width average and the pseudo-label.
 
@@ -1297,23 +1461,45 @@ class CoTrainingEnsemble_v2:
         ]
         most_confident_j = min(contributors, key=lambda j: norm_width[j][best_unit_id_int])
 
-        unit_id, xu, lu_p, _, _, _ = all_preds[most_confident_j][best_unit_id_int]
+        unit_id, xu, lu_p, _, _, _, _, _ = all_preds[most_confident_j][best_unit_id_int]
 
         self._log(1, f"[CoTraining]     Unit {best_unit_id_int} selected for model {model_index_to_exclude} | "
                      f"best avg normalized width = {best_avg_width:.4f}")
 
         num_sequences = lu_p.view(-1).shape[0]
 
-        self._log(1, f"[CoTraining]     Unit {best_unit_id_int} width per peer model (raw / normalized):")
-        for j in contributors:
-            self._log(1, f"[CoTraining]     \tmodel {j}: {all_preds[j][best_unit_id_int][5]:.4f} / "
-                         f"{norm_width[j][best_unit_id_int]:.4f}")
+        if self.use_monotone_projection:
+            # Effectiveness tracking for the monotone-projection score. ``norm_width`` here is the
+            # *blended* score (width_norm + lambda*residual_norm); ``width_norm`` is the pure width
+            # term, computed once over the full pool and passed in (recomputing here would use the
+            # already-popped ``all_preds`` and shift the medians, so "before"/"after" must not be
+            # derived from the shrunk map).
+            width_before = width_norm if width_norm is not None else self._normalized_widths(all_preds)
+            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} normalized width before -> after "
+                         f"residual blend (residual) per peer model:")
+            for j in contributors:
+                self._log(1, f"[CoTraining]     \tmodel {j}: {width_before[j][best_unit_id_int]:.4f} -> "
+                             f"{norm_width[j][best_unit_id_int]:.4f} "
+                             f"(residual {all_preds[j][best_unit_id_int][6]:.4f})")
 
-        self._log(1, f"[CoTraining]     Unit {best_unit_id_int} RUL predicted by all peer models "
-                     f"({num_sequences} sequences for this unit):")
-        for j in contributors:
-            self._log(1, f"[CoTraining]     \tmodel {j}: "
-                         f"{[round(v, 4) for v in all_preds[j][best_unit_id_int][2].view(-1).tolist()]}")
+            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} RUL before / after monotone projection "
+                         f"per peer model ({num_sequences} sequences for this unit):")
+            for j in contributors:
+                raw_list = [round(v, 4) for v in all_preds[j][best_unit_id_int][7].view(-1).tolist()]
+                proj_list = [round(v, 4) for v in all_preds[j][best_unit_id_int][2].view(-1).tolist()]
+                self._log(1, f"[CoTraining]     \tmodel {j} before: {raw_list}")
+                self._log(1, f"[CoTraining]     \tmodel {j} after : {proj_list}")
+        else:
+            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} width per peer model (raw / normalized):")
+            for j in contributors:
+                self._log(1, f"[CoTraining]     \tmodel {j}: {all_preds[j][best_unit_id_int][5]:.4f} / "
+                             f"{norm_width[j][best_unit_id_int]:.4f}")
+
+            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} RUL predicted by all peer models "
+                         f"({num_sequences} sequences for this unit):")
+            for j in contributors:
+                self._log(1, f"[CoTraining]     \tmodel {j}: "
+                             f"{[round(v, 4) for v in all_preds[j][best_unit_id_int][2].view(-1).tolist()]}")
 
         self._log(1, f"[CoTraining]     Unit {best_unit_id_int} chosen RUL ({num_sequences} sequences for this "
                      f"unit, from most confident peer, model {most_confident_j}): "

@@ -103,6 +103,56 @@ def _flatten(x: torch.Tensor) -> np.ndarray:
     return x.reshape(x.shape[0], -1).detach().cpu().numpy().astype(np.float32)
 
 
+def _monotone_project(
+        preds: torch.Tensor,
+        lower_bounds: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, float]:
+    """Project a censored unit's per-window RUL predictions onto the closest valid sequence.
+
+    A censored unit's windows are ordered oldest -> newest, so its true RUL must be
+    **non-increasing** along that axis. The raw per-window predictions (independent forward
+    passes) are noisy and need not respect that, so they are projected onto the closest
+    non-increasing sequence via isotonic regression (``increasing=False``). When
+    ``lower_bounds`` is given (the per-window survival lower bound of a censored unit, itself
+    non-increasing), the projection is additionally clipped up to it — the ``max`` of two
+    non-increasing sequences stays non-increasing, so monotonicity is preserved and the clip
+    distance is folded into the residual.
+
+    The **residual** (mean absolute deviation between the raw and projected sequence) measures
+    how far the model's predictions had to move to become physically valid: a small residual
+    means the model was already self-consistent on that unit (a strong trust signal), a large
+    one means it was incoherent. It is defined here once and reused by both v2 scoring paths
+    (sequential in ``CoTrainingEnsemble_v2`` and this module's :func:`run_conformal_score_job`)
+    so the two can never drift.
+
+    :param preds: Raw per-window predictions, shape ``(m,)`` or ``(m, 1)``.
+    :param lower_bounds: Optional per-window lower bounds, broadcastable to ``(m,)``; projected
+        values below their bound are raised to it. ``None`` skips the censoring clip.
+    :return: ``(projected, residual)`` where ``projected`` has the same shape/dtype as
+        ``preds`` and ``residual`` is ``mean(|raw - projected|)`` (``0.0`` when nothing moved).
+    """
+    from sklearn.isotonic import IsotonicRegression
+
+    r = preds.detach().cpu().reshape(-1).numpy().astype(np.float64)
+    m = r.shape[0]
+
+    # A single window is trivially "monotone" (nothing to order), but a lower-bound clip can
+    # still apply, so only the isotonic step is skipped for m == 1.
+    if m == 1:
+        proj = r.copy()
+    else:
+        proj = IsotonicRegression(increasing=False, out_of_bounds="clip").fit_transform(
+            np.arange(m), r)
+
+    if lower_bounds is not None:
+        lb = lower_bounds.detach().cpu().reshape(-1).numpy().astype(np.float64)
+        proj = np.maximum(proj, lb)
+
+    residual = float(np.mean(np.abs(r - proj)))
+    projected = torch.from_numpy(proj).to(dtype=preds.dtype).reshape(preds.shape)
+    return projected, residual
+
+
 def _reshape_pseudo_labels(reference_y: torch.Tensor, pseudo_labels: torch.Tensor) -> torch.Tensor:
     """Reshape ``pseudo_labels`` to match the target layout of ``reference_y``.
 
@@ -220,6 +270,13 @@ class ConformalScoreSpec:
     :param unit_ids: The pooled censored unit ids (ints), aligned with ``unit_x``.
     :param unit_x: Per-unit censored sequences (list of CPU tensors), one per ``unit_ids``.
     :param confidence: Confidence level in ``(0, 1)`` passed to ``predict_int``.
+    :param use_monotone_projection: When ``True``, each unit's per-window pseudo-labels are
+        projected onto the closest non-increasing (and, if ``unit_lower_bounds`` is given,
+        lower-bound-clipped) sequence via :func:`_monotone_project`; the projected labels are
+        returned instead of the raw predictions and a per-unit residual is returned too.
+    :param unit_lower_bounds: Optional per-unit survival lower bounds (list of CPU tensors,
+        one per ``unit_ids``, aligned row-for-row with each ``unit_x`` entry). Used for the
+        censoring clip when ``use_monotone_projection`` is set; ``None`` skips the clip.
     :param accelerator: ``Trainer``-style accelerator for placing the model (``"gpu"`` in workers).
     :param devices: Device selector (``1`` / ``[gpu_id]`` / ``None``); only ``"cuda"`` vs
         ``"cpu"`` placement is used here.
@@ -233,6 +290,8 @@ class ConformalScoreSpec:
     unit_ids: list[int]
     unit_x: list[torch.Tensor]
     confidence: float
+    use_monotone_projection: bool = False
+    unit_lower_bounds: list[torch.Tensor] | None = None
     accelerator: str = "auto"
     devices: Any = None
 
@@ -353,14 +412,20 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
     Builds the trained model, wraps it in a normalized conformal regressor
     (``DifficultyEstimator`` fitted on ``spec.train_x``, calibrated on the validation set),
     predicts each unit's per-window pseudo-labels, and computes the prediction interval of
-    each unit's last window in one batched ``predict_int`` call.
+    each unit's last window in one batched ``predict_int`` call. When
+    ``spec.use_monotone_projection`` is set, each unit's pseudo-labels are additionally passed
+    through :func:`_monotone_project` (returning the projected labels and a residual).
 
     ``crepes`` is imported lazily so this module (and v1's parallel path, which never scores
     conformally) does not hard-depend on it.
 
     :param spec: The conformal-scoring job description.
-    :return: ``{"units": [(unit_id, lu_p_cpu_tensor, lower, upper, width), ...]}`` with one
-        entry per pooled unit (order matches ``spec.unit_ids``).
+    :return: ``{"units": [(unit_id, label, lower, upper, width, residual, raw_label), ...]}``
+        with one entry per pooled unit (order matches ``spec.unit_ids``). ``label`` is the raw
+        per-window pseudo-label, or its monotone projection when
+        ``spec.use_monotone_projection`` is set; ``raw_label`` is always the pre-projection
+        prediction (equal to ``label`` when projection is off), kept for effectiveness logging;
+        ``residual`` is ``0.0`` when projection is off.
     """
     from crepes import WrapRegressor
     from crepes.extras import DifficultyEstimator
@@ -393,11 +458,19 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
     last_windows_tensor = torch.stack(last_windows, dim=0)
     intervals = wrapper.predict_int(_flatten(last_windows_tensor), confidence=spec.confidence)
 
-    units: list[tuple[int, torch.Tensor, float, float, float]] = []
+    units: list[tuple[int, torch.Tensor, float, float, float, float, torch.Tensor]] = []
     for idx, unit_id in enumerate(spec.unit_ids):
         lower = float(intervals[idx, 0])
         upper = float(intervals[idx, 1])
-        units.append((unit_id, lu_ps[idx], lower, upper, upper - lower))
+        lu_p = lu_ps[idx]
+        if spec.use_monotone_projection:
+            lb_u = spec.unit_lower_bounds[idx] if spec.unit_lower_bounds is not None else None
+            label, residual = _monotone_project(lu_p, lb_u)
+        else:
+            label, residual = lu_p, 0.0
+        # raw_label (lu_p) is kept alongside the (possibly projected) label so the selection
+        # step can log predictions before vs after projection.
+        units.append((unit_id, label, lower, upper, upper - lower, residual, lu_p))
     return {"units": units}
 
 
