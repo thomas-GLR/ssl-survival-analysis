@@ -53,13 +53,11 @@ def train_model(
     iterations: int,
     suspension_pool_size: float,
     add_ratio: float,
-    best_ratio: float,
     confidence: float,
     n_neighbors: int,
     fine_tune_lr_factor: float,
     fine_tune_max_epochs: int,
     fine_tune_patience: int,
-    confidence_tol: float = 0.01,
     model_pred_blend: float = 0.0,
     inference_batch_size: int | None = None,
     use_monotone_projection: bool = False,
@@ -83,23 +81,23 @@ def train_model(
         iterations: Number of co-training iterations.
         suspension_pool_size: Fraction in ``(0, 1]`` of censored units sampled as the pool each
             iteration.
-        add_ratio: Target fraction in ``(0, 1]`` of the pool to assign per iteration.
-        best_ratio: Eligibility cap in ``(0, 1]`` — only the top ``best_ratio`` fraction of the
-            pool (by confidence) is ever eligible to be pseudo-labelled.
+        add_ratio: Per-model top fraction in ``(0, 1]`` — each model selects its top ``add_ratio``
+            of the pool (by its own conformal width) per iteration; ownership follows from which
+            models selected each unit.
         confidence: Confidence level in ``(0, 1)`` defining the conformal percentile band
             (``a``/``c``/``b`` = the ``(1-confidence)/2`` / 50 / ``(1+confidence)/2`` percentiles).
         n_neighbors: Number of nearest labelled neighbours (latent space) for the k-NN estimator.
         fine_tune_lr_factor: Learning-rate multiplier for fine-tuning (warm start).
         fine_tune_max_epochs: Max epochs per fine-tuning call.
         fine_tune_patience: ``EarlyStopping`` patience per fine-tuning call.
-        confidence_tol: Tolerance on the normalized score for co-ownership.
         model_pred_blend: ``alpha`` in ``[0, 1]`` blending the model median ``c`` with the k-NN
             estimate (``0`` = pure k-NN clamped to the conformal band).
         inference_batch_size: If set, chunk every forward pass (prediction + embedding) into
             batches of this size to cap peak memory. ``None`` keeps single-shot inference.
         use_monotone_projection: When ``True``, the monotone-projection residual of each unit's
-            raw predictions is blended into the selection score (self-consistency signal). It does
-            not change the injected label.
+            raw predictions is blended into each model's own ranking score (a within-model
+            self-consistency signal used only to order that model's own units). It does not change
+            the injected label.
         monotone_residual_weight: Weight of the residual term (only used when
             ``use_monotone_projection`` is ``True``).
         gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
@@ -181,9 +179,7 @@ def train_model(
         "iterations": iterations,
         "suspension_pool_size": suspension_pool_size,
         "add_ratio": add_ratio,
-        "best_ratio": best_ratio,
         "confidence": confidence,
-        "confidence_tol": confidence_tol,
         "n_neighbors": n_neighbors,
         "model_pred_blend": model_pred_blend,
         "fine_tune_lr_factor": fine_tune_lr_factor,
@@ -213,8 +209,6 @@ def train_model(
         inference_batch_size=inference_batch_size,
         use_monotone_projection=use_monotone_projection,
         monotone_residual_weight=monotone_residual_weight,
-        confidence_tol=confidence_tol,
-        best_ratio=best_ratio,
         n_neighbors=n_neighbors,
         model_pred_blend=model_pred_blend,
         fine_tune_lr_factor=fine_tune_lr_factor,

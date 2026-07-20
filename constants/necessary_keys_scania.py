@@ -192,14 +192,13 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
     "inference_batch_size",
 ]
 
-# v3 adds the owner-based selection cap (best_ratio), the latent-kNN estimator (n_neighbors) and
-# the fine-tuning budget. confidence_tol / model_pred_blend / use_monotone_projection /
-# monotone_residual_weight default in the util signature, so they are optional in the config.
+# v3 uses per-model top-``add_ratio`` selection, the latent-kNN estimator (n_neighbors) and the
+# fine-tuning budget. model_pred_blend / use_monotone_projection / monotone_residual_weight default
+# in the util signature, so they are optional in the config.
 NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V3_KEYS = [
     "iterations",
     "suspension_pool_size",
     "add_ratio",
-    "best_ratio",
     "confidence",
     "n_neighbors",
     "fine_tune_lr_factor",

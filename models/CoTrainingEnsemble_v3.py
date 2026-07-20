@@ -26,12 +26,12 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
       with ``crepes`` ``cps=True`` so a unit's last window yields asymmetric percentiles
       ``a = p_low``, ``c = p50`` (median), ``b = p_high``. ``width = b - a`` drives selection;
       ``a, b, c`` bound / seed the label estimator.
-    * **Owner-based selection**: for each unit the most-confident model(s) (within
-      ``confidence_tol`` of the best normalized score) *own* it and decide its label; the label
-      is injected into the *other* models (co-training). If every model is equally confident the
-      unit carries no information asymmetry and is skipped. Two knobs bound how many units are
-      taken: ``add_ratio`` (target = top fraction of the pool) and ``best_ratio`` (hard
-      eligibility cap — only the top-confidence fraction is ever eligible).
+    * **Owner-based selection**: each model independently selects its own top ``add_ratio``
+      fraction of the pool, ranked by its *own* conformal interval width. Selection is purely
+      intra-model — a model is never compared to another — so no cross-model width normalization
+      is needed. A unit's *owners* are the models that selected it; the label is injected into the
+      *other* models (co-training). A unit selected by *every* model carries no information
+      asymmetry and is skipped; a unit selected by no model is ignored.
     * **Closed-form label estimator**: the owner's pseudo-label for the unit's last window is the
       distance-weighted k-NN of the labelled set's RULs in the model's latent space, clipped to
       the conformal band ``[a, b]`` (optionally blended with the model's median ``c`` via
@@ -55,8 +55,6 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             inference_batch_size: int | None = None,
             use_monotone_projection: bool = False,
             monotone_residual_weight: float = 1.0,
-            confidence_tol: float = 0.01,
-            best_ratio: float = 0.2,
             n_neighbors: int = 10,
             model_pred_blend: float = 0.0,
             fine_tune_lr_factor: float = 0.1,
@@ -76,12 +74,8 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             unit's raw per-window predictions is blended into the selection score (a
             self-consistency signal). It does **not** change the injected label (which comes from
             the k-NN estimator + backward extrapolation). ``False`` keeps width-only selection.
-        :param monotone_residual_weight: Weight of the residual term in the selection score (only
-            used when ``use_monotone_projection`` is ``True``).
-        :param confidence_tol: Tolerance on the normalized selection score for co-ownership: model
-            ``j`` co-owns a unit if ``score_j <= best_score + confidence_tol``.
-        :param best_ratio: Eligibility cap in ``(0, 1]`` — only the top ``best_ratio`` fraction of
-            the pool (by best-model confidence) is ever eligible to be pseudo-labelled.
+        :param monotone_residual_weight: Weight of the residual term in the per-model ranking score
+            (only used when ``use_monotone_projection`` is ``True``).
         :param n_neighbors: Number of nearest labelled neighbours (in latent space) used by the
             k-NN label estimator.
         :param model_pred_blend: ``alpha`` in ``[0, 1]`` blending the model's conformal median
@@ -102,10 +96,6 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             monotone_residual_weight=monotone_residual_weight,
         )
 
-        if not (0 < best_ratio <= 1):
-            raise ValueError("best_ratio must be a fraction in (0, 1].")
-        if confidence_tol < 0:
-            raise ValueError("confidence_tol must be non-negative.")
         if n_neighbors < 1:
             raise ValueError("n_neighbors must be >= 1.")
         if not (0 <= model_pred_blend <= 1):
@@ -113,8 +103,6 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         if fine_tune_lr_factor <= 0:
             raise ValueError("fine_tune_lr_factor must be positive.")
 
-        self.confidence_tol = confidence_tol
-        self.best_ratio = best_ratio
         self.n_neighbors = n_neighbors
         self.model_pred_blend = model_pred_blend
         self.fine_tune_lr_factor = fine_tune_lr_factor
@@ -260,46 +248,66 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
     # Phase 2 helpers — owner-based selection + label estimation
     # ------------------------------------------------------------------ #
 
+    def _ranking_scores(
+            self,
+            all_preds: dict[int, OrderedDict],
+    ) -> dict[int, dict[int, float]]:
+        """Per-model, per-unit score used to rank each model's own units (smaller = better).
+
+        Because selection is intra-model (each model ranks only against itself), no cross-model
+        normalization is needed. With monotone projection off, the raw conformal interval width
+        (tuple index 5) is used directly — dividing by a per-model constant would not change that
+        model's own ranking. With projection on (and a non-zero residual weight), the width and the
+        monotone residual live on different scales and must be combined, so the inherited
+        :meth:`CoTrainingEnsemble_v2._selection_scores` (per-model width + residual blend) is used;
+        that normalization is purely within a model, never a comparison between models.
+
+        :param all_preds: ``{model_index: OrderedDict{unit_id_int: tuple}}`` with width at tuple
+            index 5 and residual at index 6.
+        :return: ``{model_index: {unit_id_int: score}}`` (smaller = more confident).
+        """
+        if self.use_monotone_projection and self.monotone_residual_weight != 0:
+            return self._selection_scores(all_preds)
+        return {
+            j: {uid: tup[5] for uid, tup in preds.items()}
+            for j, preds in all_preds.items()
+        }
+
     def _select_owner_units(
             self,
             scores: dict[int, dict[int, float]],
             pool_uids: list[int],
-            n_target: int,
+            select_ratio: float,
     ) -> list[tuple[int, list[int], list[int]]]:
-        """Owner-based selection over one iteration's pool.
+        """Per-model top-fraction selection with set-membership ownership.
 
-        Units are ranked by their best (min-over-models) selection score; only the top
-        ``best_ratio`` fraction is eligible. Walking the eligible units in confidence order, a
-        unit's owners are the models within ``confidence_tol`` of its best score; if *every* model
-        is an owner the unit is skipped (no information asymmetry). Selection stops once
-        ``n_target`` units are assigned or the eligible set is exhausted.
+        Each model independently selects its own top ``select_ratio`` fraction of the pool, ranked
+        by its *own* score (smaller = more confident); this is a purely intra-model ranking, so no
+        cross-model comparison or normalization is involved. A unit's *owners* are the models that
+        selected it. A unit selected by *every* model is skipped (no information asymmetry to
+        teach); a unit selected by no model is ignored. Owners teach the label to the remaining
+        *receiver* models.
 
         :param scores: ``{model_index: {unit_id_int: score}}`` (smaller = more confident).
         :param pool_uids: The pooled unit ids (ints) available this iteration.
-        :param n_target: Target number of units to assign (``round(add_ratio * pool)``).
+        :param select_ratio: Fraction in ``(0, 1]`` each model selects from the pool
+            (``k = max(1, round(select_ratio * pool))``).
         :return: ``[(unit_id_int, owners, receivers), ...]``.
         """
         n_models = self.number_of_models
+        k = max(1, round(select_ratio * len(pool_uids)))
 
-        def best_score(uid: int) -> float:
-            vals = [scores[j][uid] for j in range(n_models) if uid in scores[j]]
-            return min(vals) if vals else float("inf")
-
-        ranked = sorted(pool_uids, key=best_score)
-        n_eligible = max(1, round(self.best_ratio * len(pool_uids)))
-        eligible = ranked[:n_eligible]
+        selected_sets: list[set[int]] = []
+        for j in range(n_models):
+            ranked_j = sorted(
+                (uid for uid in pool_uids if uid in scores[j]), key=lambda uid: scores[j][uid])
+            selected_sets.append(set(ranked_j[:k]))
 
         selected: list[tuple[int, list[int], list[int]]] = []
-        for uid in eligible:
-            if len(selected) >= n_target:
-                break
-            per_model = {j: scores[j][uid] for j in range(n_models) if uid in scores[j]}
-            if not per_model:
-                continue
-            best = min(per_model.values())
-            owners = [j for j, s in per_model.items() if s <= best + self.confidence_tol]
-            if len(owners) >= n_models:
-                # Every model is (equally) confident -> nothing to teach, skip.
+        for uid in pool_uids:
+            owners = [j for j in range(n_models) if uid in selected_sets[j]]
+            if not owners or len(owners) >= n_models:
+                # Selected by nobody (ignore) or by everybody (no asymmetry to teach) -> skip.
                 continue
             receivers = [j for j in range(n_models) if j not in owners]
             selected.append((uid, owners, receivers))
@@ -328,7 +336,6 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             uid: int,
             owners: list[int],
             all_preds: dict[int, OrderedDict],
-            scores: dict[int, dict[int, float]],
             z_cache: dict[int, tuple[torch.Tensor, torch.Tensor]],
             h: list[LightningModule],
     ) -> float:
@@ -337,11 +344,10 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         For each owner: embed the unit's last window, take the distance-weighted mean RUL of its
         ``n_neighbors`` nearest labelled neighbours in that model's latent space, optionally blend
         with the model's conformal median ``c`` (``model_pred_blend``), and clip to the conformal
-        band ``[a, b]``. Multiple owners are combined by a confidence-weighted average
-        (weight ``1/score``).
+        band ``[a, b]``. Multiple owners are combined by a simple (equal-weight) average — selection
+        no longer compares confidence across models, so there is no cross-model weight to apply.
         """
         labels: list[float] = []
-        weights: list[float] = []
         for j in owners:
             _, xu, _, a, b, _, _, c = all_preds[j][uid]
             z_u = self._embed(h[j], xu[-1:])  # (1, D)
@@ -354,9 +360,7 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             label_j = self.model_pred_blend * c + (1.0 - self.model_pred_blend) * rul_knn
             label_j = float(min(max(label_j, a), b))
             labels.append(label_j)
-            weights.append(1.0 / max(scores[j][uid], 1e-8))
-        total = sum(weights)
-        return sum(wt * lab for wt, lab in zip(weights, labels)) / total
+        return sum(labels) / len(labels)
 
     @staticmethod
     def _backward_extrapolate(
@@ -400,11 +404,10 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             [] for _ in range(n_models)
         ]
 
-        scores = self._selection_scores(all_preds)
+        scores = self._ranking_scores(all_preds)
         pool_uids = [int(u) for u in pool_ids]
-        n_target = max(1, round(add_ratio * len(pool_uids)))
 
-        selected = self._select_owner_units(scores, pool_uids, n_target)
+        selected = self._select_owner_units(scores, pool_uids, add_ratio)
         if not selected:
             return selected_per_model, remaining_suspension_ids, 0
 
@@ -413,12 +416,13 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             owner_set.update(owners)
         z_cache = self._compute_label_caches(h, models_datasets, owner_set)
 
-        self._log(1, f"[CoTraining]   Selecting up to {n_target} unit(s) "
-                     f"(eligible = top {self.best_ratio} of {len(pool_uids)} pooled).")
+        self._log(1, f"[CoTraining]   Each model selecting its top {add_ratio} of "
+                     f"{len(pool_uids)} pooled unit(s); {len(selected)} unit(s) have an owner "
+                     f"asymmetry (selected by some but not all models).")
 
         added = 0
         for uid, owners, receivers in selected:
-            label_last = self._estimate_label_last(uid, owners, all_preds, scores, z_cache, h)
+            label_last = self._estimate_label_last(uid, owners, all_preds, z_cache, h)
 
             uid_tensor, xu = all_preds[owners[0]][uid][0], all_preds[owners[0]][uid][1]
             unit_ts = (
@@ -540,7 +544,9 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             row-aligned with ``suspension_data`` / ``suspension_ids`` (shape ``(N,)`` or
             ``(N, 1)``). Used to backward-extrapolate each unit's last-window RUL to its earlier
             windows. If ``None``, unit-spaced window indices are used instead.
-        :param add_ratio: Target fraction in ``(0, 1]`` of the pool to assign per iteration.
+        :param add_ratio: Per-model top fraction in ``(0, 1]`` — each model selects its top
+            ``add_ratio`` of the pool by its own conformal width; ownership then follows from which
+            models selected each unit.
         """
         self._log_file_path = log_file
         self._check_if_training_is_possible()
@@ -581,7 +587,7 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                      f"failure samples: {len(failure_data)} | censored units: {total_suspension_units} | "
                      f"max iterations: {iterations} | confidence band: {self._percentile_band()} | "
                      f"pool fraction: {suspension_pool_size} (size: {pool_size}) | "
-                     f"add ratio: {add_ratio} | best ratio: {self.best_ratio} | "
+                     f"per-model select ratio: {add_ratio} | "
                      f"mode: {'parallel(' + str(self.gpu_ids) + ')' if self._parallel else 'sequential'}")
 
         if self._parallel:
