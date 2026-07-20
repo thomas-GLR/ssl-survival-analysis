@@ -165,6 +165,13 @@ class ScaniaDataModule(LightningDataModule):
         # 2. per-vehicle NaN fill of the raw cumulative counters and histograms
         readouts[raw_cols] = readouts.groupby(VEHICLE_ID)[raw_cols].ffill()
         readouts[raw_cols] = readouts.groupby(VEHICLE_ID)[raw_cols].bfill()
+        # Some vehicles never report a given column at any timestep (the whole
+        # vehicle-column is NaN, so ffill/bfill cannot fill it). This is common
+        # for the histogram bins (e.g. the 167_* group) and would otherwise leak
+        # NaN through the normalizers into the feature windows, making the
+        # training loss NaN. "No reading" means zero counts for both cumulative
+        # counters and histogram bins, so fill the residual with 0.
+        readouts[raw_cols] = readouts[raw_cols].fillna(0.0)
 
         # 3. build the feature representation according to counter_mode.
         #    The raw counters are cumulative; the *cumulative* level is the

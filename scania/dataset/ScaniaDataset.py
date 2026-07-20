@@ -30,7 +30,7 @@ Scania specifics vs C_MAPSS:
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader, TensorDataset
+from torch.utils.data import Dataset, DataLoader, Subset
 
 from constants.scania_component_x_columns import (
     VEHICLE_ID,
@@ -184,8 +184,18 @@ class ScaniaDataset(Dataset):
         self.return_id = return_id
         self.only_final = only_final
 
-        # Sequence arrays populated by _gen_sequence().
-        self.sequence_array: np.ndarray | None = None
+        # Lazy windowing state populated by _gen_sequence(). Instead of a dense
+        # (n_windows, seq_len, n_feat) array (which explodes to tens of GB once
+        # histograms push n_feat to ~105), we keep the flat per-row feature
+        # matrix once and the per-window start/length; each window is sliced (and
+        # edge-padded for short vehicles) on demand in _get_window/_build_windows.
+        self._feat_flat: np.ndarray | None = None   # (rows, n_feat) float32
+        self._win_start: np.ndarray | None = None   # (N,) int64
+        self._win_count: np.ndarray | None = None   # (N,) int32
+        self._n_windows: int = 0
+
+        # Small per-window metadata (no n_feat factor -> cheap, kept eager and
+        # bit-identical to the previous implementation).
         self.label_array: np.ndarray | None = None
         self.lower_bound_array: np.ndarray | None = None
         self.id_array: np.ndarray | None = None
@@ -199,7 +209,7 @@ class ScaniaDataset(Dataset):
         self._gen_sequence()
 
     def __len__(self) -> int:
-        return len(self.sequence_array)
+        return self._n_windows
 
     def __getitem__(self, i):
         """
@@ -208,7 +218,7 @@ class ScaniaDataset(Dataset):
             target:   FloatTensor (1,) last-step RUL, or (sequence_len,) if
                       return_sequence_label. NaN for censored windows.
         """
-        seq = torch.FloatTensor(self.sequence_array[i])
+        seq = torch.from_numpy(self._get_window(i))
         if self.return_sequence_label:
             target = torch.FloatTensor(self.label_array[i])
         else:
@@ -287,28 +297,34 @@ class ScaniaDataset(Dataset):
     # Sequence generation
     # ------------------------------------------------------------------ #
     def _gen_sequence(self) -> None:
-        """Build the sliding-window arrays.
+        """Compute the per-window index metadata (lazy windowing).
 
-        Vectorized: instead of filtering the dataframe per vehicle (an
-        O(vehicles x rows) rescan) and looping window-by-window, we sort once,
-        find contiguous per-vehicle group boundaries, and generate every
-        long-vehicle window in one shot with ``sliding_window_view`` masked so
-        no window spans two vehicles. Vehicles shorter than ``seq_len`` are
-        left-edge-padded in a small loop (there are few of them).
+        Instead of materializing a dense ``(n_windows, seq_len, n_feat)`` array
+        (which grows to tens of GB once histograms push ``n_feat`` to ~105), we
+        keep the flat, sorted feature matrix ``self._feat_flat`` once and, per
+        window, only its start row ``self._win_start`` and real length
+        ``self._win_count`` (``seq_len`` for long vehicles, the vehicle length
+        for short ones). Windows are sliced/edge-padded on demand in
+        ``_get_window`` / ``_build_windows``.
 
-        If ``self.only_final`` is set, the long-vehicle branch is
-        additionally filtered to keep, per vehicle, only the single window
-        ending at that vehicle's last row (short vehicles already yield
-        exactly one window each, so they need no extra handling).
+        The index math is identical to the previous eager implementation: sort
+        once, find contiguous per-vehicle boundaries, take every long-vehicle
+        stride whose first and last row share a vehicle, and give each short
+        vehicle a single left-edge-padded window. ``only_final`` still filters
+        the long branch to each vehicle's final window. The small metadata
+        arrays (``label_array`` / ``lower_bound_array`` / ``id_array`` /
+        ``is_censored_array``) are built eagerly, long-then-short, so they are
+        bit-identical to before and callers keep the same row order.
         """
-        n_feat = len(self.feature_cols)
         seq_len = self.sequence_len
 
         # Sort once so each vehicle's rows are contiguous and time-ordered.
         df = self.df.sort_values([VEHICLE_ID, TIME_STEP]).reset_index(drop=True)
 
         vehicules_ids = df[VEHICLE_ID].to_numpy()
-        features = df[self.feature_cols].to_numpy(dtype=np.float64)
+        # Store the features flat and once, as float32 (the model consumes
+        # float32 anyway); this is the only large array kept in memory.
+        self._feat_flat = df[self.feature_cols].to_numpy(dtype=np.float32)
         rul = df[RUL].to_numpy(dtype=np.float64)
         rul_lower_bound = df[RUL_LOWER_BOUND].to_numpy(dtype=np.float64)
         censored = df[IS_CENSORED].to_numpy()
@@ -318,13 +334,14 @@ class ScaniaDataset(Dataset):
         starts = np.concatenate(([0], np.flatnonzero(np.diff(vehicules_ids) != 0) + 1))
         counts = np.diff(np.concatenate((starts, [rows_number])))
 
-        seq_chunks: list[np.ndarray] = []
+        start_chunks: list[np.ndarray] = []
+        count_chunks: list[np.ndarray] = []
         label_chunks: list[np.ndarray] = []
         lb_chunks: list[np.ndarray] = []
         id_chunks: list[np.ndarray] = []
         cens_chunks: list[np.ndarray] = []
 
-        # --- Long vehicles (count >= seq_len): all windows at once ---------- #
+        # --- Long vehicles (count >= seq_len): all window starts at once ----- #
         if rows_number >= seq_len:
             sequence_group = np.arange(rows_number - seq_len + 1)
             last = sequence_group + seq_len - 1
@@ -346,10 +363,8 @@ class ScaniaDataset(Dataset):
                 last = last[final_mask]
 
             if len(sequence_group):
-                # sliding_window_view -> (num_positions, n_feat, seq_len); index
-                # the valid starts (single copy) then reorder to (M, seq_len, n_feat).
-                sw = np.lib.stride_tricks.sliding_window_view(features, seq_len, axis=0)
-                seq_chunks.append(sw[sequence_group].transpose(0, 2, 1))
+                start_chunks.append(sequence_group.astype(np.int64))
+                count_chunks.append(np.full(len(sequence_group), seq_len, dtype=np.int32))
 
                 if self.return_sequence_label:
                     rul_sw = np.lib.stride_tricks.sliding_window_view(rul, seq_len, axis=0)
@@ -362,26 +377,88 @@ class ScaniaDataset(Dataset):
                 cens_chunks.append(censored[sequence_group])
 
         # --- Short vehicles (count < seq_len): one edge-padded window each --- #
-        for start, count in zip(starts[counts < seq_len], counts[counts < seq_len]):
-            sl = slice(start, start + count)
-            pad = ((seq_len - count, 0), (0, 0))
-            seq_chunks.append(np.pad(features[sl], pad, "edge")[np.newaxis])
+        short_mask = counts < seq_len
+        short_starts = starts[short_mask]
+        short_counts = counts[short_mask]
+        if len(short_starts):
+            start_chunks.append(short_starts.astype(np.int64))
+            count_chunks.append(short_counts.astype(np.int32))
 
             if self.return_sequence_label:
-                label_chunks.append(np.pad(rul[sl], (seq_len - count, 0), "edge")[np.newaxis])
+                for start, count in zip(short_starts, short_counts):
+                    label_chunks.append(
+                        np.pad(rul[start: start + count], (seq_len - count, 0), "edge")[np.newaxis]
+                    )
             else:
-                label_chunks.append(rul[start + count - 1: start + count])
+                label_chunks.append(rul[short_starts + short_counts - 1])
 
-            lb_chunks.append(rul_lower_bound[start + count - 1: start + count])
-            id_chunks.append(vehicules_ids[start: start + 1])
-            cens_chunks.append(censored[start: start + 1])
+            lb_chunks.append(rul_lower_bound[short_starts + short_counts - 1])
+            id_chunks.append(vehicules_ids[short_starts])
+            cens_chunks.append(censored[short_starts])
 
-        self.sequence_array = np.concatenate(seq_chunks, axis=0)
+        self._win_start = np.concatenate(start_chunks, axis=0) if start_chunks else np.empty(0, np.int64)
+        self._win_count = np.concatenate(count_chunks, axis=0) if count_chunks else np.empty(0, np.int32)
+        self._n_windows = int(len(self._win_start))
         self.label_array = np.concatenate(label_chunks, axis=0)
         self.lower_bound_array = np.concatenate(lb_chunks, axis=0)
         self.id_array = np.concatenate(id_chunks, axis=0)
         # is_censored is constant within a vehicle.
         self.is_censored_array = np.concatenate(cens_chunks, axis=0).astype(int)
+
+    # ------------------------------------------------------------------ #
+    # On-demand window materialization
+    # ------------------------------------------------------------------ #
+    def _get_window(self, i: int) -> np.ndarray:
+        """Return window ``i`` as a ``(seq_len, n_feat)`` float32 array.
+
+        Long-vehicle windows are a contiguous slice of ``_feat_flat``; short
+        vehicles (fewer real rows than ``seq_len``) are left-edge-padded, exactly
+        reproducing the previous eager windowing.
+        """
+        start = int(self._win_start[i])
+        count = int(self._win_count[i])
+        block = self._feat_flat[start: start + count]
+        if count < self.sequence_len:
+            block = np.pad(block, ((self.sequence_len - count, 0), (0, 0)), "edge")
+        return block
+
+    def _build_windows(self, indices: np.ndarray) -> np.ndarray:
+        """Materialize a ``(len(indices), seq_len, n_feat)`` float32 array.
+
+        Used by the accessors that hand whole tensors to the co-training /
+        self-supervised paradigms. Long windows are filled from a
+        ``sliding_window_view`` in chunks so the transient copy stays small (it
+        does not double the output); short windows are filled individually.
+
+        :param indices: window indices to materialize (order preserved).
+        :return: dense windows for exactly those indices.
+        """
+        indices = np.asarray(indices, dtype=np.int64)
+        n = len(indices)
+        seq_len = self.sequence_len
+        n_feat = self._feat_flat.shape[1]
+        out = np.empty((n, seq_len, n_feat), dtype=np.float32)
+        if n == 0:
+            return out
+
+        counts = self._win_count[indices]
+        is_long = counts == seq_len
+        long_pos = np.flatnonzero(is_long)
+        short_pos = np.flatnonzero(~is_long)
+
+        if len(long_pos):
+            sw = np.lib.stride_tricks.sliding_window_view(self._feat_flat, seq_len, axis=0)
+            long_starts = self._win_start[indices[long_pos]]
+            chunk = 8192
+            for k in range(0, len(long_pos), chunk):
+                sl = slice(k, k + chunk)
+                # sw[start] -> (n_feat, seq_len); reorder to (seq_len, n_feat).
+                out[long_pos[sl]] = sw[long_starts[sl]].transpose(0, 2, 1)
+
+        for pos in short_pos:
+            out[pos] = self._get_window(int(indices[pos]))
+
+        return out
 
     # ------------------------------------------------------------------ #
     # Accessors used by the different training paradigms
@@ -393,19 +470,15 @@ class ScaniaDataset(Dataset):
             num_workers: int = 0,
             pin_memory: bool = False,
     ) -> DataLoader:
-        """Supervised path: DataLoader over uncensored windows only, yields (x, y)."""
-        mask_uncensored = self.is_censored_array == 0
+        """Supervised path: DataLoader over uncensored windows only, yields (x, y).
 
-        feat = self.sequence_array[mask_uncensored]
-        target = self.label_array[mask_uncensored]
-
-        features = torch.from_numpy(feat).float()
-
-        if not self.return_sequence_label:
-            target = target[:, np.newaxis]
-        targets = torch.from_numpy(target).float()
-
-        dataset = TensorDataset(features, targets)
+        Fully lazy: iterates a ``Subset`` of this dataset over the uncensored
+        window indices, so no dense window array is materialized (``__getitem__``
+        slices each window on demand). ``return_id`` is False on this path, so
+        each item is ``(sequence, target)`` -- the same batch contract as before.
+        """
+        uncensored_idx = np.flatnonzero(self.is_censored_array == 0)
+        dataset = Subset(self, uncensored_idx.tolist())
         return DataLoader(
             dataset,
             batch_size=batch_size,
@@ -420,17 +493,14 @@ class ScaniaDataset(Dataset):
             (features_uncensored, targets_uncensored, features_censored, ids_censored)
         ``ids_censored`` is the per-window vehicle id array Coprog groups on.
         """
-        mask_censored = self.is_censored_array == 1
-        mask_uncensored = ~mask_censored
+        uncensored_idx = np.flatnonzero(self.is_censored_array == 0)
+        censored_idx = np.flatnonzero(self.is_censored_array == 1)
 
-        feat_uncensored = self.sequence_array[mask_uncensored]
-        target_uncensored = self.label_array[mask_uncensored]
+        target_uncensored = self.label_array[uncensored_idx]
+        id_censored = self.id_array[censored_idx]
 
-        feat_censored = self.sequence_array[mask_censored]
-        id_censored = self.id_array[mask_censored]
-
-        features_uncensored = torch.from_numpy(feat_uncensored).float()
-        features_censored = torch.from_numpy(feat_censored).float()
+        features_uncensored = torch.from_numpy(self._build_windows(uncensored_idx))
+        features_censored = torch.from_numpy(self._build_windows(censored_idx))
         ids_censored = torch.from_numpy(id_censored).long()
 
         if not self.return_sequence_label:
@@ -441,7 +511,7 @@ class ScaniaDataset(Dataset):
 
     def get_features_targets(self) -> tuple[torch.Tensor, torch.Tensor]:
         """All windows and their labels (NaN targets for censored windows)."""
-        features = torch.from_numpy(self.sequence_array).float()
+        features = torch.from_numpy(self._build_windows(np.arange(self._n_windows)))
         targets = self.label_array
         if not self.return_sequence_label:
             targets = targets[:, np.newaxis]
@@ -454,11 +524,14 @@ class ScaniaDataset(Dataset):
         ``lower_bounds_censored`` (N, 1) = time observed until end of study; a
         model's predicted RUL for these windows should be >= this value.
         """
-        mask_censored = self.is_censored_array == 1
+        # Same censored-index order as get_censored_split_tensors so the returned
+        # lower bounds stay row-aligned with that method's censored features
+        # (relied on by CoTrainingEnsemble v2's monotone projection).
+        censored_idx = np.flatnonzero(self.is_censored_array == 1)
 
-        features_censored = torch.from_numpy(self.sequence_array[mask_censored]).float()
-        ids_censored = torch.from_numpy(self.id_array[mask_censored]).long()
-        lower_bounds = self.lower_bound_array[mask_censored][:, np.newaxis]
+        features_censored = torch.from_numpy(self._build_windows(censored_idx))
+        ids_censored = torch.from_numpy(self.id_array[censored_idx]).long()
+        lower_bounds = self.lower_bound_array[censored_idx][:, np.newaxis]
         lower_bounds_censored = torch.from_numpy(lower_bounds).float()
 
         return features_censored, ids_censored, lower_bounds_censored
