@@ -136,6 +136,52 @@ COUNTER_COLUMNS = [
     COLUMN_100_0,
 ]
 
+##################################################### Histogram feature groups #####################################################
+
+# Multi-bin histogram variables. Each key is a Scania feature id and the value is
+# the ordered list of its per-bin columns. These are cumulative per-bin counts
+# (a distribution), so they are normalized with a dedicated sum-based normalizer
+# (see ScaniaDataset.HistogramFeatureNormalizer), never z-scored or differenced.
+# Built from the name constants above so the raw strings live only in one place.
+HISTOGRAM_FEATURE_COLUMNS = {
+    "167": [
+        COLUMN_167_0, COLUMN_167_1, COLUMN_167_2, COLUMN_167_3, COLUMN_167_4,
+        COLUMN_167_5, COLUMN_167_6, COLUMN_167_7, COLUMN_167_8, COLUMN_167_9,
+    ],
+    "272": [
+        COLUMN_272_0, COLUMN_272_1, COLUMN_272_2, COLUMN_272_3, COLUMN_272_4,
+        COLUMN_272_5, COLUMN_272_6, COLUMN_272_7, COLUMN_272_8, COLUMN_272_9,
+    ],
+    "291": [
+        COLUMN_291_0, COLUMN_291_1, COLUMN_291_2, COLUMN_291_3, COLUMN_291_4,
+        COLUMN_291_5, COLUMN_291_6, COLUMN_291_7, COLUMN_291_8, COLUMN_291_9,
+        COLUMN_291_10,
+    ],
+    "158": [
+        COLUMN_158_0, COLUMN_158_1, COLUMN_158_2, COLUMN_158_3, COLUMN_158_4,
+        COLUMN_158_5, COLUMN_158_6, COLUMN_158_7, COLUMN_158_8, COLUMN_158_9,
+    ],
+    "459": [
+        COLUMN_459_0, COLUMN_459_1, COLUMN_459_2, COLUMN_459_3, COLUMN_459_4,
+        COLUMN_459_5, COLUMN_459_6, COLUMN_459_7, COLUMN_459_8, COLUMN_459_9,
+        COLUMN_459_10, COLUMN_459_11, COLUMN_459_12, COLUMN_459_13, COLUMN_459_14,
+        COLUMN_459_15, COLUMN_459_16, COLUMN_459_17, COLUMN_459_18, COLUMN_459_19,
+    ],
+    "397": [
+        COLUMN_397_0, COLUMN_397_1, COLUMN_397_2, COLUMN_397_3, COLUMN_397_4,
+        COLUMN_397_5, COLUMN_397_6, COLUMN_397_7, COLUMN_397_8, COLUMN_397_9,
+        COLUMN_397_10, COLUMN_397_11, COLUMN_397_12, COLUMN_397_13, COLUMN_397_14,
+        COLUMN_397_15, COLUMN_397_16, COLUMN_397_17, COLUMN_397_18, COLUMN_397_19,
+        COLUMN_397_20, COLUMN_397_21, COLUMN_397_22, COLUMN_397_23, COLUMN_397_24,
+        COLUMN_397_25, COLUMN_397_26, COLUMN_397_27, COLUMN_397_28, COLUMN_397_29,
+        COLUMN_397_30, COLUMN_397_31, COLUMN_397_32, COLUMN_397_33, COLUMN_397_34,
+        COLUMN_397_35,
+    ],
+}
+
+# Flat list of every histogram bin column, in feature-group order.
+HISTOGRAM_COLUMNS = [column for columns in HISTOGRAM_FEATURE_COLUMNS.values() for column in columns]
+
 ##################################################### train_tte.csv #####################################################
 
 LENGTH_OF_STUDY_TIME_STEP = "length_of_study_time_step"

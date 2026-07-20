@@ -45,6 +45,65 @@ RUL = "rul"
 RUL_LOWER_BOUND = "rul_lower_bound"
 
 
+class HistogramFeatureNormalizer:
+    """Sum-based normalizer for Scania histogram variables.
+
+    Histogram variables are cumulative per-bin counts (a distribution over bins).
+    Z-scoring them per bin would destroy the distribution shape, so instead each
+    feature group is divided by the average per-row total of that group: bins are
+    turned into fractions of the group's typical total. Fitting computes one
+    scalar per feature group on the training split; the same scalars are reused
+    on val/test to avoid leakage.
+
+    The feature groups are derived from the column names by splitting on the last
+    ``_`` (e.g. ``"397_35"`` belongs to group ``"397"``), matching the
+    ``"<feature_id>_<bin>"`` naming convention used across the codebase.
+    """
+
+    def __init__(self, histogram_cols: list[str]):
+        """
+        :param histogram_cols:
+            Flat list of histogram bin column names (e.g. ``"167_0"``,
+            ``"167_1"``, ...). Grouped internally by feature id.
+        """
+        self.histogram_features: dict[str, list[str]] = {}
+        for column in histogram_cols:
+            feature = column.rsplit("_", 1)[0]
+            self.histogram_features.setdefault(feature, []).append(column)
+        # Per-feature normalization scalar, populated by ``fit``.
+        self.normalization_params: dict[str, float] = {}
+
+    def fit(self, x: pd.DataFrame) -> "HistogramFeatureNormalizer":
+        """Compute, per feature group, the average per-row bin total (+ epsilon).
+
+        :param x: dataframe holding at least the histogram bin columns.
+        :return: self (fitted).
+        """
+        epsilon = 1e-6
+        for feature, columns in self.histogram_features.items():
+            # Average, over rows, of the total count across the group's bins.
+            feature_sum = float(x[columns].sum(axis=1).mean())
+            self.normalization_params[feature] = feature_sum + epsilon
+        return self
+
+    def transform(self, x: pd.DataFrame) -> pd.DataFrame:
+        """Divide each feature group's bin columns by its fitted scalar.
+
+        :param x: dataframe holding the histogram bin columns.
+        :return: a copy of ``x`` with the histogram columns normalized.
+        """
+        x_transformed = x.copy()
+        for feature, columns in self.histogram_features.items():
+            feature_sum = self.normalization_params[feature]
+            x_transformed[columns] = x[columns] / feature_sum
+        return x_transformed
+
+    def fit_transform(self, x: pd.DataFrame) -> pd.DataFrame:
+        """Fit on ``x`` then return the normalized ``x`` (train-split convenience)."""
+        self.fit(x)
+        return self.transform(x)
+
+
 class ScaniaDataset(Dataset):
     def __init__(
             self,
@@ -53,6 +112,8 @@ class ScaniaDataset(Dataset):
             feature_cols: list[str] | None = None,
             norm_type: str | None = None,
             norm_params: np.ndarray | None = None,
+            histogram_cols: list[str] | None = None,
+            hist_norm_params: dict[str, float] | None = None,
             return_sequence_label: bool = False,
             return_id: bool = False,
             only_final: bool = False,
@@ -71,10 +132,20 @@ class ScaniaDataset(Dataset):
         :param norm_type:
             ``'z-score'`` or ``None`` (no normalization).
         :param norm_params:
-            Pre-computed normalization params of shape ``(n_features, 2)`` =
-            ``[mean, std]``. If ``None`` and ``norm_type`` is set, they are
-            computed from this dataframe (use this only for the train split and
-            pass ``train.norm_params`` to val/test to avoid leakage).
+            Pre-computed z-score params of shape ``(n_zscore_features, 2)`` =
+            ``[mean, std]``, aligned to the non-histogram feature columns. If
+            ``None`` and ``norm_type`` is set, they are computed from this
+            dataframe (use this only for the train split and pass
+            ``train.norm_params`` to val/test to avoid leakage).
+        :param histogram_cols:
+            Subset of ``feature_cols`` holding histogram bin columns. These are
+            excluded from the z-score and normalized instead by
+            ``HistogramFeatureNormalizer`` (sum-based). Empty/None -> no
+            histogram features.
+        :param hist_norm_params:
+            Pre-computed histogram normalization scalars (``{feature_id: sum}``).
+            Same leakage contract as ``norm_params``: fit on train, reused for
+            val/test. If ``None`` and histograms are present, they are fit here.
         :param return_sequence_label:
             If True, ``__getitem__``/label array return the RUL for every step
             of the window instead of only the last step.
@@ -103,6 +174,12 @@ class ScaniaDataset(Dataset):
         self.feature_cols = list(feature_cols) if feature_cols else list(COUNTER_COLUMNS)
         self.norm_type = norm_type
         self.norm_params = norm_params
+        self.histogram_cols = list(histogram_cols) if histogram_cols else []
+        self.hist_norm_params = hist_norm_params
+        # Columns z-scored by norm_type: every feature column that is not a
+        # histogram bin (histograms get their own sum-based normalizer).
+        histogram_set = set(self.histogram_cols)
+        self._zscore_cols = [c for c in self.feature_cols if c not in histogram_set]
         self.return_sequence_label = return_sequence_label
         self.return_id = return_id
         self.only_final = only_final
@@ -162,24 +239,46 @@ class ScaniaDataset(Dataset):
         self.df = df
 
     # ------------------------------------------------------------------ #
-    # Normalization (z-score)
+    # Normalization (z-score for counters, sum-based for histograms)
     # ------------------------------------------------------------------ #
     def _normalization(self) -> None:
+        """Normalize the feature columns in place.
+
+        Counter (non-histogram) columns are z-scored; histogram columns are
+        normalized by ``HistogramFeatureNormalizer``. Both param sets are fit
+        here for the train split (``*_norm_params is None``) and reused as-is
+        when passed in for val/test.
+        """
         df = self.df
-        cols = self.feature_cols
-        df[cols] = df[cols].astype(np.float64)
 
-        if self.norm_params is None:
-            self.norm_params = self._gen_norm_params()
+        # --- z-score the counter columns --------------------------------- #
+        cols = self._zscore_cols
+        if cols:
+            df[cols] = df[cols].astype(np.float64)
 
-        mean = self.norm_params[:, 0]
-        std = self.norm_params[:, 1]
-        std_safe = np.where(std == 0, 1.0, std)
-        df[cols] = (df[cols].to_numpy() - mean) / std_safe
+            if self.norm_params is None:
+                self.norm_params = self._gen_norm_params()
+
+            mean = self.norm_params[:, 0]
+            std = self.norm_params[:, 1]
+            std_safe = np.where(std == 0, 1.0, std)
+            df[cols] = (df[cols].to_numpy() - mean) / std_safe
+
+        # --- sum-normalize the histogram columns ------------------------- #
+        if self.histogram_cols:
+            df[self.histogram_cols] = df[self.histogram_cols].astype(np.float64)
+            normalizer = HistogramFeatureNormalizer(self.histogram_cols)
+            if self.hist_norm_params is None:
+                normalizer.fit(df)
+                self.hist_norm_params = normalizer.normalization_params
+            else:
+                normalizer.normalization_params = self.hist_norm_params
+            df[self.histogram_cols] = normalizer.transform(df[self.histogram_cols])
+
         self.df = df
 
     def _gen_norm_params(self) -> np.ndarray:
-        vals = self.df[self.feature_cols].to_numpy(dtype=np.float64)
+        vals = self.df[self._zscore_cols].to_numpy(dtype=np.float64)
         mean = np.nanmean(vals, axis=0)
         std = np.nanstd(vals, axis=0)
         return np.stack((mean, std), axis=1)

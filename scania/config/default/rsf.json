@@ -6,7 +6,8 @@
     "stratify": true,
     "norm_type": "z-score",
     "return_sequence_label": false,
-    "counter_mode": "delta"
+    "counter_mode": "delta",
+    "include_histograms": false
   },
   "training_params": {},
   "model_params": {
