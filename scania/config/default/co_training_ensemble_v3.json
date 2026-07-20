@@ -1,0 +1,75 @@
+{
+  "dataset_params": {
+    "sequence_len": 32,
+    "seed": 42,
+    "data_fraction": 0.1,
+    "val_rate": 0.2,
+    "test_rate": 0.1,
+    "stratify": true,
+    "norm_type": "z-score",
+    "num_workers": 4,
+    "pin_memory": true,
+    "return_sequence_label": false,
+    "batch_size": 256,
+    "shuffle_loader": true,
+    "counter_mode": "both"
+  },
+  "model_params": {
+    "models": [
+      {
+        "cnn": {
+          "model_params": {},
+          "lr": 0.0004,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      },
+      {
+        "lstm": {
+          "model_params": {
+            "hidden_dim": 256,
+            "lstm_num_layers": 3,
+            "lstm_dropout": 0.3,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      },
+      {
+        "transformer_features": {
+          "model_params": {
+            "transformer_encoder_head_num": 8,
+            "transformer_num_layer": 2,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50,
+          "rul_target_standardization": true
+        }
+      }
+    ]
+  },
+  "training_params": {
+    "iterations": 20,
+    "suspension_pool_size": 0.1,
+    "add_ratio": 0.05,
+    "best_ratio": 0.3,
+    "confidence": 0.95,
+    "confidence_tol": 0.01,
+    "n_neighbors": 10,
+    "model_pred_blend": 0.0,
+    "fine_tune_lr_factor": 0.1,
+    "fine_tune_max_epochs": 50,
+    "fine_tune_patience": 10,
+    "inference_batch_size": 1024,
+    "use_monotone_projection": true,
+    "monotone_residual_weight": 1.0
+  }
+}

@@ -15,6 +15,7 @@ from scania.utils.utils_random_survival_forest import train_model as train_model
 from scania.utils.utils_coprog import train_model as train_model_coprog
 from scania.utils.utils_cotraining_ensemble_v1 import train_model as train_model_cotraining_ensemble
 from scania.utils.utils_cotraining_ensemble_v2 import train_model as train_model_cotraining_ensemble_v2
+from scania.utils.utils_cotraining_ensemble_v3 import train_model as train_model_cotraining_ensemble_v3
 
 __all__ = [
     "assert_data_is_valid",
@@ -31,5 +32,6 @@ __all__ = [
     "train_model_coprog",
     "train_model_cotraining_ensemble",
     "train_model_cotraining_ensemble_v2",
+    "train_model_cotraining_ensemble_v3",
     "generate_and_save_model_prediction",
 ]

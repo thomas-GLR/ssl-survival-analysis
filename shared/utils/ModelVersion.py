@@ -12,5 +12,6 @@ class ModelVersion(Enum):
     CNN = "cnn"
     CO_TRAINING_ENSEMBLE = "co_training_ensemble"
     CO_TRAINING_ENSEMBLE_V2 = "co_training_ensemble_v2"
+    CO_TRAINING_ENSEMBLE_V3 = "co_training_ensemble_v3"
     TRANSFORMER_FEATURES = "transformer_features"
     TRANSFORMER_TIME_SEQUENCE = "transformer_time_sequence"
