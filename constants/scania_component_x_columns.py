@@ -182,6 +182,13 @@ HISTOGRAM_FEATURE_COLUMNS = {
 # Flat list of every histogram bin column, in feature-group order.
 HISTOGRAM_COLUMNS = [column for columns in HISTOGRAM_FEATURE_COLUMNS.values() for column in columns]
 
+# Group-level ZHist distance features (one continuous feature per histogram
+# group). Used when histogram_mode == "zhist" in place of the raw per-bin
+# columns: each group is collapsed into a single signed chi2-distance-from-
+# population feature (see ScaniaDataset.ZHistFeatureNormalizer). Group order is
+# preserved so the feature ordering stays stable.
+ZHIST_FEATURE_COLUMNS = [f"zhist_{group}" for group in HISTOGRAM_FEATURE_COLUMNS]
+
 ##################################################### train_tte.csv #####################################################
 
 LENGTH_OF_STUDY_TIME_STEP = "length_of_study_time_step"

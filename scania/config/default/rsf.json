@@ -7,7 +7,8 @@
     "norm_type": "z-score",
     "return_sequence_label": false,
     "counter_mode": "delta",
-    "include_histograms": false
+    "include_histograms": false,
+    "histogram_mode": "sum"
   },
   "training_params": {},
   "model_params": {

@@ -36,6 +36,7 @@ def train_model(
         return_sequence_label: bool,
         counter_mode: str = "delta",
         include_histograms: bool = False,
+        histogram_mode: str = "sum",
         # Others params
         model_kwargs=None,
         variance_warning_threshold: float = 0.05,  # Threshold for stability warning
@@ -64,6 +65,7 @@ def train_model(
         return_sequence_label=return_sequence_label,
         counter_mode=counter_mode,
         include_histograms=include_histograms,
+        histogram_mode=histogram_mode,
     )
 
     # Transform the ScaniaDataModule into the scikit-survival format expected by RSF:

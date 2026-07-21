@@ -16,6 +16,7 @@ NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
     "shuffle_loader",
     "counter_mode",
     "include_histograms",
+    "histogram_mode",
 ]
 
 NECESSARY_DATASET_SELF_SUPERVISED_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
@@ -29,6 +30,7 @@ NECESSARY_DATASET_RSF_KEYS = [
     "return_sequence_label",
     "counter_mode",
     "include_histograms",
+    "histogram_mode",
 ]
 
 NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS

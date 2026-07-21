@@ -38,6 +38,7 @@ def train_model(
         batch_size: int,
         counter_mode: str,
         include_histograms: bool,
+        histogram_mode: str,
         # Training
         lr: float,
         patience: int,
@@ -86,6 +87,7 @@ def train_model(
         'sequence_len': sequence_len,
         'counter_mode': counter_mode,
         'include_histograms': include_histograms,
+        'histogram_mode': histogram_mode,
     }
 
     print("Creating data loader with the following parameters :")
@@ -107,6 +109,7 @@ def train_model(
         sequence_len=sequence_len,
         counter_mode=counter_mode,
         include_histograms=include_histograms,
+        histogram_mode=histogram_mode,
     )
 
     scania_data_module.setup()
