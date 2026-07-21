@@ -12,7 +12,8 @@
     "batch_size": 128,
     "shuffle_loader": true,
     "counter_mode": "cumulative",
-    "include_histograms": false
+    "include_histograms": false,
+    "histogram_mode": "sum"
   },
   "training_params": {
     "lr": 0.0002,

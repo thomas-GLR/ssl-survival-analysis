@@ -44,8 +44,9 @@ from constants.scania_component_x_columns import (
     IN_STUDY_REPAIR,
     COUNTER_COLUMNS,
     HISTOGRAM_COLUMNS,
+    ZHIST_FEATURE_COLUMNS,
 )
-from scania.dataset.ScaniaDataset import ScaniaDataset, IS_CENSORED
+from scania.dataset.ScaniaDataset import ScaniaDataset, ZHistFeatureNormalizer, IS_CENSORED
 
 READOUTS_FILE = "train_operational_readouts.csv"
 TTE_FILE = "train_tte.csv"
@@ -71,12 +72,15 @@ class ScaniaDataModule(LightningDataModule):
             return_sequence_label: bool = False,
             counter_mode: str = "cumulative",
             include_histograms: bool = False,
+            histogram_mode: str = "sum",
     ):
         super().__init__()
         assert 0 <= val_rate < 1 and 0 <= test_rate < 1 and (val_rate + test_rate) < 1, \
             "val_rate/test_rate must be in [0, 1) and sum to < 1"
         assert counter_mode in ("delta", "cumulative", "both"), \
             f"Unsupported counter_mode: {counter_mode}"
+        assert histogram_mode in ("sum", "zhist"), \
+            f"Unsupported histogram_mode: {histogram_mode}"
 
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -93,18 +97,29 @@ class ScaniaDataModule(LightningDataModule):
         self.return_sequence_label = return_sequence_label
         self.counter_mode = counter_mode
         self.include_histograms = include_histograms
+        self.histogram_mode = histogram_mode
 
         # Raw counter columns as they appear in the CSV (what we read/difference).
         self._base_counter_cols = list(COUNTER_COLUMNS)
-        # Histogram bin columns (a distribution per feature). Kept raw (never
-        # differenced by counter_mode) and normalized separately from counters
-        # by ScaniaDataset's HistogramFeatureNormalizer.
-        self._histogram_cols = list(HISTOGRAM_COLUMNS) if include_histograms else []
+        # Raw histogram bin columns to READ / NaN-fill from the CSV (a
+        # distribution per feature; never differenced by counter_mode).
+        self._raw_histogram_cols = list(HISTOGRAM_COLUMNS) if include_histograms else []
+        # Histogram FEATURE columns fed to the model. In "sum" mode these are the
+        # raw per-bin columns (sum-normalized by HistogramFeatureNormalizer); in
+        # "zhist" mode each group is collapsed to one continuous zhist_<group>
+        # feature (ZHistFeatureNormalizer), computed from the raw bins inside
+        # ScaniaDataset.
+        if not include_histograms:
+            self._histogram_cols = []
+        elif histogram_mode == "zhist":
+            self._histogram_cols = list(ZHIST_FEATURE_COLUMNS)
+        else:
+            self._histogram_cols = list(HISTOGRAM_COLUMNS)
         # Feature columns actually fed to the model. In "both" mode the per-step
         # deltas are appended as separate "<counter>_delta" columns, doubling the
         # counter feature count; "delta"/"cumulative" keep the base columns (same
-        # names, different values). Histogram columns, if enabled, are appended
-        # last so feature ordering stays stable.
+        # names, different values). Histogram feature columns, if enabled, are
+        # appended last so feature ordering stays stable.
         if counter_mode == "both":
             counter_feature_cols = self._base_counter_cols + [f"{c}_delta" for c in self._base_counter_cols]
         else:
@@ -116,6 +131,7 @@ class ScaniaDataModule(LightningDataModule):
         self.test_set: ScaniaDataset | None = None
         self.norm_params: np.ndarray | None = None
         self.hist_norm_params: dict[str, float] | None = None
+        self.zhist_norm_params: dict | None = None
 
     @property
     def feature_num(self) -> int:
@@ -141,6 +157,8 @@ class ScaniaDataModule(LightningDataModule):
             "sequence_len": self.sequence_len,
             "feature_cols": self.feature_cols,
             "histogram_cols": self._histogram_cols,
+            "histogram_mode": self.histogram_mode,
+            "raw_histogram_cols": self._raw_histogram_cols,
             "return_sequence_label": self.return_sequence_label,
             "seed": self.seed,
         }
@@ -152,7 +170,7 @@ class ScaniaDataModule(LightningDataModule):
         # "both" mode's "_delta" feature columns are derived below, they do not
         # exist in the CSV.
         base_cols = self._base_counter_cols
-        raw_cols = base_cols + self._histogram_cols
+        raw_cols = base_cols + self._raw_histogram_cols
         usecols = [VEHICLE_ID, TIME_STEP] + raw_cols
         readouts = pd.read_csv(os.path.join(self.data_dir, READOUTS_FILE), usecols=usecols)
         tte = pd.read_csv(
@@ -234,13 +252,17 @@ class ScaniaDataModule(LightningDataModule):
         #    Test additionally uses only_final=True (only the last window per
         #    vehicle kept), mirroring CMAPSS's use_only_final_on_test.
         self.train_set = ScaniaDataset(train_df, norm_type=self.norm_type, norm_params=None,
-                                       hist_norm_params=None, **self._dataset_kwargs())
+                                       hist_norm_params=None, zhist_norm_params=None,
+                                       **self._dataset_kwargs())
         self.norm_params = self.train_set.norm_params
         self.hist_norm_params = self.train_set.hist_norm_params
+        self.zhist_norm_params = self.train_set.zhist_norm_params
         self.val_set = ScaniaDataset(val_df, norm_type=self.norm_type, norm_params=self.norm_params,
-                                     hist_norm_params=self.hist_norm_params, **self._dataset_kwargs())
+                                     hist_norm_params=self.hist_norm_params,
+                                     zhist_norm_params=self.zhist_norm_params, **self._dataset_kwargs())
         self.test_set = ScaniaDataset(test_df, norm_type=self.norm_type, norm_params=self.norm_params,
-                                      hist_norm_params=self.hist_norm_params, only_final=True,
+                                      hist_norm_params=self.hist_norm_params,
+                                      zhist_norm_params=self.zhist_norm_params, only_final=True,
                                       **self._dataset_kwargs())
 
         print(f"[Scania] Preprocessing done in {time.time() - start:.1f}s | "
@@ -325,6 +347,7 @@ class ScaniaDataModule(LightningDataModule):
             "sequence_len": self.sequence_len,
             "counter_mode": self.counter_mode,
             "include_histograms": self.include_histograms,
+            "histogram_mode": self.histogram_mode,
         }
 
     def _cache_columns(self) -> list[str]:
@@ -366,6 +389,10 @@ class ScaniaDataModule(LightningDataModule):
             "config": self._cache_config(),
             "norm_params": self.norm_params.tolist() if self.norm_params is not None else None,
             "hist_norm_params": self.hist_norm_params,
+            "zhist_norm_params": (
+                ZHistFeatureNormalizer.params_to_json(self.zhist_norm_params)
+                if self.zhist_norm_params is not None else None
+            ),
             "feature_cols": self.feature_cols,
             "window_counts": sizes,
             "vehicle_counts": vehicle_counts,
@@ -381,6 +408,8 @@ class ScaniaDataModule(LightningDataModule):
         if manifest.get("norm_params") is not None:
             self.norm_params = np.asarray(manifest["norm_params"], dtype=np.float64)
         self.hist_norm_params = manifest.get("hist_norm_params")
+        if manifest.get("zhist_norm_params") is not None:
+            self.zhist_norm_params = ZHistFeatureNormalizer.params_from_json(manifest["zhist_norm_params"])
 
         sets = {}
         for name in SPLITS:
