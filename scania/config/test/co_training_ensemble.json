@@ -12,7 +12,9 @@
     "return_sequence_label": false,
     "batch_size": 128,
     "shuffle_loader": true,
-    "counter_mode": "both"
+    "counter_mode": "both",
+    "include_histograms": false,
+    "histogram_mode": "sum"
   },
   "model_params": {
     "models": [

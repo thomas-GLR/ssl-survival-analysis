@@ -813,14 +813,16 @@ class ScaniaDataset(Dataset):
         Returns:
             (features_censored, ids_censored, time_steps_censored)
         ``time_steps_censored`` (N, 1) is row-aligned with the censored features/ids (same
-        ``mask_censored`` as :meth:`get_censored_lower_bounds`). CoTrainingEnsemble_v3 uses it
+        ``censored_idx`` as :meth:`get_censored_lower_bounds`). CoTrainingEnsemble_v3 uses it
         to backward-extrapolate a censored unit's last-window RUL to its earlier windows.
         """
-        mask_censored = self.is_censored_array == 1
+        # Same censored-index order as get_censored_lower_bounds so the returned
+        # time steps stay row-aligned with that method's censored features/ids.
+        censored_idx = np.flatnonzero(self.is_censored_array == 1)
 
-        features_censored = torch.from_numpy(self.sequence_array[mask_censored]).float()
-        ids_censored = torch.from_numpy(self.id_array[mask_censored]).long()
-        time_steps = self.time_step_array[mask_censored][:, np.newaxis]
+        features_censored = torch.from_numpy(self._build_windows(censored_idx))
+        ids_censored = torch.from_numpy(self.id_array[censored_idx]).long()
+        time_steps = self.time_step_array[censored_idx][:, np.newaxis]
         time_steps_censored = torch.from_numpy(time_steps).float()
 
         return features_censored, ids_censored, time_steps_censored

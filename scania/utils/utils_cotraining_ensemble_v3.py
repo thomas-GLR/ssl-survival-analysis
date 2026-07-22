@@ -49,6 +49,8 @@ def train_model(
     return_sequence_label: bool,
     batch_size: int,
     counter_mode: str,
+    include_histograms: bool,
+    histogram_mode: str,
     # Training params
     iterations: int,
     suspension_pool_size: float,
@@ -77,7 +79,7 @@ def train_model(
         dataset_root: Path to the Scania dataset.
         sequence_len, seed, data_fraction, val_rate, test_rate, stratify, norm_type,
         shuffle_loader, cache_dir, num_workers, pin_memory, return_sequence_label, batch_size,
-        counter_mode: ``ScaniaDataModule`` construction params.
+        counter_mode, include_histograms, histogram_mode: ``ScaniaDataModule`` construction params.
         iterations: Number of co-training iterations.
         suspension_pool_size: Fraction in ``(0, 1]`` of censored units sampled as the pool each
             iteration.
@@ -142,6 +144,8 @@ def train_model(
         "batch_size": batch_size,
         "sequence_len": sequence_len,
         "counter_mode": counter_mode,
+        "include_histograms": include_histograms,
+        "histogram_mode": histogram_mode,
     }
 
     print("Creating data loader with the following parameters :")
