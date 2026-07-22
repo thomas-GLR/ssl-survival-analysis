@@ -5,6 +5,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _flatten_if_needed(x: torch.Tensor, in_features: int) -> torch.Tensor:
+    """Flattens a sequence input to a flat feature vector, if needed.
+
+    Lets :class:`RBFNetwork` accept either already-flat feature vectors or raw
+    sequences (windows), one prediction per sequence — the same input shape
+    convention as this repo's other window-based models (e.g. ``Simple_LSTM``,
+    ``CNN1D``). A classic RBF network has no recurrent/convolutional machinery to
+    consume a variable structure over time: distances are always computed to a
+    fixed-size point, so a sequence is simply flattened into one such point before
+    the basis function is applied.
+
+    Args:
+        x: Either ``(batch, in_features)`` or ``(batch, seq_len, feat_per_step)``.
+        in_features: Expected flat feature size (``seq_len * feat_per_step`` for
+            sequence input).
+
+    Returns:
+        A tensor of shape ``(batch, in_features)``.
+
+    Raises:
+        ValueError: If ``x`` is not 2-D or 3-D, or its (flattened) feature size
+            does not match ``in_features``.
+    """
+    if x.dim() == 3:
+        x = x.reshape(x.shape[0], -1)
+    elif x.dim() != 2:
+        raise ValueError(f"Expected a 2-D or 3-D input, got shape {tuple(x.shape)}.")
+
+    if x.shape[1] != in_features:
+        raise ValueError(f"Input has {x.shape[1]} flat features, expected in_features={in_features}.")
+    return x
+
+
 def _init_centers(
         init_data: torch.Tensor,
         n_centers: int,
@@ -75,6 +108,13 @@ class RBFNetwork(nn.Module):
     exactly. Varying ``p`` across committee members (alongside different bootstrap
     samples and different random center initializations, both handled outside this
     class) is CoBCReg's diversity mechanism.
+
+    Accepts either flat feature vectors ``(batch, in_features)`` or raw sequences
+    ``(batch, seq_len, feat_per_step)`` — one prediction per sequence (window),
+    matching how this repo's other window-based models (``Simple_LSTM``, ``CNN1D``)
+    consume windows. A sequence is flattened into a single point before distances
+    to the centers are computed; there is no recurrent/convolutional mechanism, so
+    a flattened window's time steps are treated as independent feature dimensions.
     """
 
     def __init__(
@@ -105,10 +145,11 @@ class RBFNetwork(nn.Module):
                 when initializing widths.
             width_scale: Multiplicative scale applied to the heuristic initial
                 widths.
-            init_data: Optional reference feature vectors of shape
-                ``(n_samples, in_features)`` used to initialize centers by random
-                subset sampling. If ``None``, centers fall back to a standard
-                normal init, which is only meant for quick smoke tests.
+            init_data: Optional reference data used to initialize centers by
+                random subset sampling, shaped ``(n_samples, in_features)`` or
+                ``(n_samples, seq_len, feat_per_step)`` (flattened internally). If
+                ``None``, centers fall back to a standard normal init, which is
+                only meant for quick smoke tests.
             generator: Random generator controlling center sampling / fallback
                 initialization. Use a different generator per committee member to
                 get CoBCReg's random-center-init diversity.
@@ -119,7 +160,7 @@ class RBFNetwork(nn.Module):
         self.distance_order = distance_order
 
         if init_data is not None:
-            centers = _init_centers(init_data, n_centers, generator)
+            centers = _init_centers(_flatten_if_needed(init_data, in_features), n_centers, generator)
         else:
             centers = torch.randn(n_centers, in_features, generator=generator)
 
@@ -138,14 +179,16 @@ class RBFNetwork(nn.Module):
         self.linear = nn.Linear(n_centers, 1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Computes the regression output for a batch of feature vectors.
+        """Computes the regression output for a batch of feature vectors or sequences.
 
         Args:
-            x: Input features of shape ``(batch, in_features)``.
+            x: Input of shape ``(batch, in_features)`` or
+                ``(batch, seq_len, feat_per_step)`` (flattened internally).
 
         Returns:
             Predicted regression targets of shape ``(batch, 1)``.
         """
+        x = _flatten_if_needed(x, self.in_features)
         distances = torch.cdist(x, self.centers, p=self.distance_order)
         widths = F.softplus(self.raw_widths)
         basis = torch.exp(-(distances ** 2) / (2 * widths ** 2 + 1e-12))
