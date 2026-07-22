@@ -18,6 +18,7 @@ from scania.utils import (
     train_model_lightning,
     train_model_random_survival,
     train_model_coprog,
+    train_model_cobcreg,
     train_model_cotraining_ensemble,
     train_model_cotraining_ensemble_v2,
 )
@@ -82,6 +83,7 @@ def reproduce_result(
     # only for those to avoid a TypeError.
     gpu_aware_versions = {
         ModelVersion.COPROG,
+        ModelVersion.COBCREG,
         ModelVersion.CO_TRAINING_ENSEMBLE,
         ModelVersion.CO_TRAINING_ENSEMBLE_V2,
     }
@@ -131,6 +133,8 @@ def _get_train_model_method(model_version: ModelVersion) -> Callable:
             raise NotImplementedError("PYCLUS model training is not implemented yet")
         case ModelVersion.COPROG:
             return train_model_coprog
+        case ModelVersion.COBCREG:
+            return train_model_cobcreg
         case ModelVersion.CO_TRAINING_ENSEMBLE:
             return train_model_cotraining_ensemble
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
@@ -160,6 +164,7 @@ def _parse_args() -> argparse.Namespace:
             "rsf",
             "pyclus",
             "coprog",
+            "cobcreg",
             "co_training_ensemble",
             "co_training_ensemble_v2",
             "cnn",

@@ -37,6 +37,9 @@ NECESSARY_DATASET_RSF_KEYS = [
 
 NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
+# CoBCReg uses the same windowed dataset as the supervised deep models / coprog.
+NECESSARY_DATASET_COBCREG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+
 # The co-training ensembles use the same windowed dataset as the supervised deep models.
 NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V2_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
@@ -101,6 +104,18 @@ NECESSARY_COPROG_KEYS = [
     "second_model"
 ]
 
+# CoBCReg committee architecture. Diversity is via distance_orders (Minkowski p per member,
+# its length = committee size) + bootstrap + random center init; all members share the other
+# RBFNN hyperparameters.
+NECESSARY_COBCREG_KEYS = [
+    "distance_orders",
+    "n_centers",
+    "width_scale",
+    "width_neighbors",
+    "trainable_centers",
+    "trainable_widths",
+]
+
 # The co-training ensembles take a variable-length list of models; per-model architecture
 # params + per-model lr/max_epochs/patience/rul_target_standardization live inside each list
 # entry (validated in scania.utils.utils_cotraining_common.parse_models_config), so only the
@@ -162,6 +177,19 @@ NECESSARY_TRAINING_COPROG_KEYS = [
     "max_epochs",
     "coprog_iterations",
     "coprog_suspension_pool_size",
+    "rul_target_standardization",
+]
+
+# CoBCReg training params. lr/max_epochs/patience are scalars (all committee members share
+# them); seed and batch_size are NOT here — they are reused from dataset_params to avoid a
+# duplicate-kwarg clash when train_model is called with **dataset_params, **training_params.
+NECESSARY_TRAINING_COBCREG_KEYS = [
+    "lr",
+    "max_epochs",
+    "patience",
+    "max_iterations",
+    "pool_size",
+    "growth_rate",
     "rul_target_standardization",
 ]
 

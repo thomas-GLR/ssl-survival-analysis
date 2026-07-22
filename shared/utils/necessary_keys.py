@@ -19,6 +19,8 @@ def get_necessary_dataset_keys(model_version: ModelVersion, necessary_keys_modul
             return necessary_keys_module.NECESSARY_DATASET_PYCLUS_KEYS
         case ModelVersion.COPROG:
             return necessary_keys_module.NECESSARY_DATASET_COPROG_KEYS
+        case ModelVersion.COBCREG:
+            return necessary_keys_module.NECESSARY_DATASET_COBCREG_KEYS
         case ModelVersion.CNN:
             return necessary_keys_module.NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE:
@@ -49,6 +51,8 @@ def get_necessary_model_keys(model_version: ModelVersion, necessary_keys_module:
             return necessary_keys_module.NECESSARY_PYCLUS_KEYS
         case ModelVersion.COPROG:
             return necessary_keys_module.NECESSARY_COPROG_KEYS
+        case ModelVersion.COBCREG:
+            return necessary_keys_module.NECESSARY_COBCREG_KEYS
         case ModelVersion.CNN:
             return necessary_keys_module.NECESSARY_CNN_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE:
@@ -79,6 +83,8 @@ def get_necessary_training_keys(model_version: ModelVersion, necessary_keys_modu
             raise NotImplementedError(f"Model {model_version.value} is not yet implemented")
         case ModelVersion.COPROG:
             return necessary_keys_module.NECESSARY_TRAINING_COPROG_KEYS
+        case ModelVersion.COBCREG:
+            return necessary_keys_module.NECESSARY_TRAINING_COBCREG_KEYS
         case ModelVersion.CNN:
             return necessary_keys_module.NECESSARY_TRAINING_CNN_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE:

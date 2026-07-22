@@ -133,8 +133,9 @@ class CoBCReg:
             max_epochs: int = 100,
             patience: int = 10,
             batch_size: int = 32,
+            rul_target_standardization: bool = False,
             accelerator: str = "auto",
-            devices: int = 1,
+            devices: "int | list[int]" = 1,
             seed: Optional[int] = None,
             verbose: int = 0,
     ) -> None:
@@ -163,8 +164,15 @@ class CoBCReg:
             patience: ``EarlyStopping`` patience (monitored on ``val_loss``) per fit.
             batch_size: Batch size used for both the train and validation dataloaders
                 of every RBFNN fit.
+            rul_target_standardization: If ``True``, every RBFNN learns/predicts in
+                standardized target space (mean/std computed once from the initial
+                labeled targets in :meth:`train`), which keeps the MSE gradient on an
+                O(1) scale instead of being dominated by the raw RUL magnitude.
+                Predictions are de-normalized back to real RUL units, so all bag
+                labels, validation errors and outputs stay in original units.
             accelerator: Lightning accelerator passed to every ``Trainer``.
-            devices: Lightning devices passed to every ``Trainer``.
+            devices: Lightning devices passed to every ``Trainer`` — an int count
+                (e.g. ``1``) or a list of specific device ids (e.g. ``[2]``).
             seed: Optional base seed. When set, committee member ``i`` gets a
                 reproducible generator seeded with ``seed + i``; otherwise each
                 member's generator is seeded from OS entropy.
@@ -205,12 +213,17 @@ class CoBCReg:
         self.max_epochs = max_epochs
         self.patience = patience
         self.batch_size = batch_size
+        self.rul_target_standardization = rul_target_standardization
         self.accelerator = accelerator
         self.devices = devices
         self.verbose = verbose
 
         self._generators = [_make_generator(seed, i) for i in range(self.n_models)]
         self._log_file_path: Optional[str] = None
+        # RUL target standardization stats, computed once from the initial labeled
+        # targets in train() (kept (0.0, 1.0) — a no-op — when disabled).
+        self._target_mean: float = 0.0
+        self._target_std: float = 1.0
 
         self.n_features: Optional[int] = None
         self.labeled_bags: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None
@@ -287,7 +300,8 @@ class CoBCReg:
             init_data=x,
             generator=self._generators[model_idx],
         )
-        module = BasicLightningModule(lr=self.lr, model=net)
+        module = BasicLightningModule(
+            lr=self.lr, model=net, target_mean=self._target_mean, target_std=self._target_std)
 
         train_loader = DataLoader(
             TensorDataset(x, y), batch_size=min(self.batch_size, x.shape[0]), shuffle=True)
@@ -593,6 +607,18 @@ class CoBCReg:
         if row_number < self.n_centers:
             raise ValueError(f"x_labeled has {row_number} rows, need at least n_centers={self.n_centers}.")
 
+        # Target standardization stats: computed once, here, from the initial labeled
+        # targets only (never re-derived as pseudo-labels are added, to avoid drift /
+        # leakage). Left at (0.0, 1.0) — a no-op — when the flag is off.
+        if self.rul_target_standardization:
+            self._target_mean = float(y_labeled.mean())
+            self._target_std = float(y_labeled.std())
+            if self._target_std < 1e-6:
+                self._target_std = 1.0
+        else:
+            self._target_mean = 0.0
+            self._target_std = 1.0
+
         self.n_features = math.prod(x_labeled.shape[1:])
         self.labeled_bags = []
         self.validation_sets = []
@@ -688,3 +714,24 @@ class CoBCReg:
         predictions = torch.stack([self._predict_model(model, x) for model in self.models], dim=0)
         weights = torch.tensor(self.weights, dtype=predictions.dtype, device=predictions.device).view(-1, 1, 1)
         return (predictions * weights).sum(dim=0)
+
+    def predict_per_model(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Per-committee-member (unweighted) predictions, one tensor per member.
+
+        Unlike :meth:`predict`, no weighting is applied — used to report each
+        member's own test metrics (mirrors ``CoTrainingEnsemble.predict_per_model``).
+
+        Args:
+            x: Input data, shape ``(batch, ...features)``.
+
+        Returns:
+            One prediction tensor of shape ``(batch, 1)`` per committee member.
+
+        Raises:
+            ValueError: If called before :meth:`train`.
+        """
+        if self.models is None:
+            raise ValueError("CoBCReg must be trained via train() before calling predict_per_model().")
+
+        x = x.float()
+        return [self._predict_model(model, x) for model in self.models]

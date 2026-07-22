@@ -1,0 +1,36 @@
+{
+  "dataset_params": {
+    "sequence_len": 32,
+    "seed": 42,
+    "data_fraction": 1.0,
+    "val_rate": 0.2,
+    "test_rate": 0.1,
+    "stratify": true,
+    "norm_type": "z-score",
+    "num_workers": 4,
+    "pin_memory": true,
+    "return_sequence_label": false,
+    "batch_size": 128,
+    "shuffle_loader": true,
+    "counter_mode": "both",
+    "include_histograms": true,
+    "histogram_mode": "zhist"
+  },
+  "model_params": {
+    "distance_orders": [1, 2, 4],
+    "n_centers": 50,
+    "width_scale": 1.0,
+    "width_neighbors": 2,
+    "trainable_centers": true,
+    "trainable_widths": true
+  },
+  "training_params": {
+    "lr": 0.001,
+    "max_epochs": 200,
+    "patience": 20,
+    "max_iterations": 10,
+    "pool_size": 10,
+    "growth_rate": 1,
+    "rul_target_standardization": true
+  }
+}
