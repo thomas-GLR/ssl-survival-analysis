@@ -1,4 +1,6 @@
+import csv
 import gc
+import os
 from collections import OrderedDict
 from typing import Callable
 
@@ -108,6 +110,9 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         self.fine_tune_lr_factor = fine_tune_lr_factor
         self.fine_tune_max_epochs = fine_tune_max_epochs
         self.fine_tune_patience = fine_tune_patience
+
+        # Set per-run by ``train``; gates the (no-op-by-default) label-estimator instrumentation.
+        self._diagnostics: bool = False
 
     # ------------------------------------------------------------------ #
     # Small config helpers
@@ -352,15 +357,40 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             _, xu, _, a, b, _, _, c = all_preds[j][uid]
             z_u = self._embed(h[j], xu[-1:])  # (1, D)
             z_label, y_label = z_cache[j]
-            k = min(self.n_neighbors, z_label.shape[0])
-            dist = torch.cdist(z_u, z_label).view(-1)
-            knn_dist, knn_idx = torch.topk(dist, k, largest=False)
-            w = 1.0 / (knn_dist + 1e-8)
-            rul_knn = float((w * y_label[knn_idx]).sum() / w.sum())
-            label_j = self.model_pred_blend * c + (1.0 - self.model_pred_blend) * rul_knn
-            label_j = float(min(max(label_j, a), b))
-            labels.append(label_j)
+            labels.append(self._knn_label(z_u, z_label, y_label, a, b, c))
         return sum(labels) / len(labels)
+
+    def _knn_label(
+            self,
+            z_u: torch.Tensor,
+            z_label: torch.Tensor,
+            y_label: torch.Tensor,
+            a: float,
+            b: float,
+            c: float,
+    ) -> float:
+        """Closed-form pseudo-RUL of one embedded last window from the labelled set's k-NN.
+
+        Distance-weighted mean RUL of ``z_u``'s ``n_neighbors`` nearest labelled neighbours in
+        latent space, optionally blended with the model's conformal median ``c``
+        (``model_pred_blend``) and clipped to the conformal band ``[a, b]``. Factored out of
+        :meth:`_estimate_label_last` so the label diagnostics can score the exact same rule.
+
+        :param z_u: The embedded last window, shape ``(1, D)``, on the same device as ``z_label``.
+        :param z_label: Labelled-set embeddings ``(N, D)``.
+        :param y_label: Labelled-set RULs ``(N,)``, aligned with ``z_label``.
+        :param a: Conformal band lower bound (clip floor).
+        :param b: Conformal band upper bound (clip ceiling).
+        :param c: Model conformal median (blended in when ``model_pred_blend > 0``).
+        :return: The clipped, optionally blended pseudo-RUL.
+        """
+        k = min(self.n_neighbors, z_label.shape[0])
+        dist = torch.cdist(z_u, z_label).view(-1)
+        knn_dist, knn_idx = torch.topk(dist, k, largest=False)
+        w = 1.0 / (knn_dist + 1e-8)
+        rul_knn = float((w * y_label[knn_idx]).sum() / w.sum())
+        label = self.model_pred_blend * c + (1.0 - self.model_pred_blend) * rul_knn
+        return float(min(max(label, a), b))
 
     @staticmethod
     def _backward_extrapolate(
@@ -392,12 +422,22 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             suspension_ids: torch.Tensor,
             suspension_time_steps: torch.Tensor | None,
             add_ratio: float,
-    ) -> tuple[list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]], torch.Tensor, int]:
+            suspension_lower_bounds: torch.Tensor | None = None,
+    ) -> tuple[list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]], torch.Tensor, int,
+               dict[str, float] | None]:
         """Phase 2 (path-independent): owner-based selection + closed-form pseudo-labelling.
 
-        Returns ``(selected_per_model, remaining_suspension_ids, added)`` where
+        Returns ``(selected_per_model, remaining_suspension_ids, added, bias_stats)`` where
         ``selected_per_model[r]`` is the list of ``(unit_id, xu, per_window_label)`` assigned to
-        receiver model ``r`` (ready for the inherited ``_concat_selected_units``).
+        receiver model ``r`` (ready for the inherited ``_concat_selected_units``). ``bias_stats``
+        aggregates, over the units actually injected this iteration, the mean pseudo-label, the mean
+        conformal median (p50), the mean model prediction and (when ``suspension_lower_bounds`` is
+        given) the mean survival lower bound plus how many pseudo-labels / medians fall below it —
+        it is ``None`` when diagnostics are off or nothing was selected.
+
+        :param suspension_lower_bounds: Optional per-window survival lower bounds, row-aligned with
+            ``suspension_ids``; used only for the injected-label bias diagnostics (never changes the
+            injected label here).
         """
         n_models = self.number_of_models
         selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = [
@@ -409,7 +449,7 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
 
         selected = self._select_owner_units(scores, pool_uids, add_ratio)
         if not selected:
-            return selected_per_model, remaining_suspension_ids, 0
+            return selected_per_model, remaining_suspension_ids, 0, None
 
         owner_set: set[int] = set()
         for _, owners, _ in selected:
@@ -419,6 +459,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         self._log(1, f"[CoTraining]   Each model selecting its top {add_ratio} of "
                      f"{len(pool_uids)} pooled unit(s); {len(selected)} unit(s) have an owner "
                      f"asymmetry (selected by some but not all models).")
+
+        inj_vals: list[float] = []
+        p50_vals: list[float] = []
+        raw_vals: list[float] = []
+        lb_vals: list[float] = []
 
         added = 0
         for uid, owners, receivers in selected:
@@ -436,6 +481,16 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             remaining_suspension_ids = remaining_suspension_ids[remaining_suspension_ids != uid_tensor]
             added += 1
 
+            if self._diagnostics:
+                owner_c = [all_preds[j][uid][7] for j in owners]
+                owner_raw = [float(all_preds[j][uid][2].view(-1)[-1]) for j in owners]
+                inj_vals.append(label_last)
+                p50_vals.append(sum(owner_c) / len(owner_c))
+                raw_vals.append(sum(owner_raw) / len(owner_raw))
+                if suspension_lower_bounds is not None:
+                    lb_u = suspension_lower_bounds[suspension_ids == uid_tensor].view(-1)
+                    lb_vals.append(float(lb_u[-1]))
+
             self._log(1, f"[CoTraining]   Unit {uid}: owners={owners} receivers={receivers} | "
                          f"last-window RUL={label_last:.4f}")
 
@@ -443,7 +498,49 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         del z_cache
         gc.collect()
 
-        return selected_per_model, remaining_suspension_ids, added
+        bias_stats = self._pseudo_label_bias_stats(inj_vals, p50_vals, raw_vals, lb_vals)
+        return selected_per_model, remaining_suspension_ids, added, bias_stats
+
+    def _pseudo_label_bias_stats(
+            self,
+            inj_vals: list[float],
+            p50_vals: list[float],
+            raw_vals: list[float],
+            lb_vals: list[float],
+    ) -> dict[str, float] | None:
+        """Aggregate this iteration's injected-label diagnostics (``None`` if nothing collected).
+
+        Compares the mean injected pseudo-label against the mean conformal median (p50) and the
+        mean model prediction, and — when survival lower bounds were available — reports the mean
+        ``pseudo-label - lower_bound`` gap and how many pseudo-labels / medians fall *below* the
+        lower bound (a censoring violation: predicting a RUL the unit is known to have exceeded).
+        """
+        if not inj_vals:
+            return None
+        inj = torch.tensor(inj_vals)
+        p50 = torch.tensor(p50_vals)
+        raw = torch.tensor(raw_vals)
+        has_lb = len(lb_vals) == len(inj_vals)
+        lb = torch.tensor(lb_vals) if has_lb else None
+        stats = {
+            "n_selected": float(len(inj_vals)),
+            "inj_label_mean": float(inj.mean()),
+            "p50_mean": float(p50.mean()),
+            "model_pred_mean": float(raw.mean()),
+            "lb_mean": float(lb.mean()) if has_lb else float("nan"),
+            "inj_minus_lb_mean": float((inj - lb).mean()) if has_lb else float("nan"),
+            "inj_below_lb": float((inj < lb).sum()) if has_lb else float("nan"),
+            "p50_below_lb": float((p50 < lb).sum()) if has_lb else float("nan"),
+        }
+        msg = (f"[CoTraining]   [diag] injected {len(inj_vals)} label(s) | "
+               f"mean pseudo-label={stats['inj_label_mean']:.4f} | mean p50={stats['p50_mean']:.4f} | "
+               f"mean model pred={stats['model_pred_mean']:.4f}")
+        if has_lb:
+            msg += (f" | mean lower-bound={stats['lb_mean']:.4f} | "
+                    f"pseudo<lb: {int(stats['inj_below_lb'])}/{len(inj_vals)} | "
+                    f"p50<lb: {int(stats['p50_below_lb'])}/{len(inj_vals)}")
+        self._log(1, msg)
+        return stats
 
     # ------------------------------------------------------------------ #
     # Fine-tuning (replaces v2's from-scratch retrain during iterations)
@@ -505,6 +602,151 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
 
     # ------------------------------------------------------------------ #
+    # Label-estimator diagnostics (instrumentation, no effect on training)
+    # ------------------------------------------------------------------ #
+
+    def _estimator_accuracy_stats(
+            self,
+            h: list[LightningModule],
+            models_datasets: list[tuple[torch.Tensor, torch.Tensor]],
+            eval_x: torch.Tensor,
+            eval_y: torch.Tensor,
+            val_cpu: tuple[torch.Tensor | None, torch.Tensor | None],
+            max_samples: int | None,
+    ) -> dict[int, dict[str, float]]:
+        """Measure, per model, how accurate each last-window RUL estimator is on *labelled* data.
+
+        This is the decisive check for whether semi-supervised injection can help: on a held-out
+        set whose true RUL is known, it runs the exact scoring path used on censored units and
+        compares three estimators against the ground truth:
+
+        * ``raw``  — the model's own point prediction (what supervised training already gives),
+        * ``p50``  — the conformal predictive median ``c`` (the 0.5 quantile),
+        * ``knn``  — the latent k-NN estimate clipped to ``[a, b]`` (the injected pseudo-label rule).
+
+        If ``knn`` is not clearly below ``raw`` here, the pseudo-labels carry no new information and
+        injecting them can only add noise; comparing ``p50`` to ``knn`` answers directly whether the
+        median quantile would be a better label than the current k-NN rule.
+
+        :param h: Current models.
+        :param models_datasets: Per-model accumulated ``(x, y)`` (the k-NN neighbour set + the
+            ``DifficultyEstimator`` training set — identical to what scoring uses).
+        :param eval_x: Held-out features ``(N, seq_len, n_features)`` with known labels.
+        :param eval_y: Held-out RULs ``(N,)`` (or ``(N, 1)``).
+        :param val_cpu: CPU ``(val_x, val_y)`` used to calibrate the conformal predictive system.
+        :param max_samples: If set, evaluate on a random subsample of this many windows (cost cap).
+        :return: ``{model_index: {"raw": rmse, "p50": rmse, "knn": rmse}}``.
+        """
+        eval_x = eval_x.detach().cpu()
+        eval_y = eval_y.detach().cpu().view(-1).float()
+        n = eval_x.shape[0]
+        if max_samples is not None and n > max_samples:
+            idx = torch.randperm(n)[:max_samples]
+            eval_x, eval_y = eval_x[idx], eval_y[idx]
+        m = eval_x.shape[0]
+
+        # Each eval window is treated as its own single-window "unit" (its own last window), so the
+        # CPS job returns that window's percentiles a / c / b and its raw prediction.
+        unit_ids = list(range(m))
+        unit_x = [eval_x[i:i + 1] for i in range(m)]
+
+        z_cache = self._compute_label_caches(h, models_datasets, set(range(self.number_of_models)))
+        stats: dict[int, dict[str, float]] = {}
+        try:
+            for j in range(self.number_of_models):
+                spec = self._make_cps_spec(
+                    j, self._cpu_state_dict(h[j]), models_datasets[j][0], val_cpu,
+                    unit_ids, unit_x, None)
+                spec.accelerator = self._inline_accelerator
+                spec.devices = self._inline_devices
+                result = run_cps_score_job(spec)
+
+                z_all = self._embed(h[j], eval_x)  # (m, D)
+                z_label, y_label = z_cache[j]
+                by_uid = {u[0]: u for u in result["units"]}
+
+                raw = torch.empty(m)
+                p50 = torch.empty(m)
+                knn = torch.empty(m)
+                for i in range(m):
+                    _, raw_preds, a, b, _, _, c = by_uid[i]
+                    raw[i] = float(raw_preds.view(-1)[-1])
+                    p50[i] = c
+                    knn[i] = self._knn_label(z_all[i:i + 1], z_label, y_label, a, b, c)
+
+                stats[j] = {
+                    "raw": float(torch.sqrt(torch.mean((raw - eval_y) ** 2))),
+                    "p50": float(torch.sqrt(torch.mean((p50 - eval_y) ** 2))),
+                    "knn": float(torch.sqrt(torch.mean((knn - eval_y) ** 2))),
+                }
+                self._log(1, f"[CoTraining]   [diag] model {j} last-window RMSE on {m} labelled "
+                             f"windows | raw(model)={stats[j]['raw']:.4f} | "
+                             f"p50(median)={stats[j]['p50']:.4f} | knn(pseudo-label)={stats[j]['knn']:.4f}")
+        finally:
+            del z_cache
+            gc.collect()
+        return stats
+
+    def _write_diagnostics_row(
+            self,
+            diagnostics_file: str,
+            stage: str,
+            acc_stats: dict[int, dict[str, float]],
+            bias_stats: dict[str, float] | None,
+    ) -> None:
+        """Append one diagnostics row (per-model estimator RMSE + injected-label bias) to a CSV.
+
+        Header is written only when the file does not yet exist, mirroring the append style of the
+        metrics CSV. ``bias_stats`` is ``None`` for stages without a selection step (``initial`` /
+        ``final``), in which case its columns are left blank.
+        """
+        n = self.number_of_models
+        header = ["stage"]
+        for j in range(n):
+            header += [f"raw_rmse_{j}", f"p50_rmse_{j}", f"knn_rmse_{j}"]
+        header += ["n_selected", "inj_label_mean", "p50_mean", "model_pred_mean", "lb_mean",
+                   "inj_minus_lb_mean", "inj_below_lb", "p50_below_lb"]
+
+        row: list[object] = [stage]
+        for j in range(n):
+            s = acc_stats.get(j, {})
+            row += [s.get("raw", ""), s.get("p50", ""), s.get("knn", "")]
+        if bias_stats is None:
+            row += ["", "", "", "", "", "", "", ""]
+        else:
+            row += [bias_stats["n_selected"], bias_stats["inj_label_mean"], bias_stats["p50_mean"],
+                    bias_stats["model_pred_mean"], bias_stats["lb_mean"],
+                    bias_stats["inj_minus_lb_mean"], bias_stats["inj_below_lb"],
+                    bias_stats["p50_below_lb"]]
+
+        write_header = not os.path.exists(diagnostics_file)
+        with open(diagnostics_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(header)
+            writer.writerow(row)
+
+    def _log_diagnostics(
+            self,
+            stage: str,
+            h: list[LightningModule],
+            models_datasets: list[tuple[torch.Tensor, torch.Tensor]],
+            eval_x: torch.Tensor | None,
+            eval_y: torch.Tensor | None,
+            val_cpu: tuple[torch.Tensor | None, torch.Tensor | None],
+            bias_stats: dict[str, float] | None,
+            diagnostics_file: str | None,
+            max_samples: int | None,
+    ) -> None:
+        """Compute the estimator-accuracy stats for ``stage`` and write / log the diagnostics row."""
+        acc_stats: dict[int, dict[str, float]] = {}
+        if eval_x is not None and eval_y is not None:
+            acc_stats = self._estimator_accuracy_stats(
+                h, models_datasets, eval_x, eval_y, val_cpu, max_samples)
+        if diagnostics_file is not None:
+            self._write_diagnostics_row(diagnostics_file, stage, acc_stats, bias_stats)
+
+    # ------------------------------------------------------------------ #
     # Training
     # ------------------------------------------------------------------ #
 
@@ -529,6 +771,9 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             weight_mode: str = "min",
             metrics_file: str | None = None,
             log_file: str | None = None,
+            diagnostics: bool = False,
+            diagnostics_file: str | None = None,
+            diagnostics_max_samples: int = 200,
     ) -> None:
         """Train the v3 co-training ensemble.
 
@@ -538,7 +783,7 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         inject it into the receiver models, and fine-tune those receivers on their accumulated
         data.
 
-        Args mirror :meth:`CoTrainingEnsemble_v2.train`, with two additions:
+        Args mirror :meth:`CoTrainingEnsemble_v2.train`, with these additions:
 
         :param suspension_time_steps: Optional per-window ``time_step`` for the censored data,
             row-aligned with ``suspension_data`` / ``suspension_ids`` (shape ``(N,)`` or
@@ -547,8 +792,21 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         :param add_ratio: Per-model top fraction in ``(0, 1]`` — each model selects its top
             ``add_ratio`` of the pool by its own conformal width; ownership then follows from which
             models selected each unit.
+        :param diagnostics: When ``True``, instrument the pseudo-label estimator without changing
+            training. At every stage it measures, on a labelled held-out set, the last-window RMSE
+            of three estimators — the model's own prediction (``raw``), the conformal median
+            (``p50``) and the injected latent-kNN pseudo-label (``knn``) — so it can be checked
+            whether the pseudo-labels carry usable information and whether the p50 quantile would be
+            a better label than the k-NN rule. Each iteration it also logs the mean injected label
+            vs mean p50 vs mean model prediction vs mean survival lower bound (and how many labels
+            fall below it). Off by default (zero extra cost).
+        :param diagnostics_file: Optional ``.csv`` destination for the diagnostics rows (one per
+            stage). Header written once; blank bias columns on ``initial`` / ``final``.
+        :param diagnostics_max_samples: Random subsample size of the labelled held-out set used for
+            the estimator-accuracy diagnostics (caps their cost). Defaults to ``200``.
         """
         self._log_file_path = log_file
+        self._diagnostics = diagnostics
         self._check_if_training_is_possible()
 
         if val_data is None or val_label is None:
@@ -597,7 +855,10 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 suspension_data=suspension_data,
                 suspension_ids=suspension_ids,
                 suspension_time_steps=suspension_time_steps,
-                suspension_lower_bounds=suspension_lower_bounds if clip_bounds else None,
+                # Pass the full bounds (not the clip-gated view) so the parallel-path bias
+                # diagnostics can report them; the CPS censoring clip stays gated by clip_bounds,
+                # which _train_parallel recomputes internally.
+                suspension_lower_bounds=suspension_lower_bounds,
                 iterations=iterations,
                 pool_size=pool_size,
                 add_ratio=add_ratio,
@@ -610,10 +871,18 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 weight_callback=weight_callback,
                 weight_mode=weight_mode,
                 metrics_file=metrics_file,
+                diagnostics=diagnostics,
+                diagnostics_file=diagnostics_file,
+                diagnostics_max_samples=diagnostics_max_samples,
             )
             return
 
         val_cpu = self._cpu_pair(val_data, val_label)
+        # Labelled held-out set for the estimator-accuracy diagnostics: the test set when
+        # available (the honest target), else the validation set (a relative-only comparison,
+        # since val also calibrates the conformal predictive systems).
+        diag_eval_x, diag_eval_y = (
+            (test_data, test_label) if test_data is not None else (val_data, val_label))
 
         models_datasets: list[tuple[torch.Tensor, torch.Tensor]] = []
         h: list[LightningModule] = []
@@ -631,6 +900,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 score_callback=score_callback, weight_callback=weight_callback,
                 weight_mode=weight_mode, metrics_file=metrics_file,
             )
+        if diagnostics:
+            self._log_diagnostics(
+                stage="initial", h=h, models_datasets=models_datasets, eval_x=diag_eval_x,
+                eval_y=diag_eval_y, val_cpu=val_cpu, bias_stats=None,
+                diagnostics_file=diagnostics_file, max_samples=diagnostics_max_samples)
 
         remaining_suspension_ids = torch.unique(suspension_ids)
 
@@ -665,10 +939,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 all_preds[j] = self._assemble_all_preds(result["units"], xu_by_unit)
 
             # Phase 2 — owner-based selection + label estimation (main process).
-            selected_per_model, remaining_suspension_ids, added = self._select_and_label(
+            selected_per_model, remaining_suspension_ids, added, bias_stats = self._select_and_label(
                 all_preds=all_preds, h=h, models_datasets=models_datasets, pool_ids=pool_ids,
                 remaining_suspension_ids=remaining_suspension_ids, suspension_ids=suspension_ids,
-                suspension_time_steps=suspension_time_steps, add_ratio=add_ratio)
+                suspension_time_steps=suspension_time_steps, add_ratio=add_ratio,
+                suspension_lower_bounds=suspension_lower_bounds)
 
             if added == 0:
                 self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: no unit selected.")
@@ -693,6 +968,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                     val_label=val_label, score_callback=score_callback,
                     weight_callback=weight_callback, weight_mode=weight_mode, metrics_file=metrics_file,
                 )
+            if diagnostics:
+                self._log_diagnostics(
+                    stage=f"iteration_{i + 1}", h=h, models_datasets=models_datasets,
+                    eval_x=diag_eval_x, eval_y=diag_eval_y, val_cpu=val_cpu, bias_stats=bias_stats,
+                    diagnostics_file=diagnostics_file, max_samples=diagnostics_max_samples)
 
             del all_preds, selected_per_model
             gc.collect()
@@ -704,6 +984,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 score_callback=score_callback, weight_callback=weight_callback,
                 weight_mode=weight_mode, metrics_file=metrics_file,
             )
+        if diagnostics:
+            self._log_diagnostics(
+                stage="final", h=h, models_datasets=models_datasets, eval_x=diag_eval_x,
+                eval_y=diag_eval_y, val_cpu=val_cpu, bias_stats=None,
+                diagnostics_file=diagnostics_file, max_samples=diagnostics_max_samples)
 
         self._log(1, "[CoTraining] Training complete.")
         self.lightning_modules = h
@@ -728,17 +1013,25 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
             weight_mode: str,
             metrics_file: str | None,
+            diagnostics: bool = False,
+            diagnostics_file: str | None = None,
+            diagnostics_max_samples: int = 200,
     ) -> None:
         """Multi-GPU parallel version of :meth:`train`.
 
         Initial from-scratch training, per-model CPS scoring, and per-model fine-tuning each run
         concurrently across all ``gpu_ids`` via a :class:`CoTrainingGpuPool`. Owner-based
-        selection and the latent k-NN label estimation stay in the main process (they use the
-        rebuilt models ``h``).
+        selection, the latent k-NN label estimation and the (optional) label-estimator diagnostics
+        stay in the main process (they use the rebuilt models ``h``). The diagnostics args mirror
+        :meth:`train`.
         """
         n = self.number_of_models
         val_cpu = self._cpu_pair(val_data, val_label)
         clip_bounds = self.use_monotone_projection and suspension_lower_bounds is not None
+        # Labelled held-out set for the estimator-accuracy diagnostics (test when available, else
+        # val — see the sequential path for the caveat).
+        diag_eval_x, diag_eval_y = (
+            (test_data, test_label) if test_data is not None else (val_data, val_label))
 
         pool = CoTrainingGpuPool(self.gpu_ids)
         pool.start()
@@ -764,6 +1057,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                     score_callback=score_callback, weight_callback=weight_callback,
                     weight_mode=weight_mode, metrics_file=metrics_file,
                 )
+            if diagnostics:
+                self._log_diagnostics(
+                    stage="initial", h=h, models_datasets=models_datasets, eval_x=diag_eval_x,
+                    eval_y=diag_eval_y, val_cpu=val_cpu, bias_stats=None,
+                    diagnostics_file=diagnostics_file, max_samples=diagnostics_max_samples)
 
             remaining_suspension_ids = torch.unique(suspension_ids)
 
@@ -801,10 +1099,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 }
 
                 # Phase 2 — owner-based selection + label estimation (main process).
-                selected_per_model, remaining_suspension_ids, added = self._select_and_label(
+                selected_per_model, remaining_suspension_ids, added, bias_stats = self._select_and_label(
                     all_preds=all_preds, h=h, models_datasets=models_datasets, pool_ids=pool_ids,
                     remaining_suspension_ids=remaining_suspension_ids, suspension_ids=suspension_ids,
-                    suspension_time_steps=suspension_time_steps, add_ratio=add_ratio)
+                    suspension_time_steps=suspension_time_steps, add_ratio=add_ratio,
+                    suspension_lower_bounds=suspension_lower_bounds)
 
                 if added == 0:
                     self._log(1, f"[CoTraining] Early stop at iteration {i + 1}: no unit selected.")
@@ -835,6 +1134,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                         val_label=val_label, score_callback=score_callback,
                         weight_callback=weight_callback, weight_mode=weight_mode, metrics_file=metrics_file,
                     )
+                if diagnostics:
+                    self._log_diagnostics(
+                        stage=f"iteration_{i + 1}", h=h, models_datasets=models_datasets,
+                        eval_x=diag_eval_x, eval_y=diag_eval_y, val_cpu=val_cpu, bias_stats=bias_stats,
+                        diagnostics_file=diagnostics_file, max_samples=diagnostics_max_samples)
 
             if metrics_enabled:
                 self._log_stage_metrics(
@@ -843,6 +1147,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                     score_callback=score_callback, weight_callback=weight_callback,
                     weight_mode=weight_mode, metrics_file=metrics_file,
                 )
+            if diagnostics:
+                self._log_diagnostics(
+                    stage="final", h=h, models_datasets=models_datasets, eval_x=diag_eval_x,
+                    eval_y=diag_eval_y, val_cpu=val_cpu, bias_stats=None,
+                    diagnostics_file=diagnostics_file, max_samples=diagnostics_max_samples)
 
             self._log(1, "[CoTraining] Training complete.")
             self.lightning_modules = h
