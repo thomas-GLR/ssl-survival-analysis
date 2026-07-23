@@ -61,9 +61,11 @@ def train_model(
     fine_tune_lr_factor: float,
     fine_tune_max_epochs: int,
     fine_tune_patience: int,
+    difficulty_space: str = "raw",
     confidence_threshold: float | None = None,
     w_mono: float = 1.0,
     w_lb: float = 1.0,
+    keep_best_model: bool = True,
     inference_batch_size: int | None = None,
     # Others
     gpu_ids: list[int] | None = None,
@@ -93,10 +95,16 @@ def train_model(
         fine_tune_lr_factor: Learning-rate multiplier for fine-tuning (warm start).
         fine_tune_max_epochs: Max epochs per fine-tuning call.
         fine_tune_patience: ``EarlyStopping`` patience per fine-tuning call.
+        difficulty_space: ``"raw"`` (default) or ``"latent"`` — where the conformal difficulty
+            estimator measures each unit's neighbourhood. ``"latent"`` uses each model's own
+            pre-head embedding so the models disagree about which units they understand best.
         confidence_threshold: Optional lower bound in ``(0, 1]`` on a unit's confidence; when set,
             only units at or above it are selectable. ``None`` disables the gate.
         w_mono: Non-negative weight of the monotonicity-violation term in the confidence score.
         w_lb: Non-negative weight of the lower-bound-violation term in the confidence score.
+        keep_best_model: When ``True`` (default), a fine-tuned model is kept per iteration only if
+            its validation RMSE improved (else reverted and its added units dropped). ``False``
+            keeps every fine-tuned model — the baseline to compare retention against.
         inference_batch_size: If set, chunk every forward pass into batches of this size to cap
             peak memory. ``None`` keeps single-shot inference.
         gpu_ids: GPU id(s). ``None`` → auto (single GPU); ``[g]`` → pinned to GPU ``g``. v3 is
@@ -184,9 +192,11 @@ def train_model(
         "suspension_pool_size": suspension_pool_size,
         "add_ratio": add_ratio,
         "confidence": confidence,
+        "difficulty_space": difficulty_space,
         "confidence_threshold": confidence_threshold,
         "w_mono": w_mono,
         "w_lb": w_lb,
+        "keep_best_model": keep_best_model,
         "fine_tune_lr_factor": fine_tune_lr_factor,
         "fine_tune_max_epochs": fine_tune_max_epochs,
         "fine_tune_patience": fine_tune_patience,
@@ -210,9 +220,11 @@ def train_model(
         verbose=1,
         confidence=confidence,
         inference_batch_size=inference_batch_size,
+        difficulty_space=difficulty_space,
         confidence_threshold=confidence_threshold,
         w_mono=w_mono,
         w_lb=w_lb,
+        keep_best_model=keep_best_model,
         fine_tune_lr_factor=fine_tune_lr_factor,
         fine_tune_max_epochs=fine_tune_max_epochs,
         fine_tune_patience=fine_tune_patience,

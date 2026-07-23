@@ -17,7 +17,7 @@ from models.cotraining_gpu_pool import (
 )
 
 
-class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
+class CoTrainingEnsemble_v3_old(CoTrainingEnsemble_v2):
     """Owner-based co-training ensemble with a latent-kNN pseudo-label estimator (v3).
 
     v3 keeps v2's confidence scoring (per-model conformal spread of every censored unit,

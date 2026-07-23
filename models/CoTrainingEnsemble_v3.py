@@ -1,11 +1,45 @@
 from collections import OrderedDict
 from typing import Callable
 
+import numpy as np
+import sklearn
 import torch
+from crepes import WrapRegressor
+from crepes.extras import DifficultyEstimator
 from lightning import LightningModule
 
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
-from models.cotraining_gpu_pool import FineTuneSpec, run_finetune_job
+from models.cotraining_gpu_pool import FineTuneSpec, _TorchRegressorAdapter, run_finetune_job
+
+
+class _LatentDifficultyEstimator:
+    """``crepes`` difficulty-estimator adapter that measures difficulty in a model's latent space.
+
+    ``crepes`` normalises interval widths by calling ``de.apply(X)`` on the same (raw, flattened)
+    features it hands the learner. This adapter intercepts that call: it reshapes ``X`` back to
+    sequences, embeds them with ``embed_fn`` (the owning model's pre-head latent), and delegates to
+    a latent-fitted :class:`crepes.extras.DifficultyEstimator`. So the learner still predicts on raw
+    features while the difficulty (and hence each unit's width) comes from the model's own
+    representation.
+    """
+
+    def __init__(
+            self,
+            embed_fn: Callable[[torch.Tensor], np.ndarray],
+            inner: DifficultyEstimator,
+            seq_len: int,
+            n_features: int,
+    ):
+        self._embed_fn = embed_fn
+        self._inner = inner
+        self._seq_len = seq_len
+        self._n_features = n_features
+
+    def apply(self, X: np.ndarray = None) -> np.ndarray:
+        """Embed the flattened features ``X`` and return the latent-space difficulty (``sigmas``)."""
+        x = torch.as_tensor(np.asarray(X, dtype=np.float32)).reshape(
+            -1, self._seq_len, self._n_features)
+        return self._inner.apply(self._embed_fn(x))
 
 
 class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
@@ -19,9 +53,13 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
     * **Confidence from a ``predict_int`` interval.** Each model is wrapped in a ``crepes``
       normalized conformal regressor (calibrated on a dedicated calibration set when available,
       else the validation set) and each censored unit's last window yields a prediction interval
-      ``[lower, upper]``. A tighter interval is more confident. The confidence also rewards
-      physically consistent predictions: a unit's per-window RUL should decrease over time and
-      never drop below its survival lower bound (see :meth:`_confidence_score`).
+      ``[lower, upper]``. A tighter interval is more confident. The interval's per-unit width is
+      normalised by a ``crepes`` ``DifficultyEstimator`` whose neighbourhood is measured either in
+      the raw feature space (shared across models) or in each model's own **latent space**
+      (``difficulty_space``) — the latter lets the models genuinely disagree about which units
+      they understand best. The confidence also rewards physically consistent predictions: a
+      unit's per-window RUL should decrease over time and never drop below its survival lower
+      bound (see :meth:`_confidence_score`).
     * **Owner-based selection by confidence.** Each model selects its own top ``add_ratio``
       fraction of the pool by confidence (optionally gated by ``confidence_threshold``). A unit's
       *owners* are the models that selected it; the *receivers* (the rest) are taught its label.
@@ -47,9 +85,11 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             verbose: int = 0,
             confidence: float = 0.9,
             inference_batch_size: int | None = None,
+            difficulty_space: str = "raw",
             confidence_threshold: float | None = None,
             w_mono: float = 1.0,
             w_lb: float = 1.0,
+            keep_best_model: bool = True,
             fine_tune_lr_factor: float = 0.1,
             fine_tune_max_epochs: int = 20,
             fine_tune_patience: int = 5,
@@ -65,6 +105,12 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 to ``0.9``.
             inference_batch_size: If set, forward passes run in chunks of this many samples to cap
                 peak memory. ``None`` keeps single-shot inference.
+            difficulty_space: Where the conformal ``DifficultyEstimator`` measures a unit's
+                neighbourhood (which normalises its interval width). ``"raw"`` (default) uses the
+                flattened input features — the same for every model, so the models rank units
+                almost identically. ``"latent"`` uses each model's own pre-head embedding, so the
+                models genuinely disagree about which units they find easy/hard (recommended when
+                selection stalls because the per-model rankings are near-identical).
             confidence_threshold: Optional lower bound in ``(0, 1]`` on a unit's confidence score.
                 When set, a model may only select a unit whose confidence is at least this value
                 (useful to reject clearly bad units). ``None`` (default) disables the gate, so
@@ -72,6 +118,10 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 units are worth trusting.
             w_mono: Non-negative weight of the monotonicity-violation term in the confidence score.
             w_lb: Non-negative weight of the lower-bound-violation term in the confidence score.
+            keep_best_model: When ``True`` (default), a fine-tuned model is kept only if its
+                validation RMSE improved; otherwise the model is reverted and that iteration's
+                added units are dropped. When ``False``, every fine-tuned model is kept regardless
+                (no rollback, no dropping) — the baseline to compare best-model retention against.
             fine_tune_lr_factor: Multiplier applied to each model's learning rate during
                 fine-tuning (warm start), e.g. ``0.1``.
             fine_tune_max_epochs: Max epochs per fine-tuning call.
@@ -85,6 +135,8 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             inference_batch_size=inference_batch_size,
         )
 
+        if difficulty_space not in ("raw", "latent"):
+            raise ValueError("difficulty_space must be 'raw' or 'latent'.")
         if confidence_threshold is not None and not (0 < confidence_threshold <= 1):
             raise ValueError("confidence_threshold must be in (0, 1] or None.")
         if w_mono < 0 or w_lb < 0:
@@ -92,12 +144,112 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         if fine_tune_lr_factor <= 0:
             raise ValueError("fine_tune_lr_factor must be positive.")
 
+        self.difficulty_space = difficulty_space
+        self.keep_best_model = keep_best_model
         self.confidence_threshold = confidence_threshold
         self.w_mono = w_mono
         self.w_lb = w_lb
         self.fine_tune_lr_factor = fine_tune_lr_factor
         self.fine_tune_max_epochs = fine_tune_max_epochs
         self.fine_tune_patience = fine_tune_patience
+
+    # ------------------------------------------------------------------ #
+    # Latent-space difficulty (optional, difficulty_space="latent")
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _head_module(module: LightningModule) -> torch.nn.Module:
+        """Return the final regression head; the tensor fed into it is the model's latent vector.
+
+        All Scania architectures wrap their network as ``BasicLightningModule.net`` and end in a
+        head named ``regressor`` (CNN1D) or ``linear`` (LSTM / transformer variants).
+        """
+        net = getattr(module, "net", module)
+        head = getattr(net, "regressor", None)
+        if head is None:
+            head = getattr(net, "linear", None)
+        if head is None:
+            raise ValueError(
+                "Cannot locate the regression head (expected 'regressor' or 'linear') for latent "
+                "embedding extraction.")
+        return head
+
+    def _embed(self, module: LightningModule, x: torch.Tensor) -> np.ndarray:
+        """Embed ``x`` into the model's latent space = the input to its regression head.
+
+        A forward-pre-hook on the head captures its input during an ``eval`` / ``no_grad`` forward
+        pass (chunked by ``inference_batch_size`` to cap memory). The hook is always removed.
+
+        Args:
+            module: The trained model to embed with.
+            x: Input features ``(N, seq_len, n_features)``.
+
+        Returns:
+            Latent embeddings ``(N, D)`` as a CPU float32 numpy array (``D`` is model-specific).
+        """
+        module.eval()
+        device = next(module.parameters()).device
+        captured: dict[str, torch.Tensor] = {}
+
+        def _hook(_mod: torch.nn.Module, inputs: tuple) -> None:
+            captured["z"] = inputs[0].detach().cpu()
+
+        handle = self._head_module(module).register_forward_pre_hook(_hook)
+        try:
+            with torch.no_grad():
+                if self._inference_batch_size is None:
+                    module(x.to(device))
+                    z = captured["z"]
+                else:
+                    chunks: list[torch.Tensor] = []
+                    for start in range(0, len(x), self._inference_batch_size):
+                        module(x[start:start + self._inference_batch_size].to(device))
+                        chunks.append(captured["z"])
+                    z = torch.cat(chunks, dim=0)
+        finally:
+            handle.remove()
+        return z.reshape(z.shape[0], -1).numpy().astype(np.float32)
+
+    def _build_latent_calibrated_regressor(
+            self,
+            model: LightningModule,
+            train_x: torch.Tensor,
+            calib_x: torch.Tensor,
+            calib_y: torch.Tensor,
+    ) -> WrapRegressor:
+        """Wrap ``model`` in a conformal regressor whose width is normalised by *latent* difficulty.
+
+        A :class:`crepes.extras.DifficultyEstimator` is fitted on the model's latent embeddings of
+        ``train_x`` and wrapped in a :class:`_LatentDifficultyEstimator` so ``crepes`` measures every
+        unit's difficulty in this model's own representation (while the learner keeps predicting on
+        the raw flattened features). The wrapper stores that ``de``, so a later ``predict_int`` call
+        automatically re-derives the latent difficulty for the query points — no manual ``sigmas``.
+
+        Args:
+            model: The trained model to wrap.
+            train_x: The model's accumulated training features (the difficulty reference set).
+            calib_x: Calibration features.
+            calib_y: Calibration labels.
+
+        Returns:
+            The calibrated regressor (its ``de`` measures difficulty in the model's latent space).
+        """
+        seq_len, n_features = train_x.shape[1], train_x.shape[2]
+        sklearn.set_config(working_memory=128)
+
+        inner = DifficultyEstimator()
+        inner.fit(X=self._embed(model, train_x))
+        latent_de = _LatentDifficultyEstimator(
+            embed_fn=lambda x: self._embed(model, x), inner=inner,
+            seq_len=seq_len, n_features=n_features)
+
+        wrapper = WrapRegressor(_TorchRegressorAdapter(self._predict, model, seq_len, n_features))
+        wrapper.calibrate(
+            X=self._flatten(calib_x),
+            y=calib_y.view(-1).detach().cpu().numpy().astype(np.float32),
+            de=latent_de,
+        )
+        return wrapper
 
     # ------------------------------------------------------------------ #
     # Confidence scoring
@@ -163,8 +315,10 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         """Score every pooled censored unit with every model's conformal interval + confidence.
 
         For each model a calibrated conformal regressor is built once (``DifficultyEstimator``
-        fitted on the model's own accumulated features, calibrated on ``(calib_x, calib_y)``), then
-        every pooled unit's last window gets a ``predict_int`` interval and a confidence score.
+        fitted on the model's own accumulated data, calibrated on ``(calib_x, calib_y)``), then
+        every pooled unit's last window gets a ``predict_int`` interval and a confidence score. The
+        difficulty that normalises each interval's width is measured in the raw feature space or in
+        the model's latent space depending on ``self.difficulty_space``.
 
         Args:
             h: The current models.
@@ -181,11 +335,16 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         """
         all_preds: dict[int, OrderedDict] = {}
         for j, model in enumerate(h):
-            wrapper = self._build_calibrated_regressor(model, datasets[j][0], calib_x, calib_y)
+            if self.difficulty_space == "latent":
+                wrapper = self._build_latent_calibrated_regressor(
+                    model, datasets[j][0], calib_x, calib_y)
+            else:
+                wrapper = self._build_calibrated_regressor(model, datasets[j][0], calib_x, calib_y)
 
             raw_by_unit = {uid: self._predict(model, xu).detach().cpu().view(-1)
                            for uid, xu in zip(unit_ids, unit_x)}
             last_windows = torch.stack([xu[-1] for xu in unit_x], dim=0)
+            # The wrapper's difficulty estimator (raw or latent) re-derives each unit's width.
             intervals = wrapper.predict_int(self._flatten(last_windows), confidence=self.confidence)
 
             entries: list[tuple[int, dict]] = []
@@ -509,6 +668,8 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                      f"pool fraction: {suspension_pool_size} (size: {pool_size}) | "
                      f"per-model select ratio: {add_ratio} | "
                      f"confidence threshold: {self.confidence_threshold} | "
+                     f"difficulty space: {self.difficulty_space} | "
+                     f"keep best model: {self.keep_best_model} | "
                      f"calibration set: {'dedicated' if calib_data is not None else 'validation (fallback)'}")
 
         # Per-model state: current best weights, its validation RMSE, and its accumulated dataset.
@@ -575,7 +736,8 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 self._log(1, f"[CoTraining]   Unit {uid}: owners={owners} receivers={receivers} | "
                              f"last-window RUL={label_last:.4f}")
 
-            # Fine-tune each receiver and keep it only if its validation RMSE improved.
+            # Fine-tune each receiver; keep it only if its validation RMSE improved (unless
+            # keep_best_model is off, in which case every fine-tuned model is kept).
             for j in range(self.number_of_models):
                 if not selected_per_model[j]:
                     continue
@@ -590,7 +752,15 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                 candidate = self._fine_tune(j, self._cpu_state_dict(h[j]), candidate_x, candidate_y, val_cpu)
                 candidate_rmse = self._val_rmse(candidate, val_data, val_label)
 
-                if candidate_rmse < best_val_rmse[j]:
+                if not self.keep_best_model:
+                    # Retention off: always accept the fine-tuned model and its added data (the
+                    # baseline this run is meant to compare against).
+                    self._log(1, f"[CoTraining]   Model {j}: kept (retention off | val RMSE "
+                                 f"{candidate_rmse:.4f}, previous {best_val_rmse[j]:.4f}).")
+                    h[j] = candidate
+                    best_val_rmse[j] = candidate_rmse
+                    best_dataset[j] = (candidate_x, candidate_y)
+                elif candidate_rmse < best_val_rmse[j]:
                     self._log(1, f"[CoTraining]   Model {j}: kept (val RMSE {candidate_rmse:.4f} < "
                                  f"best {best_val_rmse[j]:.4f}).")
                     h[j] = candidate
