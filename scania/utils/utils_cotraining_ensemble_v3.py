@@ -1,11 +1,12 @@
 """Scania training entry point for :class:`models.CoTrainingEnsemble_v3` (v3).
 
 Same structure as :mod:`scania.utils.utils_cotraining_ensemble_v2` (configurable number of
-models, per-model prediction files, builder-style parallel training), but v3 uses owner-based
-selection, a latent-kNN pseudo-label estimator over the conformal predictive band, backward
-extrapolation of the last-window RUL, and fine-tuning instead of from-scratch retraining. It
-therefore takes the extra selection / estimator / fine-tuning knobs and always threads the
-per-window ``time_step`` for the backward extrapolation.
+models, per-model prediction files), but v3 is single-GPU and uses owner-based confidence
+selection over a ``predict_int`` interval, a pseudo-label taken from the owner models' own
+predictions, backward extrapolation of the last-window RUL, and fine-tuning with per-model
+best-model retention. It therefore takes the extra confidence / fine-tuning knobs, always
+threads the per-window ``time_step`` (backward extrapolation) and the per-window survival
+``lower_bound`` (confidence score), and can use a dedicated calibration split for ``crepes``.
 
 Shared model/builder construction and output saving come from
 :mod:`scania.utils.utils_cotraining_common`; the RMSE weighting callback is reused from
@@ -40,6 +41,7 @@ def train_model(
     data_fraction: float,
     val_rate: float,
     test_rate: float,
+    calib_rate: float,
     stratify: bool,
     norm_type: str | None,
     shuffle_loader: bool,
@@ -56,14 +58,13 @@ def train_model(
     suspension_pool_size: float,
     add_ratio: float,
     confidence: float,
-    n_neighbors: int,
     fine_tune_lr_factor: float,
     fine_tune_max_epochs: int,
     fine_tune_patience: int,
-    model_pred_blend: float = 0.0,
+    confidence_threshold: float | None = None,
+    w_mono: float = 1.0,
+    w_lb: float = 1.0,
     inference_batch_size: int | None = None,
-    use_monotone_projection: bool = False,
-    monotone_residual_weight: float = 1.0,
     # Others
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
@@ -77,33 +78,29 @@ def train_model(
         models: The config ``models`` list; one self-contained entry per model (see
             :func:`scania.utils.utils_cotraining_common.parse_models_config`).
         dataset_root: Path to the Scania dataset.
-        sequence_len, seed, data_fraction, val_rate, test_rate, stratify, norm_type,
+        sequence_len, seed, data_fraction, val_rate, test_rate, calib_rate, stratify, norm_type,
         shuffle_loader, cache_dir, num_workers, pin_memory, return_sequence_label, batch_size,
         counter_mode, include_histograms, histogram_mode: ``ScaniaDataModule`` construction params.
+            ``calib_rate > 0`` carves a dedicated by-vehicle calibration split used to calibrate the
+            ``crepes`` conformal regressors (instead of the validation set).
         iterations: Number of co-training iterations.
         suspension_pool_size: Fraction in ``(0, 1]`` of censored units sampled as the pool each
             iteration.
         add_ratio: Per-model top fraction in ``(0, 1]`` — each model selects its top ``add_ratio``
-            of the pool (by its own conformal width) per iteration; ownership follows from which
-            models selected each unit.
-        confidence: Confidence level in ``(0, 1)`` defining the conformal percentile band
-            (``a``/``c``/``b`` = the ``(1-confidence)/2`` / 50 / ``(1+confidence)/2`` percentiles).
-        n_neighbors: Number of nearest labelled neighbours (latent space) for the k-NN estimator.
+            of the pool (by confidence) per iteration; ownership follows from which models selected
+            each unit.
+        confidence: Confidence level in ``(0, 1)`` passed to ``crepes`` ``predict_int``.
         fine_tune_lr_factor: Learning-rate multiplier for fine-tuning (warm start).
         fine_tune_max_epochs: Max epochs per fine-tuning call.
         fine_tune_patience: ``EarlyStopping`` patience per fine-tuning call.
-        model_pred_blend: ``alpha`` in ``[0, 1]`` blending the model median ``c`` with the k-NN
-            estimate (``0`` = pure k-NN clamped to the conformal band).
-        inference_batch_size: If set, chunk every forward pass (prediction + embedding) into
-            batches of this size to cap peak memory. ``None`` keeps single-shot inference.
-        use_monotone_projection: When ``True``, the monotone-projection residual of each unit's
-            raw predictions is blended into each model's own ranking score (a within-model
-            self-consistency signal used only to order that model's own units). It does not change
-            the injected label.
-        monotone_residual_weight: Weight of the residual term (only used when
-            ``use_monotone_projection`` is ``True``).
-        gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
-            more → parallel training across those GPUs.
+        confidence_threshold: Optional lower bound in ``(0, 1]`` on a unit's confidence; when set,
+            only units at or above it are selectable. ``None`` disables the gate.
+        w_mono: Non-negative weight of the monotonicity-violation term in the confidence score.
+        w_lb: Non-negative weight of the lower-bound-violation term in the confidence score.
+        inference_batch_size: If set, chunk every forward pass into batches of this size to cap
+            peak memory. ``None`` keeps single-shot inference.
+        gpu_ids: GPU id(s). ``None`` → auto (single GPU); ``[g]`` → pinned to GPU ``g``. v3 is
+            single-GPU: if several ids are passed only the first is used.
         datetime_for_folders: Timestamp used to name the output folders.
 
     Returns:
@@ -134,6 +131,7 @@ def train_model(
         "data_fraction": data_fraction,
         "val_rate": val_rate,
         "test_rate": test_rate,
+        "calib_rate": calib_rate,
         "stratify": stratify,
         "norm_type": norm_type,
         "shuffle_loader": shuffle_loader,
@@ -161,15 +159,17 @@ def train_model(
     # Per-window time_step for the censored data (row-aligned with the censored features/ids),
     # used to backward-extrapolate each selected unit's last-window RUL to its earlier windows.
     _, _, suspension_time_steps = scania_data_module.get_censored_time_steps("train")
-    # Per-window survival lower bounds, only needed when the monotone-projection residual (with
-    # censoring clip) feeds the selection score.
-    suspension_lower_bounds = None
-    if use_monotone_projection:
-        _, _, suspension_lower_bounds = scania_data_module.get_censored_lower_bounds("train")
-    # Labelled (uncensored) validation data: early stopping / best-checkpoint selection,
-    # conformal calibration set, and the ensemble weights (instead of the test set).
+    # Per-window survival lower bounds (always needed: the confidence score's lower-bound term).
+    _, _, suspension_lower_bounds = scania_data_module.get_censored_lower_bounds("train")
+    # Labelled (uncensored) validation data: early stopping / best-checkpoint selection and the
+    # ensemble weights (instead of the test set).
     val_features, val_targets, _, _ = scania_data_module.get_cotraining_tensors("val")
     test_features, test_targets, _, _ = scania_data_module.get_cotraining_tensors("test")
+    # Dedicated calibration split for the crepes conformal regressors (else the ensemble falls
+    # back to the validation set inside train()).
+    calib_features, calib_targets = None, None
+    if calib_rate > 0:
+        calib_features, calib_targets, _, _ = scania_data_module.get_cotraining_tensors("calib")
 
     nn_modules, module_builders, meta = parse_models_config(
         models_cfg=models,
@@ -184,14 +184,13 @@ def train_model(
         "suspension_pool_size": suspension_pool_size,
         "add_ratio": add_ratio,
         "confidence": confidence,
-        "n_neighbors": n_neighbors,
-        "model_pred_blend": model_pred_blend,
+        "confidence_threshold": confidence_threshold,
+        "w_mono": w_mono,
+        "w_lb": w_lb,
         "fine_tune_lr_factor": fine_tune_lr_factor,
         "fine_tune_max_epochs": fine_tune_max_epochs,
         "fine_tune_patience": fine_tune_patience,
         "inference_batch_size": inference_batch_size,
-        "use_monotone_projection": use_monotone_projection,
-        "monotone_residual_weight": monotone_residual_weight,
         "lr": meta["lr"],
         "max_epochs": meta["max_epochs"],
         "patiences": meta["patiences"],
@@ -211,10 +210,9 @@ def train_model(
         verbose=1,
         confidence=confidence,
         inference_batch_size=inference_batch_size,
-        use_monotone_projection=use_monotone_projection,
-        monotone_residual_weight=monotone_residual_weight,
-        n_neighbors=n_neighbors,
-        model_pred_blend=model_pred_blend,
+        confidence_threshold=confidence_threshold,
+        w_mono=w_mono,
+        w_lb=w_lb,
         fine_tune_lr_factor=fine_tune_lr_factor,
         fine_tune_max_epochs=fine_tune_max_epochs,
         fine_tune_patience=fine_tune_patience,
@@ -255,6 +253,8 @@ def train_model(
         add_ratio=add_ratio,
         val_data=val_features,
         val_label=val_targets,
+        calib_data=calib_features,
+        calib_label=calib_targets,
         test_data=test_features,
         test_label=test_targets,
         score_callback=_score_callback_for_coprog,

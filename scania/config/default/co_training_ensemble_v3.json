@@ -5,6 +5,7 @@
     "data_fraction": 0.1,
     "val_rate": 0.2,
     "test_rate": 0.1,
+    "calib_rate": 0.1,
     "stratify": true,
     "norm_type": "z-score",
     "num_workers": 4,
@@ -63,13 +64,12 @@
     "suspension_pool_size": 0.1,
     "add_ratio": 0.05,
     "confidence": 0.95,
-    "n_neighbors": 10,
-    "model_pred_blend": 0.0,
+    "confidence_threshold": null,
+    "w_mono": 1.0,
+    "w_lb": 1.0,
     "fine_tune_lr_factor": 0.1,
     "fine_tune_max_epochs": 50,
     "fine_tune_patience": 10,
-    "inference_batch_size": 1024,
-    "use_monotone_projection": true,
-    "monotone_residual_weight": 1.0
+    "inference_batch_size": 1024
   }
 }
