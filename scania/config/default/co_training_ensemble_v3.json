@@ -8,14 +8,14 @@
     "calib_rate": 0.1,
     "stratify": true,
     "norm_type": "z-score",
-    "num_workers": 4,
+    "num_workers": 2,
     "pin_memory": true,
     "return_sequence_label": false,
     "batch_size": 256,
     "shuffle_loader": true,
     "counter_mode": "both",
     "include_histograms": false,
-    "histogram_mode": "sum"
+    "histogram_mode": "zhist"
   },
   "model_params": {
     "models": [
@@ -64,11 +64,12 @@
     "suspension_pool_size": 0.1,
     "add_ratio": 0.05,
     "confidence": 0.95,
-    "difficulty_space": "raw",
+    "difficulty_space": "latent",
     "confidence_threshold": null,
-    "w_mono": 1.0,
-    "w_lb": 1.0,
+    "w_mono": 0.2,
+    "w_lb": 0.6,
     "keep_best_model": true,
+    "acceptance_metric": "val_rmse",
     "fine_tune_lr_factor": 0.1,
     "fine_tune_max_epochs": 50,
     "fine_tune_patience": 10,

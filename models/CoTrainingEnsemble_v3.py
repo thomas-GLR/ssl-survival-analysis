@@ -90,6 +90,7 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             w_mono: float = 1.0,
             w_lb: float = 1.0,
             keep_best_model: bool = True,
+            acceptance_metric: str = "val_rmse",
             fine_tune_lr_factor: float = 0.1,
             fine_tune_max_epochs: int = 20,
             fine_tune_patience: int = 5,
@@ -119,9 +120,14 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             w_mono: Non-negative weight of the monotonicity-violation term in the confidence score.
             w_lb: Non-negative weight of the lower-bound-violation term in the confidence score.
             keep_best_model: When ``True`` (default), a fine-tuned model is kept only if its
-                validation RMSE improved; otherwise the model is reverted and that iteration's
+                acceptance metric improved; otherwise the model is reverted and that iteration's
                 added units are dropped. When ``False``, every fine-tuned model is kept regardless
                 (no rollback, no dropping) — the baseline to compare best-model retention against.
+            acceptance_metric: What best-model retention minimises on the validation set.
+                ``"val_rmse"`` (default) uses the validation RMSE. ``"score"`` uses the
+                ``score_callback`` passed to :meth:`train` (e.g. the asymmetric Scania score, which
+                penalises over-prediction) — useful when val RMSE improves but the test score keeps
+                worsening. The label-weighting ``1 / val_rmse`` always uses RMSE regardless.
             fine_tune_lr_factor: Multiplier applied to each model's learning rate during
                 fine-tuning (warm start), e.g. ``0.1``.
             fine_tune_max_epochs: Max epochs per fine-tuning call.
@@ -137,6 +143,8 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
 
         if difficulty_space not in ("raw", "latent"):
             raise ValueError("difficulty_space must be 'raw' or 'latent'.")
+        if acceptance_metric not in ("val_rmse", "score"):
+            raise ValueError("acceptance_metric must be 'val_rmse' or 'score'.")
         if confidence_threshold is not None and not (0 < confidence_threshold <= 1):
             raise ValueError("confidence_threshold must be in (0, 1] or None.")
         if w_mono < 0 or w_lb < 0:
@@ -146,6 +154,7 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
 
         self.difficulty_space = difficulty_space
         self.keep_best_model = keep_best_model
+        self.acceptance_metric = acceptance_metric
         self.confidence_threshold = confidence_threshold
         self.w_mono = w_mono
         self.w_lb = w_lb
@@ -556,9 +565,34 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
         """Detach-and-clone a module's ``state_dict`` to CPU (a picklable warm-start snapshot)."""
         return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
 
-    def _val_rmse(self, model: LightningModule, val_x: torch.Tensor, val_y: torch.Tensor) -> float:
-        """Validation RMSE of ``model`` (the acceptance criterion for best-model retention)."""
-        return self._mse_on(model, val_x, val_y) ** 0.5
+    def _evaluate_on_val(
+            self,
+            model: LightningModule,
+            val_x: torch.Tensor,
+            val_y_flat: torch.Tensor,
+            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
+    ) -> tuple[float, float]:
+        """Return ``(acceptance_value, val_rmse)`` of ``model`` on the validation set.
+
+        Both are computed from a single forward pass. ``val_rmse`` is always returned (it drives
+        the label-weighting ``1 / val_rmse``); the acceptance value is the RMSE when
+        ``acceptance_metric == "val_rmse"`` and ``score_callback(pred, target)`` (e.g. the Scania
+        score) when ``acceptance_metric == "score"``. Both are minimised (lower = better).
+
+        Args:
+            model: The model to evaluate.
+            val_x: Validation features.
+            val_y_flat: Validation targets, flattened to ``(N,)`` and float.
+            score_callback: Score used when ``acceptance_metric == "score"`` (required in that mode).
+
+        Returns:
+            ``(acceptance_value, val_rmse)``.
+        """
+        pred = self._predict(model, val_x).view(-1).to(val_y_flat.device)
+        val_rmse = (((val_y_flat - pred) ** 2).mean().item()) ** 0.5
+        if self.acceptance_metric == "score":
+            return float(score_callback(pred, val_y_flat)), val_rmse
+        return val_rmse, val_rmse
 
     # ------------------------------------------------------------------ #
     # Training
@@ -648,6 +682,9 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
             if score_callback is None or weight_callback is None or metrics_file is None:
                 raise ValueError(
                     "score_callback, weight_callback and metrics_file are required to log metrics.")
+        if self.acceptance_metric == "score" and score_callback is None:
+            raise ValueError(
+                "acceptance_metric='score' requires score_callback (the metric to minimise).")
 
         if self._parallel:
             self._log(1, "[CoTraining] Multiple GPUs were configured, but v3 is single-GPU; "
@@ -670,10 +707,13 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                      f"confidence threshold: {self.confidence_threshold} | "
                      f"difficulty space: {self.difficulty_space} | "
                      f"keep best model: {self.keep_best_model} | "
+                     f"acceptance metric: {self.acceptance_metric} | "
                      f"calibration set: {'dedicated' if calib_data is not None else 'validation (fallback)'}")
 
-        # Per-model state: current best weights, its validation RMSE, and its accumulated dataset.
+        # Per-model state: current best weights, its acceptance value + validation RMSE (RMSE is
+        # kept separately because the label weighting always uses 1 / val_rmse), and its dataset.
         h: list[LightningModule] = []
+        best_accept: list[float] = []
         best_val_rmse: list[float] = []
         best_dataset: list[tuple[torch.Tensor, torch.Tensor]] = []
         for j in range(self.number_of_models):
@@ -681,9 +721,12 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                          f"failure samples...")
             model = self._fit_from_scratch(j, failure_data, failure_label, val_data, val_label)
             h.append(model)
-            best_val_rmse.append(self._val_rmse(model, val_data, val_label))
+            accept_value, val_rmse = self._evaluate_on_val(model, val_data, val_label, score_callback)
+            best_accept.append(accept_value)
+            best_val_rmse.append(val_rmse)
             best_dataset.append((failure_data, failure_label))
-            self._log(1, f"[CoTraining]   Model {j} initial val RMSE: {best_val_rmse[j]:.4f}")
+            self._log(1, f"[CoTraining]   Model {j} initial val RMSE: {val_rmse:.4f} | "
+                         f"acceptance ({self.acceptance_metric}): {accept_value:.4f}")
         self._log(1, "[CoTraining] Initial training done.")
 
         if metrics_enabled:
@@ -750,26 +793,31 @@ class CoTrainingEnsemble_v3(CoTrainingEnsemble_v2):
                              f"unit(s) ({n_added} sample(s)) | dataset: {len(candidate_x)} samples")
 
                 candidate = self._fine_tune(j, self._cpu_state_dict(h[j]), candidate_x, candidate_y, val_cpu)
-                candidate_rmse = self._val_rmse(candidate, val_data, val_label)
+                candidate_accept, candidate_rmse = self._evaluate_on_val(
+                    candidate, val_data, val_label, score_callback)
+                metric = self.acceptance_metric
 
                 if not self.keep_best_model:
                     # Retention off: always accept the fine-tuned model and its added data (the
                     # baseline this run is meant to compare against).
-                    self._log(1, f"[CoTraining]   Model {j}: kept (retention off | val RMSE "
-                                 f"{candidate_rmse:.4f}, previous {best_val_rmse[j]:.4f}).")
-                    h[j] = candidate
-                    best_val_rmse[j] = candidate_rmse
-                    best_dataset[j] = (candidate_x, candidate_y)
-                elif candidate_rmse < best_val_rmse[j]:
-                    self._log(1, f"[CoTraining]   Model {j}: kept (val RMSE {candidate_rmse:.4f} < "
-                                 f"best {best_val_rmse[j]:.4f}).")
-                    h[j] = candidate
-                    best_val_rmse[j] = candidate_rmse
-                    best_dataset[j] = (candidate_x, candidate_y)
+                    self._log(1, f"[CoTraining]   Model {j}: kept (retention off | {metric} "
+                                 f"{candidate_accept:.4f}, previous {best_accept[j]:.4f}).")
+                    accept = True
+                elif candidate_accept < best_accept[j]:
+                    self._log(1, f"[CoTraining]   Model {j}: kept ({metric} {candidate_accept:.4f} "
+                                 f"< best {best_accept[j]:.4f}).")
+                    accept = True
                 else:
-                    self._log(1, f"[CoTraining]   Model {j}: iteration {i + 1} rejected (val RMSE "
-                                 f"{candidate_rmse:.4f} >= best {best_val_rmse[j]:.4f}); reverted "
+                    self._log(1, f"[CoTraining]   Model {j}: iteration {i + 1} rejected ({metric} "
+                                 f"{candidate_accept:.4f} >= best {best_accept[j]:.4f}); reverted "
                                  f"and dropped {n_added} censored sample(s).")
+                    accept = False
+
+                if accept:
+                    h[j] = candidate
+                    best_accept[j] = candidate_accept
+                    best_val_rmse[j] = candidate_rmse
+                    best_dataset[j] = (candidate_x, candidate_y)
 
             if metrics_enabled:
                 self._log_stage_metrics(

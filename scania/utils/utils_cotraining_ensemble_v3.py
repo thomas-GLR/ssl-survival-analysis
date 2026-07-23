@@ -66,6 +66,7 @@ def train_model(
     w_mono: float = 1.0,
     w_lb: float = 1.0,
     keep_best_model: bool = True,
+    acceptance_metric: str = "val_rmse",
     inference_batch_size: int | None = None,
     # Others
     gpu_ids: list[int] | None = None,
@@ -103,8 +104,11 @@ def train_model(
         w_mono: Non-negative weight of the monotonicity-violation term in the confidence score.
         w_lb: Non-negative weight of the lower-bound-violation term in the confidence score.
         keep_best_model: When ``True`` (default), a fine-tuned model is kept per iteration only if
-            its validation RMSE improved (else reverted and its added units dropped). ``False``
+            its acceptance metric improved (else reverted and its added units dropped). ``False``
             keeps every fine-tuned model — the baseline to compare retention against.
+        acceptance_metric: ``"val_rmse"`` (default) or ``"score"`` — what retention minimises on
+            the acceptance set. ``"score"`` uses the Scania score (penalises over-prediction),
+            useful when val RMSE improves but the test score keeps worsening.
         inference_batch_size: If set, chunk every forward pass into batches of this size to cap
             peak memory. ``None`` keeps single-shot inference.
         gpu_ids: GPU id(s). ``None`` → auto (single GPU); ``[g]`` → pinned to GPU ``g``. v3 is
@@ -197,6 +201,7 @@ def train_model(
         "w_mono": w_mono,
         "w_lb": w_lb,
         "keep_best_model": keep_best_model,
+        "acceptance_metric": acceptance_metric,
         "fine_tune_lr_factor": fine_tune_lr_factor,
         "fine_tune_max_epochs": fine_tune_max_epochs,
         "fine_tune_patience": fine_tune_patience,
@@ -225,6 +230,7 @@ def train_model(
         w_mono=w_mono,
         w_lb=w_lb,
         keep_best_model=keep_best_model,
+        acceptance_metric=acceptance_metric,
         fine_tune_lr_factor=fine_tune_lr_factor,
         fine_tune_max_epochs=fine_tune_max_epochs,
         fine_tune_patience=fine_tune_patience,

@@ -54,6 +54,7 @@
     "w_mono": 1.0,
     "w_lb": 1.0,
     "keep_best_model": true,
+    "acceptance_metric": "score",
     "fine_tune_lr_factor": 0.1,
     "fine_tune_max_epochs": 1,
     "fine_tune_patience": 5,
