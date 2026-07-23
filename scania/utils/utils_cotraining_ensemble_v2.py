@@ -47,6 +47,8 @@ def train_model(
     return_sequence_label: bool,
     batch_size: int,
     counter_mode: str,
+    include_histograms: bool,
+    histogram_mode: str,
     # Training params
     iterations: int,
     suspension_pool_size: float,
@@ -74,7 +76,8 @@ def train_model(
             :func:`scania.utils.utils_cotraining_common.parse_models_config`).
         dataset_root: Path to the Scania dataset.
         sequence_len, seed, val_rate, test_rate, stratify, norm_type, shuffle_loader,
-        cache_dir, num_workers, pin_memory, return_sequence_label, batch_size, counter_mode:
+        cache_dir, num_workers, pin_memory, return_sequence_label, batch_size, counter_mode,
+        include_histograms, histogram_mode:
             ``ScaniaDataModule`` construction params.
         calib_rate: Optional fraction (sibling of ``val_rate``/``test_rate``) of vehicles set
             aside as a dedicated calibration split. When ``> 0``, the ``crepes`` conformal
@@ -140,6 +143,8 @@ def train_model(
         "batch_size": batch_size,
         "sequence_len": sequence_len,
         "counter_mode": counter_mode,
+        "include_histograms": include_histograms,
+        "histogram_mode": histogram_mode,
     }
 
     print("Creating data loader with the following parameters :")
