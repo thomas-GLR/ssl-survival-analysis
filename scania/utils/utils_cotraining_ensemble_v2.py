@@ -52,6 +52,11 @@ def train_model(
     suspension_pool_size: float,
     add_ratio: float,
     confidence: float,
+    # calib_rate is a dataset_params key (forwarded to ScaniaDataModule below); it is placed
+    # here, after the required params, only because it is optional (default 0.0, backward
+    # compatible with configs predating it) and Python requires defaulted params to follow
+    # every non-default one.
+    calib_rate: float = 0.0,
     inference_batch_size: int | None = None,
     use_monotone_projection: bool = False,
     monotone_residual_weight: float = 1.0,
@@ -71,6 +76,12 @@ def train_model(
         sequence_len, seed, val_rate, test_rate, stratify, norm_type, shuffle_loader,
         cache_dir, num_workers, pin_memory, return_sequence_label, batch_size, counter_mode:
             ``ScaniaDataModule`` construction params.
+        calib_rate: Optional fraction (sibling of ``val_rate``/``test_rate``) of vehicles set
+            aside as a dedicated calibration split. When ``> 0``, the ``crepes`` conformal
+            regressors are calibrated on this held-out set instead of ``val_data`` (which is
+            also used for early stopping), avoiding the anti-conservative interval bias from
+            calibrating on the same data used for model selection. ``0.0`` (default) keeps the
+            legacy behavior of calibrating on ``val_data``.
         iterations: Number of co-training iterations.
         suspension_pool_size: Fraction in ``(0, 1]`` of censored units sampled as the pool each
             iteration.
@@ -118,6 +129,7 @@ def train_model(
         "data_fraction": data_fraction,
         "val_rate": val_rate,
         "test_rate": test_rate,
+        "calib_rate": calib_rate,
         "stratify": stratify,
         "norm_type": norm_type,
         "shuffle_loader": shuffle_loader,
@@ -146,10 +158,16 @@ def train_model(
     suspension_lower_bounds = None
     if use_monotone_projection:
         _, _, suspension_lower_bounds = scania_data_module.get_censored_lower_bounds("train")
-    # Labelled (uncensored) validation data: early stopping / best-checkpoint selection,
-    # conformal calibration set, and the ensemble weights (instead of the test set).
+    # Labelled (uncensored) validation data: early stopping / best-checkpoint selection and
+    # the ensemble weights (instead of the test set). Also the fallback conformal calibration
+    # set when calib_rate == 0 (no dedicated calib split configured).
     val_features, val_targets, _, _ = scania_data_module.get_cotraining_tensors("val")
     test_features, test_targets, _, _ = scania_data_module.get_cotraining_tensors("test")
+    # Dedicated calibration split (decoupled from the early-stopping val set) — only fetched
+    # when calib_rate > 0; ensemble.train() falls back to val_data/val_label otherwise.
+    calib_features, calib_targets = None, None
+    if scania_data_module.calib_rate > 0:
+        calib_features, calib_targets, _, _ = scania_data_module.get_cotraining_tensors("calib")
 
     nn_modules, module_builders, meta = parse_models_config(
         models_cfg=models,
@@ -227,6 +245,8 @@ def train_model(
         add_ratio=add_ratio,
         val_data=val_features,
         val_label=val_targets,
+        calib_data=calib_features,
+        calib_label=calib_targets,
         # Per-stage metrics: the score columns use the Scania score, while the reported
         # weights use RMSE + "min" (matching calculate_weights below).
         test_data=test_features,

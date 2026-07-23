@@ -14,14 +14,20 @@ Pipeline (see the project plan for the rationale):
     4b. optionally subsample a fraction of vehicles (data_fraction < 1.0),
         stratified by is_censored so the censored/uncensored ratio is
         preserved regardless of the `stratify` split setting
-    5. split vehicles into train/val/test (all rows of a vehicle stay together)
+    5. split vehicles into train/val/test/(optional calib) -- all rows of a
+       vehicle stay together. Stratified (when `stratify=True`) by the cross
+       of is_censored and a raw-length quantile bucket (vehicles with exactly
+       1 readout get their own bucket, since they can't be quantile-split).
+       `calib_rate` is an opt-in sibling of `val_rate`/`test_rate`: a fully
+       separate held-out set for conformal calibration (crepes), decoupled
+       from the early-stopping validation set.
     5b. truncate a random per-vehicle number of trailing readouts of
-        uncensored (failure) vehicles in val/test only, so the RUL target
-        near end-of-life isn't trivially ~0 (train is never truncated;
-        censored vehicles are never truncated)
+        uncensored (failure) vehicles in val/test/calib only, so the RUL
+        target near end-of-life isn't trivially ~0 (train is never
+        truncated; censored vehicles are never truncated)
     6. build a ScaniaDataset per split; z-score params are fit on train only;
        the test dataset additionally uses only_final=True (one window per
-       vehicle, mirroring CMAPSS)
+       vehicle, mirroring CMAPSS); val/calib keep every window
     7. cache the processed splits so later runs skip preprocessing
 
 The module exposes the standard ``train/val/test_dataloader`` (uncensored
@@ -54,7 +60,7 @@ from scania.dataset.ScaniaDataset import ScaniaDataset, ZHistFeatureNormalizer, 
 READOUTS_FILE = "train_operational_readouts.csv"
 TTE_FILE = "train_tte.csv"
 MANIFEST_FILE = "manifest.json"
-SPLITS = ("train", "val", "test")
+BASE_SPLITS = ("train", "val", "test")
 
 
 class ScaniaDataModule(LightningDataModule):
@@ -67,7 +73,9 @@ class ScaniaDataModule(LightningDataModule):
             data_fraction: float = 1.0,
             val_rate: float = 0.2,
             test_rate: float = 0.1,
+            calib_rate: float = 0.0,
             stratify: bool = True,
+            n_quantile_length_strata: int = 4,
             norm_type: str | None = "z-score",
             shuffle_loader: bool = True,
             cache_dir: str | None = None,
@@ -79,8 +87,11 @@ class ScaniaDataModule(LightningDataModule):
             histogram_mode: str = "sum",
     ):
         super().__init__()
-        assert 0 <= val_rate < 1 and 0 <= test_rate < 1 and (val_rate + test_rate) < 1, \
-            "val_rate/test_rate must be in [0, 1) and sum to < 1"
+        assert (
+            0 <= val_rate < 1 and 0 <= test_rate < 1 and 0 <= calib_rate < 1
+            and (val_rate + test_rate + calib_rate) < 1
+        ), "val_rate/test_rate/calib_rate must be in [0, 1) and sum to < 1"
+        assert n_quantile_length_strata >= 1, "n_quantile_length_strata must be >= 1"
         assert counter_mode in ("delta", "cumulative", "both"), \
             f"Unsupported counter_mode: {counter_mode}"
         assert 0 < data_fraction <= 1.0, "data_fraction must be in (0, 1]"
@@ -94,7 +105,10 @@ class ScaniaDataModule(LightningDataModule):
         self.data_fraction = data_fraction
         self.val_rate = val_rate
         self.test_rate = test_rate
+        self.calib_rate = calib_rate
         self.stratify = stratify
+        self.n_quantile_length_strata = n_quantile_length_strata
+        self._splits: tuple[str, ...] = BASE_SPLITS + (("calib",) if self.calib_rate > 0 else ())
         self.norm_type = norm_type
         self.shuffle_loader = shuffle_loader
         self.cache_dir = cache_dir or os.path.join(data_dir, "scania_cache")
@@ -135,6 +149,7 @@ class ScaniaDataModule(LightningDataModule):
         self.train_set: ScaniaDataset | None = None
         self.val_set: ScaniaDataset | None = None
         self.test_set: ScaniaDataset | None = None
+        self.calib_set: ScaniaDataset | None = None
         self.norm_params: np.ndarray | None = None
         self.hist_norm_params: dict[str, float] | None = None
         self.zhist_norm_params: dict | None = None
@@ -242,37 +257,51 @@ class ScaniaDataModule(LightningDataModule):
             vehicule_status = vehicule_status[vehicule_status[VEHICLE_ID].isin(kept_ids)]
 
         if self.stratify:
-            # Fixed group order (0 then 1) keeps the sequential RNG deterministic.
-            strata = [group[VEHICLE_ID].to_numpy() for _, group in vehicule_status.groupby(IS_CENSORED)]
+            # Fixed group order (is_censored 0/1, then "len1" before ascending length-
+            # quantile bucket) keeps the sequential RNG deterministic.
+            strata = self._length_stratify_groups(vehicule_status, readouts)
         else:
             strata = [vehicule_status[VEHICLE_ID].to_numpy()]
 
         test_ids: set = set()
         val_ids: set = set()
+        calib_ids: set = set()
         for ids in strata:
             ids = rng.permutation(ids)
             id_number = len(ids)
             id_number_test = int(self.test_rate * id_number)
             id_number_val = int(self.val_rate * id_number)
+            id_number_calib = int(self.calib_rate * id_number)
             test_ids.update(ids[:id_number_test].tolist())
             val_ids.update(ids[id_number_test:id_number_test + id_number_val].tolist())
+            calib_ids.update(
+                ids[id_number_test + id_number_val:
+                    id_number_test + id_number_val + id_number_calib].tolist())
 
         vehicules_ids = readouts[VEHICLE_ID]
         test_df = readouts[vehicules_ids.isin(test_ids)]
         val_df = readouts[vehicules_ids.isin(val_ids)]
-        train_df = readouts[~vehicules_ids.isin(test_ids | val_ids)]
+        calib_df = readouts[vehicules_ids.isin(calib_ids)] if "calib" in self._splits else None
+        train_df = readouts[~vehicules_ids.isin(test_ids | val_ids | calib_ids)]
 
-        # 5b. Val/test: truncate a random tail of trailing readouts per
+        # 5b. Val/test/calib: truncate a random tail of trailing readouts per
         #     uncensored vehicle so the final kept window's RUL isn't
         #     trivially ~0 (see _truncate_uncensored_tail). Train is never
         #     truncated. Consumes further draws from the same `rng` used
-        #     above for the vehicle split.
+        #     above for the vehicle split. calib is held out the same way
+        #     val/test are (it feeds conformal calibration against known
+        #     outcomes), so it gets the same treatment; it draws no extra
+        #     rng entropy when disabled (calib_df is None).
         test_df = self._truncate_uncensored_tail(test_df, rng)
         val_df = self._truncate_uncensored_tail(val_df, rng)
+        if calib_df is not None:
+            calib_df = self._truncate_uncensored_tail(calib_df, rng)
 
-        # 6. build datasets; z-score params fit on train, reused for val/test.
+        # 6. build datasets; z-score params fit on train, reused for val/test/calib.
         #    Test additionally uses only_final=True (only the last window per
-        #    vehicle kept), mirroring CMAPSS's use_only_final_on_test.
+        #    vehicle kept), mirroring CMAPSS's use_only_final_on_test. calib (like
+        #    val) keeps every window -- conformal calibration needs a large residual
+        #    pool, not a single window per vehicle.
         self.train_set = ScaniaDataset(train_df, norm_type=self.norm_type, norm_params=None,
                                        hist_norm_params=None, zhist_norm_params=None,
                                        **self._dataset_kwargs())
@@ -286,10 +315,74 @@ class ScaniaDataModule(LightningDataModule):
                                       hist_norm_params=self.hist_norm_params,
                                       zhist_norm_params=self.zhist_norm_params, only_final=True,
                                       **self._dataset_kwargs())
+        self.calib_set = None
+        if calib_df is not None:
+            self.calib_set = ScaniaDataset(calib_df, norm_type=self.norm_type, norm_params=self.norm_params,
+                                           hist_norm_params=self.hist_norm_params,
+                                           zhist_norm_params=self.zhist_norm_params, **self._dataset_kwargs())
 
+        split_names = "train/val/test" + ("/calib" if calib_df is not None else "")
+        split_counts = [len(train_df[VEHICLE_ID].unique()), len(val_df[VEHICLE_ID].unique()),
+                        len(test_df[VEHICLE_ID].unique())]
+        if calib_df is not None:
+            split_counts.append(len(calib_df[VEHICLE_ID].unique()))
         print(f"[Scania] Preprocessing done in {time.time() - start:.1f}s | "
-              f"vehicles train/val/test = {len(train_df[VEHICLE_ID].unique())}/"
-              f"{len(val_df[VEHICLE_ID].unique())}/{len(test_df[VEHICLE_ID].unique())}")
+              f"vehicles {split_names} = {'/'.join(str(c) for c in split_counts)}")
+
+    # ------------------------------------------------------------------ #
+    # Length-quantile x is_censored stratification (train/val/test/calib split)
+    # ------------------------------------------------------------------ #
+    def _length_stratify_groups(
+            self, vehicule_status: pd.DataFrame, readouts: pd.DataFrame,
+    ) -> list[np.ndarray]:
+        """Vehicle-id strata crossing IS_CENSORED with a raw-length quantile bucket.
+
+        Vehicles with exactly 1 raw readout row form their own "len1" stratum
+        (they cannot be meaningfully quantile-split, and length == 1 is common
+        enough in a censored survival dataset that including them in
+        ``pd.qcut`` risks a degenerate all-identical-value bucket). Remaining
+        length > 1 vehicles are split into ``self.n_quantile_length_strata``
+        quantile buckets computed independently *within* each IS_CENSORED
+        group -- censored and failure vehicles have different length
+        distributions in a run-to-failure dataset, so nested binning keeps
+        every (is_censored, length_bucket) cross-stratum representative of its
+        own subpopulation instead of being dominated by whichever IS_CENSORED
+        group is larger.
+
+        ``pd.qcut(..., duplicates="drop")`` avoids raising on repeated bin
+        edges (skewed/duplicated lengths); the one residual case it does not
+        fully resolve -- returning all-NaN labels when every remaining length
+        value in a group is identical -- is folded into bucket 0 via
+        ``fillna(0)``.
+
+        :param vehicule_status: One row per vehicle with VEHICLE_ID + IS_CENSORED
+            (already filtered by data_fraction subsampling, if any).
+        :param readouts: The (already subsampled) full readouts dataframe, used
+            only to compute per-vehicle raw row counts.
+        :return: List of 1-D vehicle-id numpy arrays, one per non-empty
+            (is_censored, length_bucket) cross-stratum, in a fixed deterministic
+            order (is_censored 0 then 1; within each, "len1" first, then
+            ascending length-quantile bucket index).
+        """
+        lengths = readouts.groupby(VEHICLE_ID).size().rename("_length")
+        vehicule_status = vehicule_status.merge(lengths, on=VEHICLE_ID, how="left")
+
+        strata: list[np.ndarray] = []
+        for _, group in vehicule_status.groupby(IS_CENSORED):  # fixed order: 0 then 1
+            len1_mask = group["_length"] == 1
+            len1_ids = group.loc[len1_mask, VEHICLE_ID].to_numpy()
+            if len(len1_ids) > 0:
+                strata.append(len1_ids)
+
+            rest = group.loc[~len1_mask]
+            if len(rest) == 0:
+                continue
+            bucket = pd.qcut(
+                rest["_length"], q=self.n_quantile_length_strata, labels=False, duplicates="drop")
+            bucket = bucket.fillna(0).astype(int)
+            for bucket_id in sorted(bucket.unique()):
+                strata.append(rest.loc[bucket == bucket_id, VEHICLE_ID].to_numpy())
+        return strata
 
     # ------------------------------------------------------------------ #
     # Val/test tail truncation (avoid a trivially-~0 end-of-life RUL)
@@ -359,19 +452,29 @@ class ScaniaDataModule(LightningDataModule):
         ``_truncate_uncensored_tail`` bounds how many trailing rows are kept
         per vehicle relative to ``sequence_len``, so the cached row set
         itself now depends on it.
+
+        ``cache_version`` is a generic marker bumped whenever the split
+        algorithm (or any other cache-affecting logic not captured by a
+        dedicated key below) changes -- ``_cache_is_valid`` only checks
+        equality of this dict, so an algorithm change that doesn't touch any
+        existing key/value would otherwise silently reuse a stale cache
+        produced by the old code.
         """
         return {
             "feature_cols": self.feature_cols,
             "norm_type": self.norm_type,
             "val_rate": self.val_rate,
             "test_rate": self.test_rate,
+            "calib_rate": self.calib_rate,
             "stratify": self.stratify,
+            "n_quantile_length_strata": self.n_quantile_length_strata,
             "seed": self.seed,
             "sequence_len": self.sequence_len,
             "counter_mode": self.counter_mode,
             "data_fraction": self.data_fraction,
             "include_histograms": self.include_histograms,
             "histogram_mode": self.histogram_mode,
+            "cache_version": 2,
         }
 
     def _cache_columns(self) -> list[str]:
@@ -392,7 +495,7 @@ class ScaniaDataModule(LightningDataModule):
         manifest_path = os.path.join(self.cache_dir, MANIFEST_FILE)
         if not os.path.exists(manifest_path):
             return False
-        if not all(os.path.exists(os.path.join(self.cache_dir, f"{s}.csv")) for s in SPLITS):
+        if not all(os.path.exists(os.path.join(self.cache_dir, f"{s}.csv")) for s in self._splits):
             return False
         with open(manifest_path, "r") as f:
             manifest = json.load(f)
@@ -403,7 +506,11 @@ class ScaniaDataModule(LightningDataModule):
         cols = self._cache_columns()
         sizes = {}
         vehicle_counts = {}
-        for name, dataset in zip(SPLITS, (self.train_set, self.val_set, self.test_set)):
+        split_datasets = {"train": self.train_set, "val": self.val_set, "test": self.test_set}
+        if self.calib_set is not None:
+            split_datasets["calib"] = self.calib_set
+        for name in self._splits:
+            dataset = split_datasets[name]
             # ds.df holds the normalized features + the columns count_rul needs.
             dataset.df[cols].to_csv(os.path.join(self.cache_dir, f"{name}.csv"), index=False)
             sizes[name] = int(len(dataset))
@@ -436,7 +543,7 @@ class ScaniaDataModule(LightningDataModule):
             self.zhist_norm_params = ZHistFeatureNormalizer.params_from_json(manifest["zhist_norm_params"])
 
         sets = {}
-        for name in SPLITS:
+        for name in self._splits:
             df = pd.read_csv(os.path.join(self.cache_dir, f"{name}.csv"))
             # Features are already normalized in the cache -> norm_type=None.
             # only_final mirrors _preprocess_and_split: test only.
@@ -447,6 +554,7 @@ class ScaniaDataModule(LightningDataModule):
             )
 
         self.train_set, self.val_set, self.test_set = sets["train"], sets["val"], sets["test"]
+        self.calib_set = sets.get("calib")
         if self.norm_params is not None:
             self.train_set.norm_params = self.norm_params
 
@@ -494,6 +602,8 @@ class ScaniaDataModule(LightningDataModule):
         if self.train_set is None:
             self.setup()
         mapping = {"train": self.train_set, "val": self.val_set, "test": self.test_set}
+        if self.calib_set is not None:
+            mapping["calib"] = self.calib_set
         if split not in mapping:
             raise ValueError(f"Unknown split '{split}', expected one of {list(mapping)}")
         return mapping[split]

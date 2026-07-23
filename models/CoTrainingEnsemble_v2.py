@@ -255,6 +255,8 @@ class CoTrainingEnsemble_v2:
             add_ratio: float,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
+            calib_data: torch.Tensor | None = None,
+            calib_label: torch.Tensor | None = None,
             suspension_lower_bounds: torch.Tensor | None = None,
             test_data: torch.Tensor | None = None,
             test_label: torch.Tensor | None = None,
@@ -298,11 +300,21 @@ class CoTrainingEnsemble_v2:
                 across all models and handed out round-robin (with a rotating starting model) so no
                 single model consistently gets first pick of the most confident censored units.
             val_data:
-                Validation features. Required: used both for early stopping / best-checkpoint
-                selection during every training call and as the calibration set for the
-                conformal regressors.
+                Validation features. Required: used for early stopping / best-checkpoint
+                selection during every training call, for the per-stage ensemble weighting/
+                reporting, and as the fallback calibration set for the conformal regressors
+                when ``calib_data`` is not given.
             val_label:
                 Validation labels associated with ``val_data``. Required.
+            calib_data:
+                Optional features for a calibration set kept separate from ``val_data``. When
+                given (together with ``calib_label``), the conformal regressors are calibrated
+                on this set instead of ``val_data``, avoiding the anti-conservative (too-narrow)
+                intervals that result from calibrating on the same data used for early-stopping
+                model selection. Falls back to ``val_data`` when ``None`` (legacy behavior).
+            calib_label:
+                Calibration labels associated with ``calib_data``. Required together with
+                ``calib_data``.
             suspension_lower_bounds:
                 Optional per-window survival lower bounds for the censored data, row-aligned
                 with ``suspension_data`` / ``suspension_ids`` (shape ``(N,)`` or ``(N, 1)``;
@@ -345,11 +357,18 @@ class CoTrainingEnsemble_v2:
 
         self._check_if_training_is_possible()
 
-        # The validation set is used to calibrate every conformal regressor, so it is
-        # mandatory in v2 (it is also reused for early stopping and the weighted metrics).
+        # val_data is mandatory in v2 (early stopping + weighted metrics, and the fallback
+        # calibration set when calib_data isn't given).
         if val_data is None or val_label is None:
             raise ValueError(
-                "val_data and val_label are required in v2 (used to calibrate the conformal regressors).")
+                "val_data and val_label are required in v2 (used for early stopping / "
+                "best-checkpoint selection).")
+        if (calib_data is None) != (calib_label is None):
+            raise ValueError("calib_data and calib_label must be provided together.")
+        # Fall back to the validation set when no dedicated calibration set is given
+        # (legacy behavior — see the calib_data/calib_label docstring for the tradeoff).
+        calib_data_eff = calib_data if calib_data is not None else val_data
+        calib_label_eff = calib_label if calib_label is not None else val_label
 
         # Per-stage metrics need the test set, the criteria callback and a destination file.
         # Enable only when all are present; if the caller asked for metrics (test_data given)
@@ -405,6 +424,8 @@ class CoTrainingEnsemble_v2:
                 add_ratio=add_ratio,
                 val_data=val_data,
                 val_label=val_label,
+                calib_data=calib_data_eff,
+                calib_label=calib_label_eff,
                 metrics_enabled=metrics_enabled,
                 test_data=test_data,
                 test_label=test_label,
@@ -486,7 +507,7 @@ class CoTrainingEnsemble_v2:
                 self._log(2, f"[CoTraining]   Model {j}: calibrating conformal regressor and "
                              f"scoring {len(pool_ids)} pooled censored units...")
 
-                wrapper = self._build_calibrated_regressor(hj, xj, val_data, val_label)
+                wrapper = self._build_calibrated_regressor(hj, xj, calib_data_eff, calib_label_eff)
 
                 # Collect each unit's rows, its per-window pseudo-labels, its (optional) per-window
                 # lower bounds and its last window (the interval of that final window is the unit's
@@ -789,6 +810,8 @@ class CoTrainingEnsemble_v2:
             add_ratio: float,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
+            calib_data: torch.Tensor,
+            calib_label: torch.Tensor,
             suspension_lower_bounds: torch.Tensor | None,
             metrics_enabled: bool,
             test_data: torch.Tensor | None,
@@ -806,9 +829,16 @@ class CoTrainingEnsemble_v2:
         via a :class:`~models.cotraining_gpu_pool.CoTrainingGpuPool`, distributed round-robin.
         Width normalization and the round-robin voting selection stay in the main process.
         Only CPU state dicts / small per-unit results cross the process boundary.
+
+        ``val_data``/``val_label`` are used only for early-stopping (``_make_fit_spec``);
+        ``calib_data``/``calib_label`` (already resolved by the caller to fall back to
+        ``val_data``/``val_label`` when no dedicated calibration set was given) are used only
+        for the conformal calibration (``ConformalScoreSpec``) — the two are kept as separate
+        CPU pairs so calibration is decoupled from the early-stopping model-selection data.
         """
         n = self.number_of_models
         val_cpu = self._cpu_pair(val_data, val_label)
+        calib_cpu = self._cpu_pair(calib_data, calib_label)
         # Whether the censoring clip is active this run (projection on AND bounds available).
         clip_bounds = self.use_monotone_projection and suspension_lower_bounds is not None
 
@@ -873,8 +903,8 @@ class CoTrainingEnsemble_v2:
                         module_builder=self.module_builders[j],
                         state_dict={k: v.detach().cpu().clone() for k, v in h[j].state_dict().items()},
                         train_x=xj.detach().cpu(),
-                        val_x=val_cpu[0],
-                        val_y=val_cpu[1],
+                        val_x=calib_cpu[0],
+                        val_y=calib_cpu[1],
                         unit_ids=unit_ids_int,
                         unit_x=unit_x,
                         confidence=self.confidence,
