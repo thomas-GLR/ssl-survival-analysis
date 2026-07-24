@@ -302,24 +302,47 @@ class ScaniaDataModule(LightningDataModule):
         #    vehicle kept), mirroring CMAPSS's use_only_final_on_test. calib (like
         #    val) keeps every window -- conformal calibration needs a large residual
         #    pool, not a single window per vehicle.
-        self.train_set = ScaniaDataset(train_df, norm_type=self.norm_type, norm_params=None,
-                                       hist_norm_params=None, zhist_norm_params=None,
-                                       **self._dataset_kwargs())
+        self.train_set = ScaniaDataset(
+            train_df,
+            norm_type=self.norm_type,
+            norm_params=None,
+            hist_norm_params=None,
+            zhist_norm_params=None,
+            **self._dataset_kwargs(),
+
+        )
         self.norm_params = self.train_set.norm_params
         self.hist_norm_params = self.train_set.hist_norm_params
         self.zhist_norm_params = self.train_set.zhist_norm_params
-        self.val_set = ScaniaDataset(val_df, norm_type=self.norm_type, norm_params=self.norm_params,
-                                     hist_norm_params=self.hist_norm_params,
-                                     zhist_norm_params=self.zhist_norm_params, **self._dataset_kwargs())
-        self.test_set = ScaniaDataset(test_df, norm_type=self.norm_type, norm_params=self.norm_params,
-                                      hist_norm_params=self.hist_norm_params,
-                                      zhist_norm_params=self.zhist_norm_params, only_final=True,
-                                      **self._dataset_kwargs())
+
+        self.val_set = ScaniaDataset(
+            val_df,
+            norm_type=self.norm_type,
+            norm_params=self.norm_params,
+            hist_norm_params=self.hist_norm_params,
+            zhist_norm_params=self.zhist_norm_params,
+            only_final=True,
+            **self._dataset_kwargs(),
+        )
+        self.test_set = ScaniaDataset(
+            test_df, norm_type=self.norm_type,
+            norm_params=self.norm_params,
+            hist_norm_params=self.hist_norm_params,
+            zhist_norm_params=self.zhist_norm_params,
+            only_final=True,
+            **self._dataset_kwargs(),
+        )
+
         self.calib_set = None
         if calib_df is not None:
-            self.calib_set = ScaniaDataset(calib_df, norm_type=self.norm_type, norm_params=self.norm_params,
-                                           hist_norm_params=self.hist_norm_params,
-                                           zhist_norm_params=self.zhist_norm_params, **self._dataset_kwargs())
+            self.calib_set = ScaniaDataset(
+                calib_df,
+                norm_type=self.norm_type,
+                norm_params=self.norm_params,
+                hist_norm_params=self.hist_norm_params,
+                zhist_norm_params=self.zhist_norm_params,
+                **self._dataset_kwargs(),
+            )
 
         split_names = "train/val/test" + ("/calib" if calib_df is not None else "")
         split_counts = [len(train_df[VEHICLE_ID].unique()), len(val_df[VEHICLE_ID].unique()),
