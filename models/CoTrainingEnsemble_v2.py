@@ -20,9 +20,11 @@ from models.coprog_gpu_pool import TrainingSpec, run_training_job
 from models.cotraining_gpu_pool import (
     CoTrainingGpuPool,
     ConformalScoreSpec,
+    FineTuneSpec,
     _TorchRegressorAdapter,
     _monotone_project,
     run_conformal_score_job,
+    run_finetune_job,
 )
 
 
@@ -48,6 +50,14 @@ class CoTrainingEnsemble_v2:
             inference_batch_size: int | None = None,
             use_monotone_projection: bool = False,
             monotone_residual_weight: float = 1.0,
+            use_fine_tuning: bool = False,
+            fine_tune_lr_factor: float = 0.1,
+            fine_tune_max_epochs: int = 20,
+            fine_tune_patience: int = 5,
+            peer_weighted_pseudo_label: bool = False,
+            keep_best_model: bool = False,
+            isotonic_time_weighting: bool = False,
+            bagging_failure_data: bool = False,
     ):
         """
         :param models: list[nn.Module]
@@ -79,6 +89,47 @@ class CoTrainingEnsemble_v2:
             ``width_norm + lambda * residual_norm`` (both terms per-model normalized). Only used
             when ``use_monotone_projection`` is ``True``; ``0`` disables the residual term (the
             projection still cleans the injected labels but selection stays width-only).
+        :param use_fine_tuning: bool
+            When ``True``, each receiver model is **warm-started from its current weights and
+            fine-tuned** on its grown dataset every iteration instead of being retrained from
+            scratch (mirrors ``CoTrainingEnsemble_v3``). Requires the builder path
+            (``setup_training_builder``) and the sequential path (not multi-GPU parallel).
+            ``False`` (default) keeps the legacy from-scratch retraining.
+        :param fine_tune_lr_factor: float
+            Multiplier applied to each model's learning rate during a fine-tune (e.g. ``0.1``).
+            Only used when ``use_fine_tuning`` is ``True``. Must be ``> 0``.
+        :param fine_tune_max_epochs: int
+            Max epochs per fine-tuning call. Only used when ``use_fine_tuning`` is ``True``.
+        :param fine_tune_patience: int
+            ``EarlyStopping`` patience (monitors ``val_loss``) per fine-tuning call. Only used
+            when ``use_fine_tuning`` is ``True``.
+        :param peer_weighted_pseudo_label: bool
+            When ``True``, a selected unit's pseudo-label is the **confidence-weighted
+            average** of the per-window RUL predictions of *all* peer models ``j != k`` that
+            scored the unit (weight ``prop 1 / norm_width_j**2`` — each peer's own per-unit,
+            median-normalized conformal-interval score, the same one used to rank candidates;
+            a tighter/more confident peer contributes more), instead of taking the single
+            most-confident peer's prediction. Unit selection (tightest average normalized
+            width) is unchanged. ``False`` (default) keeps the single most-confident-peer label.
+        :param keep_best_model: bool
+            When ``True``, after each iteration a receiver's fine-tuned/retrained candidate is
+            **kept only if its validation RMSE strictly improves** on that model's best so far;
+            otherwise the previous model, its dataset and its best RMSE are retained and the
+            iteration's added units are dropped for good (mirrors ``CoTrainingEnsemble_v3``).
+            ``False`` (default) always accepts the candidate (legacy behavior).
+        :param isotonic_time_weighting: bool
+            When ``True``, the monotone (isotonic) projection of each unit's pseudo-labels is
+            fitted with per-window ``sample_weight`` proportional to the local time gap
+            ``Delta t`` (central gap), so temporally isolated windows are treated as more
+            independent. Requires ``use_monotone_projection=True`` and a ``suspension_time_steps``
+            tensor passed to ``train``. ``False`` (default) uses the unweighted projection.
+        :param bagging_failure_data: bool
+            When ``True``, each model's *initial* training set (before any censored unit is
+            added) is an independent bootstrap resample of ``failure_data``/``failure_label``
+            (``N`` draws with replacement from the ``N`` failure rows, classic bagging), instead
+            of every model sharing the exact same failure dataset. Only affects the initial
+            dataset; units added during co-training are unaffected. ``False`` (default) keeps
+            the legacy behavior of all models starting from the identical failure dataset.
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
@@ -88,6 +139,9 @@ class CoTrainingEnsemble_v2:
 
         if monotone_residual_weight < 0:
             raise ValueError("monotone_residual_weight must be non-negative.")
+
+        if fine_tune_lr_factor <= 0:
+            raise ValueError("fine_tune_lr_factor must be positive.")
 
         self.models = models
         self.number_of_models = len(self.models)
@@ -101,6 +155,14 @@ class CoTrainingEnsemble_v2:
         self._inference_batch_size = inference_batch_size
         self.use_monotone_projection = use_monotone_projection
         self.monotone_residual_weight = monotone_residual_weight
+        self.use_fine_tuning = use_fine_tuning
+        self.fine_tune_lr_factor = fine_tune_lr_factor
+        self.fine_tune_max_epochs = fine_tune_max_epochs
+        self.fine_tune_patience = fine_tune_patience
+        self.peer_weighted_pseudo_label = peer_weighted_pseudo_label
+        self.keep_best_model = keep_best_model
+        self.isotonic_time_weighting = isotonic_time_weighting
+        self.bagging_failure_data = bagging_failure_data
 
         # Builder-style config (set through setup_training_builder), required for multi-GPU
         # parallel training. Mirrors models.Coprog / CoTrainingEnsemble (v1).
@@ -258,6 +320,7 @@ class CoTrainingEnsemble_v2:
             calib_data: torch.Tensor | None = None,
             calib_label: torch.Tensor | None = None,
             suspension_lower_bounds: torch.Tensor | None = None,
+            suspension_time_steps: torch.Tensor | None = None,
             test_data: torch.Tensor | None = None,
             test_label: torch.Tensor | None = None,
             score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
@@ -322,6 +385,13 @@ class CoTrainingEnsemble_v2:
                 ``>=`` it). Only used when ``use_monotone_projection`` is enabled, to clip each
                 unit's projected pseudo-labels up to its bound. If projection is enabled but
                 this is ``None``, projection falls back to monotonicity only (no censoring clip).
+            suspension_time_steps:
+                Optional per-window time steps for the censored data, row-aligned with
+                ``suspension_data`` / ``suspension_ids`` (shape ``(N,)`` or ``(N, 1)``, ordered
+                oldest -> newest within each unit). Only used when ``isotonic_time_weighting`` is
+                enabled: the local time gap ``Delta t`` between a unit's windows becomes the
+                ``sample_weight`` of its isotonic projection. Required when
+                ``isotonic_time_weighting`` is ``True``.
             test_data:
                 Optional test features used only for the per-stage metrics logged to
                 ``metrics_file``. Never used for training or model selection.
@@ -356,6 +426,35 @@ class CoTrainingEnsemble_v2:
         self._log_file_path = log_file
 
         self._check_if_training_is_possible()
+
+        # The four opt-in levers (fine-tuning, peer-weighted pseudo-labels, keep-best-model,
+        # time-weighted isotonic) are only wired into the sequential path; refuse to run them
+        # silently under multi-GPU parallel where they would be ignored.
+        new_features_on = (
+            self.use_fine_tuning or self.peer_weighted_pseudo_label
+            or self.keep_best_model or self.isotonic_time_weighting
+        )
+        if self._parallel and new_features_on:
+            raise ValueError(
+                "use_fine_tuning, peer_weighted_pseudo_label, keep_best_model and "
+                "isotonic_time_weighting are only supported on the sequential path; they cannot "
+                "be combined with multi-GPU parallel (gpu_ids with >= 2 GPUs).")
+
+        # Fine-tuning warm-starts from the builder-rebuilt module and reuses the builder's
+        # batch-size / shuffle config, so it requires setup_training_builder (like v3).
+        if self.use_fine_tuning and not self._use_builders:
+            raise ValueError(
+                "use_fine_tuning requires setup_training_builder (the builder path).")
+
+        # Time-weighted isotonic only has an effect inside the monotone projection and needs the
+        # per-window time steps to derive the sample weights.
+        if self.isotonic_time_weighting:
+            if not self.use_monotone_projection:
+                raise ValueError(
+                    "isotonic_time_weighting requires use_monotone_projection=True.")
+            if suspension_time_steps is None:
+                raise ValueError(
+                    "isotonic_time_weighting requires suspension_time_steps to be provided.")
 
         # val_data is mandatory in v2 (early stopping + weighted metrics, and the fallback
         # calibration set when calib_data isn't given).
@@ -396,6 +495,9 @@ class CoTrainingEnsemble_v2:
             self._log(1, "[CoTraining] use_monotone_projection is on but suspension_lower_bounds "
                          "was not provided; using monotone projection without the censoring clip.")
         clip_bounds = self.use_monotone_projection and suspension_lower_bounds is not None
+        # Whether the isotonic projection is fitted with Delta-t sample weights (guarded above:
+        # only reachable with use_monotone_projection and suspension_time_steps present).
+        time_weight = self.isotonic_time_weighting and suspension_time_steps is not None
 
         total_suspension_units = len(torch.unique(suspension_ids))
         # Candidate pool size (a count of units) derived once from the fraction; the actual pool is
@@ -438,9 +540,18 @@ class CoTrainingEnsemble_v2:
 
         models_datasets = []
         h: list[LightningModule] = []
+        # Per-model validation RMSE, maintained only when keep-best-model needs it to
+        # accept/reject a candidate. None otherwise (peer-weighted pseudo-labels now use each
+        # peer's per-unit confidence score instead, so they don't need this), so the
+        # all-defaults path pays no extra forward pass.
+        track_val_rmse = self.keep_best_model
+        val_rmses: list[float] | None = [] if track_val_rmse else None
 
         for j in range(self.number_of_models):
-            x_i, y_i = failure_data, failure_label
+            if self.bagging_failure_data:
+                x_i, y_i = self._bootstrap_sample(failure_data, failure_label)
+            else:
+                x_i, y_i = failure_data, failure_label
 
             # TODO need to see how to deel with survloss and data
             # if train_with_censored_data:
@@ -453,6 +564,9 @@ class CoTrainingEnsemble_v2:
             h_j = self._fit_from_scratch(j, x_i, y_i, val_data, val_label)
 
             h.append(h_j)
+
+            if track_val_rmse:
+                val_rmses.append(self._mse_on(h_j, val_data, val_label) ** 0.5)
 
         self._log(1, f"[CoTraining] Initial training done.")
 
@@ -516,6 +630,7 @@ class CoTrainingEnsemble_v2:
                 xus: list[torch.Tensor] = []
                 lu_ps: list[torch.Tensor] = []
                 lb_us: list[torch.Tensor | None] = []
+                sw_us: list[np.ndarray | None] = []
                 last_windows: list[torch.Tensor] = []
                 for unit_id in unit_ids:
                     mask = (suspension_ids == unit_id)
@@ -523,6 +638,9 @@ class CoTrainingEnsemble_v2:
                     xus.append(xu)
                     lu_ps.append(self._predict(hj, xu))
                     lb_us.append(suspension_lower_bounds[mask] if clip_bounds else None)
+                    sw_us.append(
+                        self._time_gap_sample_weight(suspension_time_steps[mask])
+                        if time_weight else None)
                     last_windows.append(xu[-1])
 
                 # One batched conformal call for all units' last windows -> (U, 2) [lower, upper].
@@ -539,7 +657,8 @@ class CoTrainingEnsemble_v2:
                     # non-increasing (and lower-bound-clipped) sequence; the projected labels
                     # replace the raw predictions and the residual feeds the selection score.
                     if self.use_monotone_projection:
-                        label, residual = _monotone_project(lu_ps[idx], lb_us[idx])
+                        label, residual = _monotone_project(
+                            lu_ps[idx], lb_us[idx], sample_weight=sw_us[idx])
                     else:
                         label, residual = lu_ps[idx], 0.0
                     # Keep the raw (pre-projection) prediction as the last field for logging.
@@ -561,7 +680,7 @@ class CoTrainingEnsemble_v2:
                 # Release this model's calibrated regressor (and the fitted kNN
                 # DifficultyEstimator + train-set copies it holds) before the next model
                 # builds its own, so at most one is alive at a time instead of all four.
-                del wrapper, xus, lu_ps, lb_us, last_windows, last_windows_tensor, intervals, candidates
+                del wrapper, xus, lu_ps, lb_us, sw_us, last_windows, last_windows_tensor, intervals, candidates
                 gc.collect()
 
             # Widths are not comparable across models (each model calibrates its own conformal
@@ -604,16 +723,47 @@ class CoTrainingEnsemble_v2:
 
                     new_xu, new_lu = self._concat_selected_units(selected_per_model[j], yj)
 
-                    xj = torch.cat([xj, new_xu], dim=0)
-                    yj = torch.cat([yj, new_lu], dim=0)
+                    # Build the candidate (accumulated + newly assigned units) without committing
+                    # it yet, so keep-best-model can reject it below.
+                    candidate_x = torch.cat([xj, new_xu], dim=0)
+                    candidate_y = torch.cat([yj, new_lu], dim=0)
+                    n_added = len(selected_per_model[j])
 
-                    models_datasets[j] = (xj, yj)
+                    if self.use_fine_tuning:
+                        self._log(1, f"[CoTraining]   Fine-tuning model {j} (warm start) | "
+                                     f"added {n_added} unit(s) | "
+                                     f"dataset size: {len(candidate_x)} samples")
+                        candidate = self._fine_tune(
+                            j, self._cpu_state_dict(h[j]), candidate_x, candidate_y,
+                            self._cpu_pair(val_data, val_label))
+                    else:
+                        self._log(1, f"[CoTraining]   Retraining model {j} from scratch | "
+                                     f"added {n_added} unit(s) | "
+                                     f"dataset size: {len(candidate_x)} samples")
+                        candidate = self._fit_from_scratch(
+                            j, candidate_x, candidate_y, val_data, val_label)
 
-                    self._log(1, f"[CoTraining]   Retraining model {j} from scratch | "
-                                 f"added {len(selected_per_model[j])} unit(s) | "
-                                 f"dataset size: {len(xj)} samples")
-
-                    h[j] = self._fit_from_scratch(j, xj, yj, val_data, val_label)
+                    if not self.keep_best_model:
+                        # Legacy behavior: always accept the candidate.
+                        h[j] = candidate
+                        models_datasets[j] = (candidate_x, candidate_y)
+                        if track_val_rmse:
+                            val_rmses[j] = self._mse_on(candidate, val_data, val_label) ** 0.5
+                    else:
+                        candidate_rmse = self._mse_on(candidate, val_data, val_label) ** 0.5
+                        if candidate_rmse < val_rmses[j]:
+                            self._log(1, f"[CoTraining]   Model {j}: kept (val_rmse "
+                                         f"{candidate_rmse:.4f} < best {val_rmses[j]:.4f}).")
+                            h[j] = candidate
+                            models_datasets[j] = (candidate_x, candidate_y)
+                            val_rmses[j] = candidate_rmse
+                        else:
+                            # Reject: keep the previous model, dataset and best RMSE untouched.
+                            # The added units were already removed from remaining_suspension_ids
+                            # during assignment, so a rejection discards them for good (matches v3).
+                            self._log(1, f"[CoTraining]   Model {j}: iteration {i + 1} rejected "
+                                         f"(val_rmse {candidate_rmse:.4f} >= best {val_rmses[j]:.4f}); "
+                                         f"reverted and dropped {n_added} censored sample(s).")
 
             if metrics_enabled:
                 self._log_stage_metrics(
@@ -728,6 +878,55 @@ class CoTrainingEnsemble_v2:
         )
         return new_xu, new_lu
 
+    @staticmethod
+    def _bootstrap_sample(
+            x: torch.Tensor,
+            y: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Draw a bootstrap resample of ``(x, y)``: ``N`` draws with replacement from ``N`` rows.
+
+        Args:
+            x: Features, shape ``(N, ...)``.
+            y: Labels aligned with ``x``, shape ``(N, ...)``.
+
+        Returns:
+            ``(x_resampled, y_resampled)``, each with the same length ``N`` as the input.
+        """
+        idx = torch.randint(0, len(x), (len(x),))
+        return x[idx], y[idx]
+
+    @staticmethod
+    def _time_gap_sample_weight(time_steps: torch.Tensor) -> np.ndarray:
+        """Per-window isotonic ``sample_weight`` proportional to the local time gap ``Delta t``.
+
+        Uses the *central* local gap: for an interior window ``i`` the weight is
+        ``(t_{i+1} - t_{i-1}) / 2``; the two endpoints use their one-sided gap. A larger gap means
+        the window is more temporally isolated, so it is treated as more independent (weighted up)
+        in the pooled-adjacent-violators fit. Non-positive gaps (duplicate/unordered time steps)
+        are floored to a small positive value so every window keeps a strictly positive weight.
+
+        Args:
+            time_steps: Per-window time steps for a single unit, shape ``(m,)`` or ``(m, 1)``,
+                ordered oldest -> newest.
+
+        Returns:
+            A ``float64`` array of length ``m`` of strictly positive weights.
+        """
+        t = time_steps.detach().cpu().reshape(-1).numpy().astype(np.float64)
+        m = t.shape[0]
+        if m == 1:
+            return np.ones(1, dtype=np.float64)
+        w = np.empty(m, dtype=np.float64)
+        w[0] = t[1] - t[0]
+        w[-1] = t[-1] - t[-2]
+        if m > 2:
+            w[1:-1] = (t[2:] - t[:-2]) / 2.0
+        # Guard against non-positive gaps (duplicate/unordered time steps) with a small floor
+        # relative to the mean absolute gap so no window collapses to zero weight.
+        positive = w[w > 0]
+        floor = (positive.mean() * 1e-6) if positive.size > 0 else 1e-6
+        return np.maximum(w, floor)
+
     # ------------------------------------------------------------------ #
     # Training dispatcher + builder-style spec helpers
     # ------------------------------------------------------------------ #
@@ -795,6 +994,60 @@ class CoTrainingEnsemble_v2:
         b_cpu = b.detach().cpu() if b is not None else None
         return a_cpu, b_cpu
 
+    @staticmethod
+    def _cpu_state_dict(module: LightningModule) -> dict[str, torch.Tensor]:
+        """Detach-and-clone a module's ``state_dict`` to CPU (a picklable warm-start snapshot)."""
+        return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
+
+    def _fine_tune(
+            self,
+            model_index: int,
+            current_state_dict: dict[str, torch.Tensor],
+            x: torch.Tensor,
+            y: torch.Tensor,
+            val_cpu: tuple[torch.Tensor | None, torch.Tensor | None],
+    ) -> LightningModule:
+        """Warm-start fine-tune one model from ``current_state_dict`` on ``(x, y)``.
+
+        Loads the current (trained) weights, scales the learning rate by
+        ``self.fine_tune_lr_factor`` and trains all parameters for up to
+        ``self.fine_tune_max_epochs`` with ``EarlyStopping`` patience
+        ``self.fine_tune_patience`` (monitoring ``val_loss`` on ``val_cpu``). Runs inline on the
+        resolved single device. Requires the builder path.
+
+        Args:
+            model_index: Index of the model being fine-tuned.
+            current_state_dict: CPU ``state_dict`` warm start (the model's current weights).
+            x: Training features (full accumulated dataset for this model).
+            y: Training targets aligned with ``x``.
+            val_cpu: ``(val_x, val_y)`` on CPU for early stopping / best-checkpoint selection.
+
+        Returns:
+            A fresh ``LightningModule`` rebuilt from the fine-tuned CPU state dict.
+        """
+        if not self._use_builders:
+            raise NotImplementedError(
+                "CoTrainingEnsemble_v2 fine-tuning requires setup_training_builder (builder path).")
+        spec = FineTuneSpec(
+            module_builder=self.module_builders[model_index],
+            current_state_dict=current_state_dict,
+            lr_factor=self.fine_tune_lr_factor,
+            trainable_param_names=None,
+            max_epochs=self.fine_tune_max_epochs,
+            patience=self.fine_tune_patience,
+            batch_size=self.batchs_size[model_index],
+            shuffle=self.shuffle_dataloaders[model_index],
+            train_x=x.detach().cpu(),
+            train_y=y.detach().cpu(),
+            val_x=val_cpu[0],
+            val_y=val_cpu[1],
+            return_state=True,
+            accelerator=self._inline_accelerator,
+            devices=self._inline_devices,
+        )
+        result = run_finetune_job(spec)
+        return self._rebuild_module(model_index, result["state_dict"])
+
     # ------------------------------------------------------------------ #
     # Parallel training path
     # ------------------------------------------------------------------ #
@@ -846,13 +1099,17 @@ class CoTrainingEnsemble_v2:
         pool.start()
         try:
             models_datasets: list[tuple[torch.Tensor, torch.Tensor]] = [
-                (failure_data, failure_label) for _ in range(n)
+                self._bootstrap_sample(failure_data, failure_label) if self.bagging_failure_data
+                else (failure_data, failure_label)
+                for _ in range(n)
             ]
 
             # --- Initial training: one from-scratch job per model, round-robin. ---
             self._log(1, f"[CoTraining] Initial parallel training of {n} models...")
             job_ids = {
-                j: pool.submit_job(pool.round_robin_gpu(j), self._make_fit_spec(j, failure_data, failure_label, val_cpu))
+                j: pool.submit_job(
+                    pool.round_robin_gpu(j),
+                    self._make_fit_spec(j, *models_datasets[j], val_cpu))
                 for j in range(n)
             }
             results = pool.gather(list(job_ids.values()))
@@ -1439,16 +1696,22 @@ class CoTrainingEnsemble_v2:
         *smallest* average normalized width (i.e. the tightest, most confident consensus among
         the other models) is selected.
 
-        The pseudo-label assigned to model k comes from the single model j ≠ k with the smallest
-        *normalized* interval width for that unit — the most confident peer — using its
-        per-window RUL predictions. Model k's own predictions are ignored so it genuinely learns
-        from its peers (the co-training principle).
+        The pseudo-label assigned to model k comes from its peers j ≠ k (model k's own
+        predictions are ignored so it genuinely learns from its peers — the co-training
+        principle). By default it is the single peer with the smallest *normalized* interval
+        width for that unit (the most confident peer). When ``self.peer_weighted_pseudo_label``
+        is on, it is instead the ``1 / confidence_score**2``-weighted average of *all* peers'
+        per-window predictions, where the confidence score is each peer's own per-unit
+        ``norm_width`` (a tighter, more confident peer contributes more).
 
         Args:
             all_preds: mapping from model index j to an OrderedDict of
                 ``{unit_id_int: (unit_id_tensor, xu, lu_p, lower, upper, width, residual, raw_lu_p)}``.
             norm_width: mapping from model index j to ``{unit_id_int: score}`` (the blended
                 selection score from ``_selection_scores`` — width-only when projection is off).
+                Also used, when ``self.peer_weighted_pseudo_label`` is on, as each peer's
+                confidence score to weight the blended pseudo-label by
+                ``1 / (score**2 + eps)``.
             model_index_to_exclude: index k of the model being updated — its own
                 predictions are excluded from both the width average and the pseudo-label.
 
@@ -1483,8 +1746,7 @@ class CoTrainingEnsemble_v2:
         if best_unit_id_int is None:
             return None
 
-        # The pseudo-label comes from the most confident peer (smallest normalized interval
-        # width among models j ≠ k) — not an average — as specified for v2.
+        # The peers j ≠ k that scored this unit contribute the pseudo-label.
         contributors = [
             j for j in all_preds
             if j != model_index_to_exclude and best_unit_id_int in all_preds[j]
@@ -1492,6 +1754,24 @@ class CoTrainingEnsemble_v2:
         most_confident_j = min(contributors, key=lambda j: norm_width[j][best_unit_id_int])
 
         unit_id, xu, lu_p, _, _, _, _, _ = all_preds[most_confident_j][best_unit_id_int]
+
+        if self.peer_weighted_pseudo_label:
+            # Blend all peers' per-window predictions, weighting each by
+            # 1 / (norm_width**2 + eps) so a tighter, more confident peer contributes more.
+            # This is the same per-unit confidence score already used to pick most_confident_j
+            # above. All peers scored the same unit windows (same xu), so their label tensors
+            # share a shape; a convex combination of non-increasing sequences stays
+            # non-increasing (monotone projection is preserved).
+            eps = 1e-8
+            weighted_sum = None
+            weight_total = 0.0
+            for j in contributors:
+                score_j = norm_width[j][best_unit_id_int]
+                w_j = 1.0 / (score_j ** 2 + eps)
+                lu_j = all_preds[j][best_unit_id_int][2]
+                weighted_sum = lu_j * w_j if weighted_sum is None else weighted_sum + lu_j * w_j
+                weight_total += w_j
+            lu_p = weighted_sum / weight_total
 
         self._log(1, f"[CoTraining]     Unit {best_unit_id_int} selected for model {model_index_to_exclude} | "
                      f"best avg normalized width = {best_avg_width:.4f}")
@@ -1531,8 +1811,13 @@ class CoTrainingEnsemble_v2:
                 self._log(1, f"[CoTraining]     \tmodel {j}: "
                              f"{[round(v, 4) for v in all_preds[j][best_unit_id_int][2].view(-1).tolist()]}")
 
+        label_source = (
+            f"1/confidence_score**2-weighted average over peers {contributors}"
+            if self.peer_weighted_pseudo_label
+            else f"most confident peer, model {most_confident_j}"
+        )
         self._log(1, f"[CoTraining]     Unit {best_unit_id_int} chosen RUL ({num_sequences} sequences for this "
-                     f"unit, from most confident peer, model {most_confident_j}): "
+                     f"unit, from {label_source}): "
                      f"{[round(v, 4) for v in lu_p.view(-1).tolist()]}")
 
         return unit_id, xu, lu_p

@@ -62,6 +62,16 @@ def train_model(
     inference_batch_size: int | None = None,
     use_monotone_projection: bool = False,
     monotone_residual_weight: float = 1.0,
+    # Opt-in CoTrainingEnsemble_v2 levers (all default to legacy behavior). Settable from the
+    # ``training_params`` block of the config JSON.
+    use_fine_tuning: bool = False,
+    fine_tune_lr_factor: float = 0.1,
+    fine_tune_max_epochs: int = 20,
+    fine_tune_patience: int = 5,
+    peer_weighted_pseudo_label: bool = False,
+    keep_best_model: bool = False,
+    isotonic_time_weighting: bool = False,
+    bagging_failure_data: bool = False,
     # Others
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
@@ -100,6 +110,28 @@ def train_model(
             (default) keeps the legacy width-only scoring.
         monotone_residual_weight: Weight of the residual term in the blended selection score (only
             used when ``use_monotone_projection`` is ``True``).
+        use_fine_tuning: When ``True``, receivers are warm-start fine-tuned each iteration instead
+            of retrained from scratch. ``False`` (default) keeps from-scratch retraining.
+        fine_tune_lr_factor: LR multiplier for a fine-tune (only used when ``use_fine_tuning``).
+        fine_tune_max_epochs: Max epochs per fine-tune (only used when ``use_fine_tuning``).
+        fine_tune_patience: ``EarlyStopping`` patience per fine-tune (only used when
+            ``use_fine_tuning``).
+        peer_weighted_pseudo_label: When ``True``, a unit's pseudo-label is the
+            ``1/confidence_score**2``-weighted average of all peers' predictions (each peer's
+            own per-unit conformal-interval confidence score) instead of the single
+            most-confident peer's. ``False`` (default) keeps the single-peer label.
+        keep_best_model: When ``True``, an iteration's candidate is kept only if its validation
+            RMSE improves; otherwise reverted and its units dropped. ``False`` (default) always
+            accepts the candidate.
+        isotonic_time_weighting: When ``True``, the monotone projection is fitted with per-window
+            ``sample_weight`` proportional to the local time gap ``Delta t``. Requires
+            ``use_monotone_projection=True``; the entry point fetches the per-window
+            ``suspension_time_steps`` from the data module and passes them to ``train``. ``False``
+            (default) uses the unweighted projection.
+        bagging_failure_data: When ``True``, each model's initial (pre co-training) failure
+            dataset is an independent bootstrap resample (with replacement) of the failure data,
+            instead of every model sharing the identical failure dataset. ``False`` (default)
+            keeps the legacy shared-dataset behavior.
         gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
             more → parallel training across those GPUs.
         datetime_for_folders: Timestamp used to name the output folders.
@@ -163,6 +195,12 @@ def train_model(
     suspension_lower_bounds = None
     if use_monotone_projection:
         _, _, suspension_lower_bounds = scania_data_module.get_censored_lower_bounds("train")
+    # Per-window operational time steps for the censored data (row-aligned with the censored
+    # features/ids above), used by the Delta-t-weighted isotonic projection. Fetched only when
+    # that feature is on.
+    suspension_time_steps = None
+    if isotonic_time_weighting:
+        _, _, suspension_time_steps = scania_data_module.get_censored_time_steps("train")
     # Labelled (uncensored) validation data: early stopping / best-checkpoint selection and
     # the ensemble weights (instead of the test set). Also the fallback conformal calibration
     # set when calib_rate == 0 (no dedicated calib split configured).
@@ -190,6 +228,14 @@ def train_model(
         "inference_batch_size": inference_batch_size,
         "use_monotone_projection": use_monotone_projection,
         "monotone_residual_weight": monotone_residual_weight,
+        "use_fine_tuning": use_fine_tuning,
+        "fine_tune_lr_factor": fine_tune_lr_factor,
+        "fine_tune_max_epochs": fine_tune_max_epochs,
+        "fine_tune_patience": fine_tune_patience,
+        "peer_weighted_pseudo_label": peer_weighted_pseudo_label,
+        "keep_best_model": keep_best_model,
+        "isotonic_time_weighting": isotonic_time_weighting,
+        "bagging_failure_data": bagging_failure_data,
         "lr": meta["lr"],
         "max_epochs": meta["max_epochs"],
         "patiences": meta["patiences"],
@@ -211,6 +257,14 @@ def train_model(
         inference_batch_size=inference_batch_size,
         use_monotone_projection=use_monotone_projection,
         monotone_residual_weight=monotone_residual_weight,
+        use_fine_tuning=use_fine_tuning,
+        fine_tune_lr_factor=fine_tune_lr_factor,
+        fine_tune_max_epochs=fine_tune_max_epochs,
+        fine_tune_patience=fine_tune_patience,
+        peer_weighted_pseudo_label=peer_weighted_pseudo_label,
+        keep_best_model=keep_best_model,
+        isotonic_time_weighting=isotonic_time_weighting,
+        bagging_failure_data=bagging_failure_data,
     )
 
     print(f"Co-training ensemble GPU selection: {gpu_ids if gpu_ids else 'auto (single GPU)'}")
@@ -245,6 +299,7 @@ def train_model(
         suspension_data=features_censored,
         suspension_ids=ids_censored,
         suspension_lower_bounds=suspension_lower_bounds,
+        suspension_time_steps=suspension_time_steps,
         iterations=iterations,
         suspension_pool_size=suspension_pool_size,
         add_ratio=add_ratio,
