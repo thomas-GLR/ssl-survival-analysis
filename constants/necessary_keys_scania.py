@@ -40,6 +40,10 @@ NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 # The co-training ensembles use the same windowed dataset as the supervised deep models.
 NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V2_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+# v3 adds an opt-in calibration split for the crepes conformal regressors (calib_rate).
+NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V3_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS + [
+    "calib_rate",
+]
 
 NECESSARY_DATASET_PYCLUS_KEYS = NECESSARY_DATASET_RSF_KEYS
 
@@ -109,6 +113,9 @@ NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
     "models",
 ]
 NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
+    "models",
+]
+NECESSARY_CO_TRAINING_ENSEMBLE_V3_KEYS = [
     "models",
 ]
 
@@ -185,5 +192,20 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
     "add_ratio",
     "confidence",
     # Chunk size for inference forward passes; caps peak memory during conformal scoring/metrics.
+    "inference_batch_size",
+]
+
+# v3 uses per-model top-``add_ratio`` confidence selection over a predict_int interval and a
+# fine-tuning budget. confidence_threshold / w_mono / w_lb default in the util signature, so they
+# are optional in the config.
+NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V3_KEYS = [
+    "iterations",
+    "suspension_pool_size",
+    "add_ratio",
+    "confidence",
+    "fine_tune_lr_factor",
+    "fine_tune_max_epochs",
+    "fine_tune_patience",
+    # Chunk size for inference forward passes; caps peak memory during scoring / prediction.
     "inference_batch_size",
 ]

@@ -296,6 +296,38 @@ class ConformalScoreSpec:
     devices: Any = None
 
 
+@dataclass
+class CpsScoreSpec:
+    """Description of one per-model **Conformal Predictive System** scoring job (v3).
+
+    Like :class:`ConformalScoreSpec`, but the model is wrapped in a ``crepes`` *conformal
+    predictive system* (``calibrate(cps=True)``) instead of a plain conformal regressor, so
+    each pooled unit's last window yields the requested predictive **percentiles**
+    ``a = p_low``, ``c = p50``, ``b = p_high`` (asymmetric, so ``c`` need not be the midpoint of
+    ``[a, b]``) rather than a single symmetric interval. ``width = b - a`` drives selection while
+    ``a, b, c`` feed v3's label estimator. The ``DifficultyEstimator`` (fitted on ``train_x``)
+    is used exactly as in the interval path, so the percentile spread still varies per unit.
+
+    :param percentiles: The three percentiles to read, in order ``[low, 50, high]`` (e.g.
+        ``[5.0, 50.0, 95.0]`` for a 90% band). Passed to ``predict_percentiles``.
+
+    All other fields mirror :class:`ConformalScoreSpec`.
+    """
+
+    module_builder: Callable[[], LightningModule]
+    state_dict: dict[str, torch.Tensor]
+    train_x: torch.Tensor
+    val_x: torch.Tensor
+    val_y: torch.Tensor
+    unit_ids: list[int]
+    unit_x: list[torch.Tensor]
+    percentiles: list[float]
+    use_monotone_projection: bool = False
+    unit_lower_bounds: list[torch.Tensor] | None = None
+    accelerator: str = "auto"
+    devices: Any = None
+
+
 def _fit_and_get_best_state(
         model: LightningModule,
         train_loader: DataLoader,
@@ -474,6 +506,70 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
     return {"units": units}
 
 
+def run_cps_score_job(spec: CpsScoreSpec) -> dict[str, Any]:
+    """Score a model's pooled censored units with a ``crepes`` conformal predictive system (v3).
+
+    Builds the trained model, wraps it in a **normalized conformal predictive system**
+    (``DifficultyEstimator`` fitted on ``spec.train_x``, calibrated on the validation set with
+    ``cps=True``), predicts each unit's raw per-window RUL and reads the requested predictive
+    percentiles ``a = p_low``, ``c = p50``, ``b = p_high`` of each unit's last window in one
+    batched ``predict_percentiles`` call. The per-window monotone residual (self-consistency
+    signal) is computed via :func:`_monotone_project` exactly as in the interval path.
+
+    ``crepes`` is imported lazily so this module does not hard-depend on it.
+
+    :param spec: The CPS-scoring job description.
+    :return: ``{"units": [(unit_id, raw_preds, a, b, width, residual, c), ...]}`` with one entry
+        per pooled unit (order matches ``spec.unit_ids``). ``raw_preds`` are the per-window RUL
+        predictions; ``width = b - a``; ``residual`` is ``0.0`` when projection is off.
+    """
+    from crepes import WrapRegressor
+    from crepes.extras import DifficultyEstimator
+
+    model = spec.module_builder()
+    model.load_state_dict(spec.state_dict)
+    if spec.accelerator == "gpu" and torch.cuda.is_available():
+        model = model.to("cuda")
+
+    train_x = spec.train_x
+    seq_len, n_features = train_x.shape[1], train_x.shape[2]
+
+    de = DifficultyEstimator()
+    de.fit(X=_flatten(train_x))
+    wrapper = WrapRegressor(_TorchRegressorAdapter(_predict, model, seq_len, n_features))
+    wrapper.calibrate(
+        X=_flatten(spec.val_x),
+        y=spec.val_y.view(-1).detach().cpu().numpy().astype(np.float32),
+        de=de,
+        cps=True,
+    )
+
+    lu_ps: list[torch.Tensor] = []
+    last_windows: list[torch.Tensor] = []
+    for xu in spec.unit_x:
+        lu_ps.append(_predict(model, xu).detach().cpu())
+        last_windows.append(xu[-1])
+
+    last_windows_tensor = torch.stack(last_windows, dim=0)
+    # (U, 3) columns aligned with spec.percentiles == [low, 50, high] -> a, c, b.
+    percentiles = wrapper.predict_percentiles(
+        _flatten(last_windows_tensor), lower_percentiles=spec.percentiles)
+
+    units: list[tuple[int, torch.Tensor, float, float, float, float, float]] = []
+    for idx, unit_id in enumerate(spec.unit_ids):
+        a = float(percentiles[idx, 0])
+        c = float(percentiles[idx, 1])
+        b = float(percentiles[idx, 2])
+        lu_p = lu_ps[idx]
+        if spec.use_monotone_projection:
+            lb_u = spec.unit_lower_bounds[idx] if spec.unit_lower_bounds is not None else None
+            _, residual = _monotone_project(lu_p, lb_u)
+        else:
+            residual = 0.0
+        units.append((unit_id, lu_p, a, b, b - a, residual, c))
+    return {"units": units}
+
+
 def _worker_loop(
         gpu_id: int,
         num_threads: int,
@@ -540,6 +636,9 @@ def _worker_loop(
             elif kind == "conformal":
                 _, _, spec = message
                 result = run_conformal_score_job(spec)
+            elif kind == "cps":
+                _, _, spec = message
+                result = run_cps_score_job(spec)
             elif kind == "candidate":
                 _, _, ctx_id, xu, lu_p = message
                 ctx = contexts[ctx_id]
@@ -662,6 +761,12 @@ class CoTrainingGpuPool:
         """Queue a :class:`ConformalScoreSpec` on ``gpu_id``'s worker (v2)."""
         job_id = self._next_job_id()
         self._in_queues[gpu_id].put(("conformal", job_id, spec))
+        return job_id
+
+    def submit_cps(self, gpu_id: int, spec: CpsScoreSpec) -> int:
+        """Queue a :class:`CpsScoreSpec` on ``gpu_id``'s worker (v3)."""
+        job_id = self._next_job_id()
+        self._in_queues[gpu_id].put(("cps", job_id, spec))
         return job_id
 
     def set_context(self, gpu_ids: list[int], ctx_id: str, context: CandidateContext) -> None:

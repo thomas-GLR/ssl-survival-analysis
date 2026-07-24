@@ -20,6 +20,7 @@ from scania.utils import (
     train_model_coprog,
     train_model_cotraining_ensemble,
     train_model_cotraining_ensemble_v2,
+    train_model_cotraining_ensemble_v3,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ def reproduce_result(
         ModelVersion.COPROG,
         ModelVersion.CO_TRAINING_ENSEMBLE,
         ModelVersion.CO_TRAINING_ENSEMBLE_V2,
+        ModelVersion.CO_TRAINING_ENSEMBLE_V3,
     }
     extra_params = {"gpu_ids": gpu_ids} if model_version in gpu_aware_versions else {}
 
@@ -135,6 +137,8 @@ def _get_train_model_method(model_version: ModelVersion) -> Callable:
             return train_model_cotraining_ensemble
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
             return train_model_cotraining_ensemble_v2
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V3:
+            return train_model_cotraining_ensemble_v3
         case ModelVersion.CNN:
             return train_model_lightning
         case ModelVersion.TRANSFORMER_FEATURES:
@@ -162,6 +166,7 @@ def _parse_args() -> argparse.Namespace:
             "coprog",
             "co_training_ensemble",
             "co_training_ensemble_v2",
+            "co_training_ensemble_v3",
             "cnn",
             "transformer_features",
             "transformer_time_sequence",
