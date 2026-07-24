@@ -621,6 +621,10 @@ class ScaniaDataModule(LightningDataModule):
         """(feat_censored, ids_censored, lower_bounds_censored) for the split."""
         return self._get_set(split).get_censored_lower_bounds()
 
+    def get_censored_time_steps(self, split: str = "train"):
+        """(feat_censored, ids_censored, time_steps_censored) for the split."""
+        return self._get_set(split).get_censored_time_steps()
+
     def _get_set(self, split: str) -> ScaniaDataset:
         if self.train_set is None:
             self.setup()
