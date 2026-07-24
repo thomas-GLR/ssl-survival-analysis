@@ -106,6 +106,7 @@ def _flatten(x: torch.Tensor) -> np.ndarray:
 def _monotone_project(
         preds: torch.Tensor,
         lower_bounds: torch.Tensor | None = None,
+        sample_weight: "np.ndarray | torch.Tensor | None" = None,
 ) -> tuple[torch.Tensor, float]:
     """Project a censored unit's per-window RUL predictions onto the closest valid sequence.
 
@@ -128,6 +129,11 @@ def _monotone_project(
     :param preds: Raw per-window predictions, shape ``(m,)`` or ``(m, 1)``.
     :param lower_bounds: Optional per-window lower bounds, broadcastable to ``(m,)``; projected
         values below their bound are raised to it. ``None`` skips the censoring clip.
+    :param sample_weight: Optional per-window weights (length ``m``) forwarded to
+        ``IsotonicRegression.fit_transform``. Windows with a larger weight contribute more to the
+        pooled-adjacent-violators fit, so temporally isolated windows (large local time gap) can
+        be weighted up. ``None`` (default) is the unweighted fit and is byte-for-byte identical to
+        the legacy behavior.
     :return: ``(projected, residual)`` where ``projected`` has the same shape/dtype as
         ``preds`` and ``residual`` is ``mean(|raw - projected|)`` (``0.0`` when nothing moved).
     """
@@ -136,13 +142,20 @@ def _monotone_project(
     r = preds.detach().cpu().reshape(-1).numpy().astype(np.float64)
     m = r.shape[0]
 
+    sw = None
+    if sample_weight is not None:
+        sw = np.asarray(sample_weight, dtype=np.float64).reshape(-1)
+        if sw.shape[0] != m:
+            raise ValueError(
+                f"sample_weight length ({sw.shape[0]}) must match the number of windows ({m}).")
+
     # A single window is trivially "monotone" (nothing to order), but a lower-bound clip can
     # still apply, so only the isotonic step is skipped for m == 1.
     if m == 1:
         proj = r.copy()
     else:
         proj = IsotonicRegression(increasing=False, out_of_bounds="clip").fit_transform(
-            np.arange(m), r)
+            np.arange(m), r, sample_weight=sw)
 
     if lower_bounds is not None:
         lb = lower_bounds.detach().cpu().reshape(-1).numpy().astype(np.float64)

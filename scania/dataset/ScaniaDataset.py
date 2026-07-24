@@ -437,6 +437,7 @@ class ScaniaDataset(Dataset):
         # bit-identical to the previous implementation).
         self.label_array: np.ndarray | None = None
         self.lower_bound_array: np.ndarray | None = None
+        self.time_step_array: np.ndarray | None = None
         self.id_array: np.ndarray | None = None
         self.is_censored_array: np.ndarray | None = None
 
@@ -589,6 +590,11 @@ class ScaniaDataset(Dataset):
         self._feat_flat = features
         rul = df[RUL].to_numpy(dtype=np.float32)
         rul_lower_bound = df[RUL_LOWER_BOUND].to_numpy(dtype=np.float32)
+        # Per-row operational time coordinate (oldest->newest within each vehicle after the sort
+        # above). Captured per window at the window's last row, mirroring ``rul_lower_bound``, so
+        # the resulting ``time_step_array`` stays row-aligned with the other window metadata and
+        # can feed CoTrainingEnsemble_v2's Delta-t-weighted isotonic projection.
+        time_step = df[TIME_STEP].to_numpy(dtype=np.float32)
         censored = df[IS_CENSORED].to_numpy()
         rows_number = len(df)
 
@@ -600,6 +606,7 @@ class ScaniaDataset(Dataset):
         count_chunks: list[np.ndarray] = []
         label_chunks: list[np.ndarray] = []
         lb_chunks: list[np.ndarray] = []
+        ts_chunks: list[np.ndarray] = []
         id_chunks: list[np.ndarray] = []
         cens_chunks: list[np.ndarray] = []
 
@@ -635,6 +642,7 @@ class ScaniaDataset(Dataset):
                     label_chunks.append(rul[last])
 
                 lb_chunks.append(rul_lower_bound[last])
+                ts_chunks.append(time_step[last])
                 id_chunks.append(vehicules_ids[sequence_group])
                 cens_chunks.append(censored[sequence_group])
 
@@ -655,6 +663,7 @@ class ScaniaDataset(Dataset):
                 label_chunks.append(rul[short_starts + short_counts - 1])
 
             lb_chunks.append(rul_lower_bound[short_starts + short_counts - 1])
+            ts_chunks.append(time_step[short_starts + short_counts - 1])
             id_chunks.append(vehicules_ids[short_starts])
             cens_chunks.append(censored[short_starts])
 
@@ -663,6 +672,7 @@ class ScaniaDataset(Dataset):
         self._n_windows = int(len(self._win_start))
         self.label_array = np.concatenate(label_chunks, axis=0)
         self.lower_bound_array = np.concatenate(lb_chunks, axis=0)
+        self.time_step_array = np.concatenate(ts_chunks, axis=0)
         self.id_array = np.concatenate(id_chunks, axis=0)
         # is_censored is constant within a vehicle.
         self.is_censored_array = np.concatenate(cens_chunks, axis=0).astype(int)
@@ -797,3 +807,22 @@ class ScaniaDataset(Dataset):
         lower_bounds_censored = torch.from_numpy(lower_bounds).float()
 
         return features_censored, ids_censored, lower_bounds_censored
+
+    def get_censored_time_steps(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Censored windows with their per-window operational time step. Returns:
+            (features_censored, ids_censored, time_steps_censored)
+        ``time_steps_censored`` (N, 1) is each window's ``time_step`` (operational time coordinate
+        at the window's last row). Feeds CoTrainingEnsemble_v2's Delta-t-weighted isotonic
+        projection (``isotonic_time_weighting``).
+        """
+        # Same censored-index order as get_censored_split_tensors / get_censored_lower_bounds so
+        # the returned time steps stay row-aligned with that method's censored features/ids.
+        censored_idx = np.flatnonzero(self.is_censored_array == 1)
+
+        features_censored = torch.from_numpy(self._build_windows(censored_idx))
+        ids_censored = torch.from_numpy(self.id_array[censored_idx]).long()
+        time_steps = self.time_step_array[censored_idx][:, np.newaxis]
+        time_steps_censored = torch.from_numpy(time_steps).float()
+
+        return features_censored, ids_censored, time_steps_censored
