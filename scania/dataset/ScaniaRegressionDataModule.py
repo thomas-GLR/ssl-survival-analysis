@@ -1,5 +1,5 @@
 """
-LightningDataModule for the Scania Component X dataset.
+LightningDataModule for the Scania Component X regression pipeline.
 
 Uses only the training files (``train_operational_readouts.csv`` +
 ``train_tte.csv``) and produces train/val/test splits *by vehicle* out of them
@@ -25,45 +25,33 @@ Pipeline (see the project plan for the rationale):
         uncensored (failure) vehicles in val/test/calib only, so the RUL
         target near end-of-life isn't trivially ~0 (train is never
         truncated; censored vehicles are never truncated)
-    6. build a ScaniaDataset per split; z-score params are fit on train only;
+    6. build a ScaniaRegressionDataset per split; z-score params are fit on train only;
        the test dataset additionally uses only_final=True (one window per
        vehicle, mirroring CMAPSS); val/calib keep every window
     7. cache the processed splits so later runs skip preprocessing
 
 The module exposes the standard ``train/val/test_dataloader`` (uncensored
 ``(x, y)`` batches) plus convenience accessors for the co-training (Coprog) and
-self-supervised paradigms.
+self-supervised paradigms. Shared plumbing (raw-CSV reading, TTE merge,
+caching, dataloaders, generic accessors) lives in ``ScaniaBaseDataModule``.
 """
 
-import json
 import os
 import time
 
 import numpy as np
 import pandas as pd
-import torch
-from lightning import LightningDataModule
-from lightning.pytorch.utilities.types import EVAL_DATALOADERS
-from torch.utils.data import DataLoader
 
-from constants.scania_component_x_columns import (
-    VEHICLE_ID,
-    TIME_STEP,
-    LENGTH_OF_STUDY_TIME_STEP,
-    IN_STUDY_REPAIR,
-    COUNTER_COLUMNS,
-    HISTOGRAM_COLUMNS,
-    ZHIST_FEATURE_COLUMNS,
-)
-from scania.dataset.ScaniaDataset import ScaniaDataset, ZHistFeatureNormalizer, IS_CENSORED
-
-READOUTS_FILE = "train_operational_readouts.csv"
-TTE_FILE = "train_tte.csv"
-MANIFEST_FILE = "manifest.json"
-BASE_SPLITS = ("train", "val", "test")
+from constants.scania_component_x_columns import VEHICLE_ID, TIME_STEP, LENGTH_OF_STUDY_TIME_STEP
+from scania.dataset.ScaniaBaseDataModule import ScaniaBaseDataModule, READOUTS_FILE
+from scania.dataset.ScaniaBaseDataset import IS_CENSORED
+from scania.dataset.ScaniaRegressionDataset import ScaniaRegressionDataset
 
 
-class ScaniaDataModule(LightningDataModule):
+class ScaniaRegressionDataModule(ScaniaBaseDataModule):
+    DATASET_CLASS = ScaniaRegressionDataset
+    DEFAULT_CACHE_SUBDIR = "scania_cache_regression"
+
     def __init__(
             self,
             data_dir: str,
@@ -86,151 +74,38 @@ class ScaniaDataModule(LightningDataModule):
             include_histograms: bool = False,
             histogram_mode: str = "sum",
     ):
-        super().__init__()
         assert (
             0 <= val_rate < 1 and 0 <= test_rate < 1 and 0 <= calib_rate < 1
             and (val_rate + test_rate + calib_rate) < 1
         ), "val_rate/test_rate/calib_rate must be in [0, 1) and sum to < 1"
         assert n_quantile_length_strata >= 1, "n_quantile_length_strata must be >= 1"
-        assert counter_mode in ("delta", "cumulative", "both"), \
-            f"Unsupported counter_mode: {counter_mode}"
-        assert 0 < data_fraction <= 1.0, "data_fraction must be in (0, 1]"
-        assert histogram_mode in ("sum", "zhist"), \
-            f"Unsupported histogram_mode: {histogram_mode}"
-
-        self.data_dir = data_dir
-        self.batch_size = batch_size
-        self.sequence_len = sequence_len
-        self.seed = seed
-        self.data_fraction = data_fraction
+        super().__init__(
+            data_dir=data_dir,
+            batch_size=batch_size,
+            sequence_len=sequence_len,
+            seed=seed,
+            data_fraction=data_fraction,
+            calib_rate=calib_rate,
+            norm_type=norm_type,
+            shuffle_loader=shuffle_loader,
+            cache_dir=cache_dir,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            return_sequence_label=return_sequence_label,
+            counter_mode=counter_mode,
+            include_histograms=include_histograms,
+            histogram_mode=histogram_mode,
+        )
         self.val_rate = val_rate
         self.test_rate = test_rate
-        self.calib_rate = calib_rate
         self.stratify = stratify
         self.n_quantile_length_strata = n_quantile_length_strata
-        self._splits: tuple[str, ...] = BASE_SPLITS + (("calib",) if self.calib_rate > 0 else ())
-        self.norm_type = norm_type
-        self.shuffle_loader = shuffle_loader
-        self.cache_dir = cache_dir or os.path.join(data_dir, "scania_cache")
-        self.num_workers = num_workers
-        self.pin_memory = pin_memory
-        self.return_sequence_label = return_sequence_label
-        self.counter_mode = counter_mode
-        self.include_histograms = include_histograms
-        self.histogram_mode = histogram_mode
-
-        # Raw counter columns as they appear in the CSV (what we read/difference).
-        self._base_counter_cols = list(COUNTER_COLUMNS)
-        # Raw histogram bin columns to READ / NaN-fill from the CSV (a
-        # distribution per feature; never differenced by counter_mode).
-        self._raw_histogram_cols = list(HISTOGRAM_COLUMNS) if include_histograms else []
-        # Histogram FEATURE columns fed to the model. In "sum" mode these are the
-        # raw per-bin columns (sum-normalized by HistogramFeatureNormalizer); in
-        # "zhist" mode each group is collapsed to one continuous zhist_<group>
-        # feature (ZHistFeatureNormalizer), computed from the raw bins inside
-        # ScaniaDataset.
-        if not include_histograms:
-            self._histogram_cols = []
-        elif histogram_mode == "zhist":
-            self._histogram_cols = list(ZHIST_FEATURE_COLUMNS)
-        else:
-            self._histogram_cols = list(HISTOGRAM_COLUMNS)
-        # Feature columns actually fed to the model. In "both" mode the per-step
-        # deltas are appended as separate "<counter>_delta" columns, doubling the
-        # counter feature count; "delta"/"cumulative" keep the base columns (same
-        # names, different values). Histogram feature columns, if enabled, are
-        # appended last so feature ordering stays stable.
-        if counter_mode == "both":
-            counter_feature_cols = self._base_counter_cols + [f"{c}_delta" for c in self._base_counter_cols]
-        else:
-            counter_feature_cols = list(self._base_counter_cols)
-        self.feature_cols = counter_feature_cols + self._histogram_cols
-
-        self.train_set: ScaniaDataset | None = None
-        self.val_set: ScaniaDataset | None = None
-        self.test_set: ScaniaDataset | None = None
-        self.calib_set: ScaniaDataset | None = None
-        self.norm_params: np.ndarray | None = None
-        self.hist_norm_params: dict[str, float] | None = None
-        self.zhist_norm_params: dict | None = None
-
-    @property
-    def feature_num(self) -> int:
-        return len(self.feature_cols)
-
-    # ------------------------------------------------------------------ #
-    # Setup
-    # ------------------------------------------------------------------ #
-    def setup(self, stage: str | None = None) -> None:
-        if self.train_set is not None:
-            return  # already set up
-
-        if self._cache_is_valid():
-            print(f"[Scania] Loading preprocessed data from cache: {self.cache_dir}")
-            self._load_from_cache()
-        else:
-            print("[Scania] No valid cache found, preprocessing from raw files...")
-            self._preprocess_and_split()
-            self._save_cache()
-
-    def _dataset_kwargs(self) -> dict:
-        return {
-            "sequence_len": self.sequence_len,
-            "feature_cols": self.feature_cols,
-            "histogram_cols": self._histogram_cols,
-            "histogram_mode": self.histogram_mode,
-            "raw_histogram_cols": self._raw_histogram_cols,
-            "return_sequence_label": self.return_sequence_label,
-            "seed": self.seed,
-        }
 
     def _preprocess_and_split(self) -> None:
         start = time.time()
 
-        # Read the raw counter columns plus the histogram columns when enabled;
-        # "both" mode's "_delta" feature columns are derived below, they do not
-        # exist in the CSV.
-        base_cols = self._base_counter_cols
-        raw_cols = base_cols + self._raw_histogram_cols
-        usecols = [VEHICLE_ID, TIME_STEP] + raw_cols
-        readouts = pd.read_csv(os.path.join(self.data_dir, READOUTS_FILE), usecols=usecols)
-        tte = pd.read_csv(
-            os.path.join(self.data_dir, TTE_FILE),
-            usecols=[VEHICLE_ID, LENGTH_OF_STUDY_TIME_STEP, IN_STUDY_REPAIR],
-        )
-
-        readouts = readouts.sort_values([VEHICLE_ID, TIME_STEP]).reset_index(drop=True)
-
-        # 2. per-vehicle NaN fill of the raw cumulative counters and histograms
-        readouts[raw_cols] = readouts.groupby(VEHICLE_ID)[raw_cols].ffill()
-        readouts[raw_cols] = readouts.groupby(VEHICLE_ID)[raw_cols].bfill()
-        # Some vehicles never report a given column at any timestep (the whole
-        # vehicle-column is NaN, so ffill/bfill cannot fill it). This is common
-        # for the histogram bins (e.g. the 167_* group) and would otherwise leak
-        # NaN through the normalizers into the feature windows, making the
-        # training loss NaN. "No reading" means zero counts for both cumulative
-        # counters and histogram bins, so fill the residual with 0.
-        readouts[raw_cols] = readouts[raw_cols].fillna(0.0)
-
-        # 3. build the feature representation according to counter_mode.
-        #    The raw counters are cumulative; the *cumulative* level is the
-        #    monotonic aging signal most predictive of RUL. diff() yields NaN
-        #    for the first row of each vehicle -> set to 0.
-        if self.counter_mode == "cumulative":
-            # Keep the cumulative counters as-is (no differencing).
-            pass
-        elif self.counter_mode == "delta":
-            # Replace counters by their per-step delta (legacy behavior).
-            readouts[base_cols] = readouts.groupby(VEHICLE_ID)[base_cols].diff().fillna(0.0)
-        elif self.counter_mode == "both":
-            # Keep the cumulative counters AND append the per-step deltas as new columns.
-            delta_cols = [f"{c}_delta" for c in base_cols]
-            readouts[delta_cols] = readouts.groupby(VEHICLE_ID)[base_cols].diff().fillna(0.0)
-
-        # 4. merge TTE and derive the censoring flag
-        readouts = readouts.merge(tte, on=VEHICLE_ID, how="inner")
-        readouts[IS_CENSORED] = (readouts[IN_STUDY_REPAIR] == 0).astype(int)
-        readouts = readouts.drop(columns=[IN_STUDY_REPAIR])
+        readouts = self._read_and_transform_readouts(os.path.join(self.data_dir, READOUTS_FILE))
+        readouts = self._merge_tte_and_censor(readouts)
 
         # 5. split vehicles into train/val/test (all rows of a vehicle together),
         #    stratified by censoring status so the failure/censored proportion is
@@ -247,14 +122,7 @@ class ScaniaDataModule(LightningDataModule):
         #     controls the train/val/test split below -- so the censored/
         #     uncensored ratio is preserved. Consumes rng draws before the
         #     split permutations and _truncate_uncensored_tail below.
-        if self.data_fraction < 1.0:
-            kept_ids: set = set()
-            for _, group in vehicule_status.groupby(IS_CENSORED):
-                ids = rng.permutation(group[VEHICLE_ID].to_numpy())
-                n_keep = max(1, round(len(ids) * self.data_fraction))
-                kept_ids.update(ids[:n_keep].tolist())
-            readouts = readouts[readouts[VEHICLE_ID].isin(kept_ids)]
-            vehicule_status = vehicule_status[vehicule_status[VEHICLE_ID].isin(kept_ids)]
+        readouts, vehicule_status = self._apply_data_fraction(readouts, vehicule_status, rng)
 
         if self.stratify:
             # Fixed group order (is_censored 0/1, then "len1" before ascending length-
@@ -263,20 +131,10 @@ class ScaniaDataModule(LightningDataModule):
         else:
             strata = [vehicule_status[VEHICLE_ID].to_numpy()]
 
-        test_ids: set = set()
-        val_ids: set = set()
-        calib_ids: set = set()
-        for ids in strata:
-            ids = rng.permutation(ids)
-            id_number = len(ids)
-            id_number_test = int(self.test_rate * id_number)
-            id_number_val = int(self.val_rate * id_number)
-            id_number_calib = int(self.calib_rate * id_number)
-            test_ids.update(ids[:id_number_test].tolist())
-            val_ids.update(ids[id_number_test:id_number_test + id_number_val].tolist())
-            calib_ids.update(
-                ids[id_number_test + id_number_val:
-                    id_number_test + id_number_val + id_number_calib].tolist())
+        id_sets = self._split_ids_by_rate(
+            strata, {"test": self.test_rate, "val": self.val_rate, "calib": self.calib_rate}, rng,
+        )
+        test_ids, val_ids, calib_ids = id_sets["test"], id_sets["val"], id_sets["calib"]
 
         vehicules_ids = readouts[VEHICLE_ID]
         test_df = readouts[vehicules_ids.isin(test_ids)]
@@ -302,20 +160,19 @@ class ScaniaDataModule(LightningDataModule):
         #    vehicle kept), mirroring CMAPSS's use_only_final_on_test. calib (like
         #    val) keeps every window -- conformal calibration needs a large residual
         #    pool, not a single window per vehicle.
-        self.train_set = ScaniaDataset(
+        self.train_set = self.DATASET_CLASS(
             train_df,
             norm_type=self.norm_type,
             norm_params=None,
             hist_norm_params=None,
             zhist_norm_params=None,
             **self._dataset_kwargs(),
-
         )
         self.norm_params = self.train_set.norm_params
         self.hist_norm_params = self.train_set.hist_norm_params
         self.zhist_norm_params = self.train_set.zhist_norm_params
 
-        self.val_set = ScaniaDataset(
+        self.val_set = self.DATASET_CLASS(
             val_df,
             norm_type=self.norm_type,
             norm_params=self.norm_params,
@@ -324,7 +181,7 @@ class ScaniaDataModule(LightningDataModule):
             only_final=True,
             **self._dataset_kwargs(),
         )
-        self.test_set = ScaniaDataset(
+        self.test_set = self.DATASET_CLASS(
             test_df, norm_type=self.norm_type,
             norm_params=self.norm_params,
             hist_norm_params=self.hist_norm_params,
@@ -335,7 +192,7 @@ class ScaniaDataModule(LightningDataModule):
 
         self.calib_set = None
         if calib_df is not None:
-            self.calib_set = ScaniaDataset(
+            self.calib_set = self.DATASET_CLASS(
                 calib_df,
                 norm_type=self.norm_type,
                 norm_params=self.norm_params,
@@ -430,7 +287,7 @@ class ScaniaDataModule(LightningDataModule):
         censoring time and their RUL target is NaN (only ``rul_lower_bound``
         is used for them), so truncating them further would only destroy
         signal without adding realism. Short vehicles already take the
-        edge-padded path in ``ScaniaDataset._gen_sequence`` and truncating
+        edge-padded path in ``ScaniaBaseDataset._gen_sequence`` and truncating
         them would push them below ``sequence_len``, breaking that invariant.
 
         :param df: readouts of a single split (val or test).
@@ -465,7 +322,7 @@ class ScaniaDataModule(LightningDataModule):
         return df.loc[keep_mask].reset_index(drop=True)
 
     # ------------------------------------------------------------------ #
-    # Caching
+    # Caching hooks
     # ------------------------------------------------------------------ #
     def _cache_config(self) -> dict:
         """Params that change the cached CSV content (invalidate the cache).
@@ -500,133 +357,8 @@ class ScaniaDataModule(LightningDataModule):
             "cache_version": 2,
         }
 
-    def _cache_columns(self) -> list[str]:
+    def _cache_columns(self, split: str) -> list[str]:
         return [VEHICLE_ID, TIME_STEP] + self.feature_cols + [LENGTH_OF_STUDY_TIME_STEP, IS_CENSORED]
 
-    @staticmethod
-    def _vehicle_censor_counts(ds: ScaniaDataset) -> dict:
-        """Vehicle-level failure/censored counts for a built dataset (for the
-        manifest / verification). is_censored is constant within a vehicle."""
-        vids, first_idx = np.unique(ds.id_array, return_index=True)
-        cens = ds.is_censored_array[first_idx]
-        return {
-            "failure": int((cens == 0).sum()),
-            "censored": int((cens == 1).sum()),
-        }
-
-    def _cache_is_valid(self) -> bool:
-        manifest_path = os.path.join(self.cache_dir, MANIFEST_FILE)
-        if not os.path.exists(manifest_path):
-            return False
-        if not all(os.path.exists(os.path.join(self.cache_dir, f"{s}.csv")) for s in self._splits):
-            return False
-        with open(manifest_path, "r") as f:
-            manifest = json.load(f)
-        return manifest.get("config") == self._cache_config()
-
-    def _save_cache(self) -> None:
-        os.makedirs(self.cache_dir, exist_ok=True)
-        cols = self._cache_columns()
-        sizes = {}
-        vehicle_counts = {}
-        split_datasets = {"train": self.train_set, "val": self.val_set, "test": self.test_set}
-        if self.calib_set is not None:
-            split_datasets["calib"] = self.calib_set
-        for name in self._splits:
-            dataset = split_datasets[name]
-            # ds.df holds the normalized features + the columns count_rul needs.
-            dataset.df[cols].to_csv(os.path.join(self.cache_dir, f"{name}.csv"), index=False)
-            sizes[name] = int(len(dataset))
-            vehicle_counts[name] = self._vehicle_censor_counts(dataset)
-
-        manifest = {
-            "config": self._cache_config(),
-            "norm_params": self.norm_params.tolist() if self.norm_params is not None else None,
-            "hist_norm_params": self.hist_norm_params,
-            "zhist_norm_params": (
-                ZHistFeatureNormalizer.params_to_json(self.zhist_norm_params)
-                if self.zhist_norm_params is not None else None
-            ),
-            "feature_cols": self.feature_cols,
-            "window_counts": sizes,
-            "vehicle_counts": vehicle_counts,
-        }
-        with open(os.path.join(self.cache_dir, MANIFEST_FILE), "w") as f:
-            json.dump(manifest, f, indent=2)
-        print(f"[Scania] Cache written to {self.cache_dir}")
-
-    def _load_from_cache(self) -> None:
-        manifest_path = os.path.join(self.cache_dir, MANIFEST_FILE)
-        with open(manifest_path, "r") as f:
-            manifest = json.load(f)
-        if manifest.get("norm_params") is not None:
-            self.norm_params = np.asarray(manifest["norm_params"], dtype=np.float64)
-        self.hist_norm_params = manifest.get("hist_norm_params")
-        if manifest.get("zhist_norm_params") is not None:
-            self.zhist_norm_params = ZHistFeatureNormalizer.params_from_json(manifest["zhist_norm_params"])
-
-        sets = {}
-        for name in self._splits:
-            df = pd.read_csv(os.path.join(self.cache_dir, f"{name}.csv"))
-            # Features are already normalized in the cache -> norm_type=None.
-            # only_final mirrors _preprocess_and_split: test only.
-            sets[name] = ScaniaDataset(
-                df, norm_type=None, norm_params=None,
-                only_final=(name == "test"),
-                **self._dataset_kwargs(),
-            )
-
-        self.train_set, self.val_set, self.test_set = sets["train"], sets["val"], sets["test"]
-        self.calib_set = sets.get("calib")
-        if self.norm_params is not None:
-            self.train_set.norm_params = self.norm_params
-
-    # ------------------------------------------------------------------ #
-    # Standard Lightning dataloaders (supervised, uncensored only)
-    # ------------------------------------------------------------------ #
-    def _loader(self, ds: ScaniaDataset, shuffle: bool) -> DataLoader:
-        return ds.get_data_loader_without_censored_data(
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-        )
-
-    def train_dataloader(self) -> DataLoader:
-        return self._loader(self.train_set, shuffle=self.shuffle_loader)
-
-    def val_dataloader(self) -> DataLoader:
-        return self._loader(self.val_set, shuffle=False)
-
-    def test_dataloader(self) -> DataLoader:
-        return self._loader(self.test_set, shuffle=False)
-
-    def predict_dataloader(self) -> DataLoader:
-        return self._loader(self.test_set, shuffle=False)
-
-    # ------------------------------------------------------------------ #
-    # Convenience accessors for the other paradigms
-    # ------------------------------------------------------------------ #
-    def get_full_dataset(self, split: str = "train") -> ScaniaDataset:
-        """Return the underlying ScaniaDataset for a split (self-supervised path,
-        which needs censored + uncensored together via the is_censored flag)."""
-        return self._get_set(split)
-
-    def get_cotraining_tensors(self, split: str = "train") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Co-training (Coprog) path: (feat_uncensored, target_uncensored,
-        feat_censored, ids_censored) for the requested split."""
-        return self._get_set(split).get_censored_split_tensors()
-
-    def get_censored_lower_bounds(self, split: str = "train"):
-        """(feat_censored, ids_censored, lower_bounds_censored) for the split."""
-        return self._get_set(split).get_censored_lower_bounds()
-
-    def _get_set(self, split: str) -> ScaniaDataset:
-        if self.train_set is None:
-            self.setup()
-        mapping = {"train": self.train_set, "val": self.val_set, "test": self.test_set}
-        if self.calib_set is not None:
-            mapping["calib"] = self.calib_set
-        if split not in mapping:
-            raise ValueError(f"Unknown split '{split}', expected one of {list(mapping)}")
-        return mapping[split]
+    def _only_final_for_cached_split(self, split: str) -> bool:
+        return split == "test"

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A research codebase for **Remaining-Useful-Life (RUL) / survival analysis** benchmarking across a family of models, on two datasets:
 
 - **C-MAPSS** (NASA turbofan degradation, sub-datasets `FD001`–`FD004`) — the mature pipeline, everything under `C_MAPSS/`.
-- **Scania Component X** (run-to-failure with censoring) — a newer, in-progress pipeline under `Scania/` (`ScaniaDataModule`, `ScaniaDataset`).
+- **Scania Component X** (run-to-failure with censoring) — a newer, in-progress pipeline under `Scania/` (`ScaniaRegressionDataModule`, `ScaniaRegressionDataset`, `ScaniaClassificationDataset`).
 
 The core idea is a **config-driven benchmark**: for a given model and "benchmark version", train/evaluate across every sub-dataset × censored% × broken% combination, writing RMSE and the C-MAPSS score to CSV. Censoring/suspension of data (partially observed lifetimes) is central — several models are designed to exploit censored samples, while supervised models filter them out.
 
@@ -79,7 +79,7 @@ Configs live in `C_MAPSS/config/<benchmark_version>/`. The `--benchmark-version`
 
 ### Data
 
-`data/C_MAPSS/` holds the turbofan `train_/test_/RUL_FDxxx` files; `data/Scania_component_X/` holds the Scania readouts/TTE/specifications CSVs (plus a `scania_cache/`). `CMAPSSLoader.get_datasets()` produces train/valid/test `CMAPSSDataset`s with windowing, normalization, operating-condition clustering, and censoring. `ScaniaDataModule` splits **by vehicle** from the train files only (the standalone `validation_*`/`test_*` files are intentionally ignored) and caches processed splits.
+`data/C_MAPSS/` holds the turbofan `train_/test_/RUL_FDxxx` files; `data/Scania_component_X/` holds the Scania readouts/TTE/specifications CSVs (plus a `scania_cache/`). `CMAPSSLoader.get_datasets()` produces train/valid/test `CMAPSSDataset`s with windowing, normalization, operating-condition clustering, and censoring. `ScaniaRegressionDataModule` splits **by vehicle** from the train files only (the standalone `validation_*`/`test_*` files are intentionally ignored) and caches processed splits.
 
 ## Gotchas
 

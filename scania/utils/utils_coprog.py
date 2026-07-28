@@ -10,7 +10,7 @@ from torch import nn
 from constants import necessary_keys_scania
 from models import CNN1D, Simple_LSTM, TransformerFeatures, TransformerTimeSequence
 from models import Coprog
-from scania.dataset import ScaniaDataModule
+from scania.dataset import ScaniaRegressionDataModule
 from scania.lightning_module import BasicLightningModule
 from scania.utils.utils_scania import (
     assert_data_is_valid,
@@ -109,7 +109,7 @@ def train_model(
     print("Creating data loader with the following parameters :")
     print(dataset_kwargs)
 
-    scania_data_module = ScaniaDataModule(
+    scania_data_module = ScaniaRegressionDataModule(
         data_dir=dataset_root,
         seed=seed,
         data_fraction=data_fraction,

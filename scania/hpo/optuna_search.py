@@ -45,7 +45,7 @@ from optuna_integration.pytorch_lightning import PyTorchLightningPruningCallback
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from scania.dataset import ScaniaDataModule
+from scania.dataset import ScaniaRegressionDataModule
 from scania.lightning_module.BasicLightningModule import BasicLightningModule
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ ModelBuilder = Callable[[optuna.Trial, int, int], nn.Module]
 class ModelSpec:
     """Per-model HPO configuration.
 
-    :param counter_mode: fixed ScaniaDataModule counter feature mode
+    :param counter_mode: fixed ScaniaRegressionDataModule counter feature mode
         ("delta" | "cumulative" | "both"). Not a searched hyperparameter.
     :param seq_len_range: inclusive (min, max) bounds for the searched
         ``sequence_len`` hyperparameter.
@@ -157,8 +157,8 @@ def _build_datamodule_cached(
     standardize_target: bool,
     data_dir: str,
     cache_dir: str,
-) -> Tuple[ScaniaDataModule, float, float]:
-    """Build and ``setup()`` a ScaniaDataModule for a (sequence_len, counter_mode)
+) -> Tuple[ScaniaRegressionDataModule, float, float]:
+    """Build and ``setup()`` a ScaniaRegressionDataModule for a (sequence_len, counter_mode)
     pair, cached across trials.
 
     Everything the datasets depend on (splits, windowing, normalization) is fixed
@@ -173,7 +173,7 @@ def _build_datamodule_cached(
     can train in normalized target space and de-normalize predictions.
 
     :param sequence_len: window length.
-    :param counter_mode: ScaniaDataModule counter feature mode.
+    :param counter_mode: ScaniaRegressionDataModule counter feature mode.
     :param standardize_target: whether to compute target mean/std.
     :param data_dir: root directory of the Scania data files.
     :param cache_dir: base cache directory (a per-config sub-dir is created).
@@ -186,7 +186,7 @@ def _build_datamodule_cached(
     # never used. num_workers=0 is deliberate: the datasets are fully in-memory
     # TensorDatasets, and worker subprocesses leak across trials (they eventually
     # crash with "can only test a child process").
-    dm = ScaniaDataModule(
+    dm = ScaniaRegressionDataModule(
         data_dir=data_dir,
         batch_size=None,
         sequence_len=sequence_len,
@@ -224,7 +224,7 @@ def get_dataloaders(
     """Build train / val / test DataLoaders for a Scania configuration.
 
     :param sequence_len: window length.
-    :param counter_mode: ScaniaDataModule counter feature mode.
+    :param counter_mode: ScaniaRegressionDataModule counter feature mode.
     :param standardize_target: whether to standardize the RUL target.
     :param batch_size: DataLoader batch size for this trial.
     :param data_dir: root directory of the Scania data files.
@@ -369,7 +369,7 @@ def run_search(
     :param model_name: key registered via ``@register_model`` (e.g. "cnn").
     :param n_trials: number of Optuna trials.
     :param data_dir: root directory of the Scania data files.
-    :param cache_dir: base cache directory (defaults to ``<data_dir>/scania_cache``).
+    :param cache_dir: base cache directory (defaults to ``<data_dir>/scania_cache_regression``).
     :param max_epochs: upper bound for epochs per trial (also Hyperband max_resource).
     :param study_name: custom study name (auto-generated if None).
     :param storage: Optuna storage URL (e.g. "sqlite:///optuna.db") for resuming.
@@ -382,7 +382,7 @@ def run_search(
         )
 
     if cache_dir is None:
-        cache_dir = os.path.join(data_dir, "scania_cache")
+        cache_dir = os.path.join(data_dir, "scania_cache_regression")
 
     study_name = study_name or f"{model_name}_scania"
 

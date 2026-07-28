@@ -93,7 +93,7 @@ def parse_models_config(
 
     Args:
         models_cfg: The ``model_params["models"]`` list from the config.
-        feature_num: Number of input features (from ``ScaniaDataModule.feature_cols``).
+        feature_num: Number of input features (from ``ScaniaRegressionDataModule.feature_cols``).
         sequence_len: Input sequence length.
         targets_uncensored: Labelled training targets, used to compute standardization stats.
 

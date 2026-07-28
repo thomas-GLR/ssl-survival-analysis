@@ -75,7 +75,7 @@ class ScikitDataset:
 
     @staticmethod
     def from_scania(data_module) -> tuple["ScikitDataset", "ScikitDataset", "ScikitDataset | None"]:
-        """Build train/test/valid ScikitDatasets from a ScaniaDataModule for RSF.
+        """Build train/test/valid ScikitDatasets from a ScaniaRegressionDataModule for RSF.
 
         A Random Survival Forest cannot consume multivariate time series, so every
         readout row is treated as its own individual (no feature summarization, no
@@ -89,13 +89,13 @@ class ScikitDataset:
         Training keeps all rows (RSF handles censoring via ``Status``). The test set
         is restricted to uncensored (failure) rows so a true RUL exists for evaluation.
 
-        :param data_module: A ``ScaniaDataModule`` (setup is triggered here if needed).
+        :param data_module: A ``ScaniaRegressionDataModule`` (setup is triggered here if needed).
         :return: ``(train, test, valid)`` ScikitDatasets; ``valid`` is ``None`` if the
             module has no validation split.
         """
         # Local import to avoid any package-init import cycle (scania depends on dataset).
         from constants.scania_component_x_columns import VEHICLE_ID, TIME_STEP
-        from scania.dataset.ScaniaDataset import IS_CENSORED, RUL_LOWER_BOUND
+        from scania.dataset.ScaniaRegressionDataset import IS_CENSORED, RUL_LOWER_BOUND
 
         data_module.setup()
         feature_cols = list(data_module.feature_cols)
@@ -127,12 +127,12 @@ class ScikitDataset:
             rul_col: str,
             keep_uncensored_only: bool,
     ) -> "ScikitDataset":
-        """Turn one pre-processed ScaniaDataset split into a ScikitDataset.
+        """Turn one pre-processed ScaniaRegressionDataset split into a ScikitDataset.
 
         Each row of ``scania_dataset.df`` (features already z-score-normalized, RUL
         columns already computed) becomes one survival sample.
 
-        :param scania_dataset: A built ``ScaniaDataset`` exposing ``.df``.
+        :param scania_dataset: A built ``ScaniaRegressionDataset`` exposing ``.df``.
         :param feature_cols: Feature columns to use as ``X``.
         :param is_censored_col: Name of the censoring flag column (1 = censored).
         :param time_col: Name of the elapsed-time column used as survival ``Time``.

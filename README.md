@@ -580,7 +580,7 @@ only `cnn` is registered.
 | `--n_trials` | no | `50` (or `$N_TRIALS`) | Number of Optuna trials to run. |
 | `--max_epochs` | no | `100` (or `$MAX_EPOCHS`) | Max epochs per trial; also the Hyperband `max_resource`. |
 | `--data_dir` | no | `./data/Scania_component_X` (or `$DATA_DIR`) | Root folder of the Scania data files. |
-| `--cache_dir` | no | `<data_dir>/scania_cache` (or `$CACHE_DIR`) | Base cache directory for the processed dataset splits. A per-config sub-folder (`cm=<counter_mode>_sl=<sequence_len>`) is created inside it. |
+| `--cache_dir` | no | `<data_dir>/scania_cache_regression` (or `$CACHE_DIR`) | Base cache directory for the processed dataset splits. A per-config sub-folder (`cm=<counter_mode>_sl=<sequence_len>`) is created inside it. |
 | `--output_dir` | no | `./outputs` (or `$OUTPUT_DIR`) | Directory for the Optuna DB and the result files. Created if missing. |
 | `--storage` | no | `sqlite:////<output_dir>/optuna.db` | Optuna storage URL — see below. |
 

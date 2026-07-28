@@ -7,7 +7,7 @@ from lightning.pytorch import callbacks
 
 from models import TransformerEncoder_LSTM_1, Simple_LSTM, CNN1D, TransformerFeatures
 from models.TransformerTimeSequence import TransformerTimeSequence
-from scania.dataset import ScaniaDataModule
+from scania.dataset import ScaniaRegressionDataModule
 from scania.lightning_module.BasicLightningModule import BasicLightningModule
 from scania.utils.utils_scania import (
     assert_data_is_valid,
@@ -95,7 +95,7 @@ def train_model(
     print("Creating data loader with the following parameters :")
     print(dataset_kwargs)
 
-    scania_data_module = ScaniaDataModule(
+    scania_data_module = ScaniaRegressionDataModule(
         data_dir=dataset_root,
         seed=seed,
         data_fraction=data_fraction,
