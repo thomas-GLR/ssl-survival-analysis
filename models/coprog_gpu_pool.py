@@ -63,6 +63,24 @@ class TrainingSpec:
         ``"gpu"`` for the inline path).
     :param devices: ``Trainer`` devices argument (``1`` in workers, ``[gpu_id]`` for a
         pinned inline single-GPU run, ``None`` to let Lightning decide in auto mode).
+    :param is_censored: Optional per-row censoring flag (CPU tensor), row-aligned with
+        ``train_x``/``train_y``. Only used by ``CoTrainingEnsemble_v2``'s Initial training with
+        censored data: when given together with ``lower_bound``, the train ``DataLoader``
+        batches carry it as a 3rd/4th tensor so ``BasicLightningModule.training_step`` can apply
+        ``survival_loss_function`` instead of plain MSE. ``None`` (default) keeps every other
+        caller (COPROG, ``CoTrainingEnsemble`` v1) on the legacy 2-tensor batch.
+    :param lower_bound: Optional per-row survival lower bound (CPU tensor), row-aligned with
+        ``train_x``/``train_y``. See ``is_censored``.
+    :param use_cotraining_survival_loss: When ``True`` (together with ``is_censored``/
+        ``lower_bound``), the rebuilt module's ``use_cotraining_ensemble_survival_loss_function``
+        is set to ``True`` before fitting, so it applies
+        ``cotraining_ensemble_survival_loss_function`` instead of ``survival_loss_function``.
+        Used by ``CoTrainingEnsemble_v2``'s from-scratch retrain iterations (the rows already
+        carry real peer-assigned pseudo-labels by then, unlike Initial training's placeholders).
+        ``False`` (default) leaves the module's constructor default in place.
+    :param cotraining_survival_loss_lambda: Forwarded onto the rebuilt module's
+        ``cotraining_survival_loss_lambda`` before fitting (only meaningful together with
+        ``use_cotraining_survival_loss``).
     """
 
     module_builder: Callable[[], LightningModule]
@@ -80,6 +98,10 @@ class TrainingSpec:
     return_state: bool = False
     accelerator: str = "auto"
     devices: Any = None
+    is_censored: torch.Tensor | None = None
+    lower_bound: torch.Tensor | None = None
+    use_cotraining_survival_loss: bool = False
+    cotraining_survival_loss_lambda: float = 1.0
 
 
 @dataclass
@@ -159,8 +181,21 @@ def run_training_job(spec: TrainingSpec) -> dict[str, Any]:
     model = spec.module_builder()
     model.load_state_dict(spec.initial_state_dict)
 
+    # CoTrainingEnsemble_v2-only: select the survival loss BasicLightningModule.training_step
+    # applies to the 4-element (x, y, is_censored, lower_bound) batch below. Mirrors the same
+    # override in cotraining_gpu_pool.run_finetune_job -- the shared module_builder always
+    # constructs with the module's constructor default, so only this job's rebuilt instance is
+    # affected.
+    if hasattr(model, "use_cotraining_ensemble_survival_loss_function"):
+        model.use_cotraining_ensemble_survival_loss_function = spec.use_cotraining_survival_loss
+        model.cotraining_survival_loss_lambda = spec.cotraining_survival_loss_lambda
+
+    if spec.is_censored is not None and spec.lower_bound is not None:
+        train_dataset = TensorDataset(spec.train_x, spec.train_y, spec.is_censored, spec.lower_bound)
+    else:
+        train_dataset = TensorDataset(spec.train_x, spec.train_y)
     train_loader = DataLoader(
-        TensorDataset(spec.train_x, spec.train_y),
+        train_dataset,
         batch_size=spec.batch_size,
         shuffle=spec.shuffle,
     )
