@@ -74,6 +74,9 @@ def train_model(
     isotonic_time_weighting: bool = False,
     bagging_failure_data: bool = False,
     computing_weight_mode: str = "val_rmse",
+    train_with_censored_data: bool = False,
+    use_cotraining_ensemble_survival_loss_function: bool = False,
+    cotraining_survival_loss_lambda: float = 1.0,
     # Others
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
@@ -145,6 +148,18 @@ def train_model(
             ``"val_rmse"`` (default) weights models inversely to their validation RMSE.
             ``"confidence"`` wraps each model in a calibrated conformal regressor and weights
             models by their average ``predict_p`` confidence on the validation set.
+        train_with_censored_data: When ``True``, Initial training (only) additionally trains on
+            the censored data using ``BasicLightningModule.survival_loss_function`` instead of
+            plain MSE. Sequential-only (like every other opt-in lever here). ``False`` (default)
+            keeps Initial training on failure data with plain MSE.
+        use_cotraining_ensemble_survival_loss_function: When ``True``, every iteration that
+            trains on real peer-assigned pseudo-labels -- a fine-tune call (see
+            ``use_fine_tuning``) or a from-scratch retrain -- trains with
+            ``BasicLightningModule.cotraining_ensemble_survival_loss_function`` instead of plain
+            MSE. Independent of ``use_fine_tuning``. ``False`` (default) keeps plain MSE.
+        cotraining_survival_loss_lambda: Weight of the pseudo-label MSE term in
+            ``cotraining_ensemble_survival_loss_function``. Only used when
+            ``use_cotraining_ensemble_survival_loss_function`` is ``True``.
         gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
             more → parallel training across those GPUs.
         datetime_for_folders: Timestamp used to name the output folders.
@@ -251,6 +266,9 @@ def train_model(
         "isotonic_time_weighting": isotonic_time_weighting,
         "bagging_failure_data": bagging_failure_data,
         "computing_weight_mode": computing_weight_mode,
+        "train_with_censored_data": train_with_censored_data,
+        "use_cotraining_ensemble_survival_loss_function": use_cotraining_ensemble_survival_loss_function,
+        "cotraining_survival_loss_lambda": cotraining_survival_loss_lambda,
         "lr": meta["lr"],
         "max_epochs": meta["max_epochs"],
         "patiences": meta["patiences"],
@@ -282,6 +300,8 @@ def train_model(
         isotonic_time_weighting=isotonic_time_weighting,
         bagging_failure_data=bagging_failure_data,
         computing_weight_mode=computing_weight_mode,
+        use_cotraining_ensemble_survival_loss_function=use_cotraining_ensemble_survival_loss_function,
+        cotraining_survival_loss_lambda=cotraining_survival_loss_lambda,
     )
 
     print(f"Co-training ensemble GPU selection: {gpu_ids if gpu_ids else 'auto (single GPU)'}")
@@ -310,7 +330,7 @@ def train_model(
         f.write("=====================================\n")
 
     ensemble.train(
-        train_with_censored_data=False,
+        train_with_censored_data=train_with_censored_data,
         failure_data=features_uncensored,
         failure_label=targets_uncensored,
         suspension_data=features_censored,

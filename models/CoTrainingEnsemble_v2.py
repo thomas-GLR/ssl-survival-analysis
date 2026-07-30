@@ -60,6 +60,8 @@ class CoTrainingEnsemble_v2:
             isotonic_time_weighting: bool = False,
             bagging_failure_data: bool = False,
             computing_weight_mode: str = "val_rmse",
+            use_cotraining_ensemble_survival_loss_function: bool = False,
+            cotraining_survival_loss_lambda: float = 1.0,
     ):
         """
         :param models: list[nn.Module]
@@ -163,6 +165,23 @@ class CoTrainingEnsemble_v2:
                 models with higher average confidence get higher weight. Requires ``train()``
                 to have been called first (uses each model's final accumulated training data
                 to fit the ``DifficultyEstimator``).
+        :param use_cotraining_ensemble_survival_loss_function: bool
+            When ``True``, every iteration that trains on real peer-assigned pseudo-labels --
+            whether a fine-tune call (``use_fine_tuning=True``) or a from-scratch retrain
+            (``use_fine_tuning=False``) -- trains with
+            ``BasicLightningModule.cotraining_ensemble_survival_loss_function`` instead of plain
+            MSE: failed rows are unaffected, while censored rows (which already carry a
+            peer-assigned pseudo-label by the time they reach either call) contribute a
+            ``cotraining_survival_loss_lambda``-weighted MSE against that pseudo-label plus an
+            extra MSE-against-survival-lower-bound term for the rows whose prediction violates
+            it. Never applies to Initial training (its censored rows still carry a dummy
+            placeholder, not a real label). Requires ``suspension_lower_bounds`` to be passed to
+            ``train()``; only supported on the sequential path (like every other opt-in lever).
+            ``False`` (default) keeps plain MSE.
+        :param cotraining_survival_loss_lambda: float
+            Weight of the pseudo-label MSE term in
+            ``cotraining_ensemble_survival_loss_function``. Only used when
+            ``use_cotraining_ensemble_survival_loss_function`` is ``True``. Must be ``>= 0``.
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
@@ -186,6 +205,9 @@ class CoTrainingEnsemble_v2:
             raise ValueError(
                 f"computing_weight_mode must be one of 'val_rmse', 'confidence', got {computing_weight_mode!r}."
             )
+
+        if cotraining_survival_loss_lambda < 0:
+            raise ValueError("cotraining_survival_loss_lambda must be non-negative.")
 
         self.models = models
         self.number_of_models = len(self.models)
@@ -213,6 +235,8 @@ class CoTrainingEnsemble_v2:
         self.isotonic_time_weighting = isotonic_time_weighting
         self.bagging_failure_data = bagging_failure_data
         self.computing_weight_mode = computing_weight_mode
+        self.use_cotraining_ensemble_survival_loss_function = use_cotraining_ensemble_survival_loss_function
+        self.cotraining_survival_loss_lambda = cotraining_survival_loss_lambda
 
         # Builder-style config (set through setup_training_builder), required for multi-GPU
         # parallel training. Mirrors models.Coprog / CoTrainingEnsemble (v1).
@@ -390,8 +414,13 @@ class CoTrainingEnsemble_v2:
 
         Args:
             train_with_censored_data:
-                - True : the training of the models will be done with censored data. The model need to be able to handle censored data.
-                - False : the training of the models will be done only with failure data.
+                - True : Initial training (only) additionally trains on ``suspension_data``
+                  using ``BasicLightningModule.survival_loss_function`` (failed rows use plain
+                  MSE; censored rows contribute an MSE-against-``suspension_lower_bounds`` term
+                  only where the prediction violates it). Requires ``suspension_lower_bounds``
+                  to be given and is only supported on the sequential path. Every iteration
+                  afterward (scratch-retrain or fine-tune) is unaffected by this flag.
+                - False : Initial training uses only failure data with plain MSE (legacy).
             failure_data:
                 The features of failure data.
             failure_label:
@@ -491,11 +520,13 @@ class CoTrainingEnsemble_v2:
                 self.use_fine_tuning or self.fine_tune_from_initial_model
                 or self.peer_weighted_pseudo_label
                 or self.keep_best_model_mode is not None or self.isotonic_time_weighting
+                or train_with_censored_data or self.use_cotraining_ensemble_survival_loss_function
         )
         if self._parallel and new_features_on:
             raise ValueError(
                 "use_fine_tuning, fine_tune_from_initial_model, peer_weighted_pseudo_label, "
-                "keep_best_model_mode and isotonic_time_weighting are only supported on the "
+                "keep_best_model_mode, isotonic_time_weighting, train_with_censored_data and "
+                "use_cotraining_ensemble_survival_loss_function are only supported on the "
                 "sequential path; they cannot be combined with multi-GPU parallel (gpu_ids "
                 "with >= 2 GPUs).")
 
@@ -510,6 +541,20 @@ class CoTrainingEnsemble_v2:
         if self.fine_tune_from_initial_model and not self.use_fine_tuning:
             raise ValueError(
                 "fine_tune_from_initial_model requires use_fine_tuning=True.")
+
+        # cotraining_ensemble_survival_loss_function applies to every iteration that trains on
+        # real peer-assigned pseudo-labels (fine-tune or from-scratch retrain alike); it never
+        # applies to Initial training, whose censored rows still carry a dummy placeholder.
+        if self.use_cotraining_ensemble_survival_loss_function and suspension_lower_bounds is None:
+            raise ValueError(
+                "use_cotraining_ensemble_survival_loss_function requires suspension_lower_bounds "
+                "to be provided.")
+
+        # survival_loss_function (Initial training) needs the per-window survival lower bounds
+        # to score censored rows.
+        if train_with_censored_data and suspension_lower_bounds is None:
+            raise ValueError(
+                "train_with_censored_data requires suspension_lower_bounds to be provided.")
 
         # Time-weighted isotonic only has an effect inside the monotone projection and needs the
         # per-window time steps to derive the sample weights.
@@ -616,6 +661,14 @@ class CoTrainingEnsemble_v2:
             return
 
         models_datasets = []
+        # Parallel bookkeeping to models_datasets: per-model (is_censored, lower_bound) tensors,
+        # row-aligned with models_datasets[j], maintained only when
+        # use_cotraining_ensemble_survival_loss_function needs it to build fine-tune or
+        # from-scratch-retrain batches. None when the feature is off, so the all-defaults path
+        # pays no extra bookkeeping.
+        censoring_info: list[tuple[torch.Tensor, torch.Tensor]] | None = (
+            [] if self.use_cotraining_ensemble_survival_loss_function else None
+        )
         h: list[LightningModule] = []
         # Per-model validation RMSE, maintained only when keep_best_model_mode == "val_rmse" needs
         # it to accept/reject a candidate. None otherwise ("delta_criterion" recomputes its
@@ -631,15 +684,35 @@ class CoTrainingEnsemble_v2:
             else:
                 x_i, y_i = failure_data, failure_label
 
-            # TODO need to see how to deel with survloss and data
-            # if train_with_censored_data:
-            #     x_i = torch.cat([x_i, suspension_data], dim=0)
-            #     y_i = torch.cat([y_i, ], dim=0)
-
+            # models_datasets stays failure-only even when train_with_censored_data is on: it is
+            # the "L" set used for RMSE metrics / delta_criterion / confidence weighting, and
+            # only the one-off fit call below needs the censored-augmented batch.
             models_datasets.append((x_i, y_i))
+            if censoring_info is not None:
+                censoring_info.append((
+                    torch.zeros(len(x_i), dtype=torch.bool),
+                    torch.zeros_like(y_i),
+                ))
 
-            self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure samples...")
-            h_j = self._fit_from_scratch(j, x_i, y_i, val_data, val_label)
+            if train_with_censored_data:
+                is_censored_i = torch.cat([
+                    torch.zeros(len(x_i), dtype=torch.bool),
+                    torch.ones(len(suspension_data), dtype=torch.bool),
+                ])
+                lower_bound_i = torch.cat([torch.zeros_like(y_i), suspension_lower_bounds], dim=0)
+                fit_x = torch.cat([x_i, suspension_data], dim=0)
+                # Censored rows have no ground truth yet: a placeholder target, never read
+                # (survival_loss_function only checks censored rows against lower_bound_i).
+                fit_y = torch.cat([y_i, torch.zeros_like(suspension_lower_bounds)], dim=0)
+                self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure "
+                             f"samples + {len(suspension_data)} censored samples "
+                             f"(survival_loss_function)...")
+                h_j = self._fit_from_scratch(
+                    j, fit_x, fit_y, val_data, val_label,
+                    is_censored=is_censored_i, lower_bound=lower_bound_i)
+            else:
+                self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure samples...")
+                h_j = self._fit_from_scratch(j, x_i, y_i, val_data, val_label)
 
             h.append(h_j)
 
@@ -811,13 +884,24 @@ class CoTrainingEnsemble_v2:
                 if selected_per_model[j]:
                     xj, yj = models_datasets[j]
 
-                    new_xu, new_lu = self._concat_selected_units(selected_per_model[j], yj)
+                    new_xu, new_lu, new_is_censored, new_lb = self._concat_selected_units(selected_per_model[j], yj)
 
                     # Build the candidate (accumulated + newly assigned units) without committing
                     # it yet, so keep-best-model can reject it below.
                     candidate_x = torch.cat([xj, new_xu], dim=0)
                     candidate_y = torch.cat([yj, new_lu], dim=0)
                     n_added = len(selected_per_model[j])
+
+                    # Only ever built/used when use_cotraining_ensemble_survival_loss_function is
+                    # on; both the fine-tune and from-scratch retrain branches below feed them
+                    # through so either training mode can apply
+                    # cotraining_ensemble_survival_loss_function.
+                    candidate_is_censored = None
+                    candidate_lb = None
+                    if self.use_cotraining_ensemble_survival_loss_function:
+                        prev_is_censored, prev_lb = censoring_info[j]
+                        candidate_is_censored = torch.cat([prev_is_censored, new_is_censored], dim=0)
+                        candidate_lb = torch.cat([prev_lb, new_lb], dim=0)
 
                     if self.use_fine_tuning:
                         # Fine-tune-from-initial-model redirects the warm start to the model
@@ -831,18 +915,23 @@ class CoTrainingEnsemble_v2:
                                      f"dataset size: {len(candidate_x)} samples")
                         candidate = self._fine_tune(
                             j, self._cpu_state_dict(warm_start_model), candidate_x, candidate_y,
-                            self._cpu_pair(val_data, val_label))
+                            self._cpu_pair(val_data, val_label),
+                            is_censored=candidate_is_censored, lower_bound=candidate_lb)
                     else:
                         self._log(1, f"[CoTraining]   Retraining model {j} from scratch | "
                                      f"added {n_added} unit(s) | "
                                      f"dataset size: {len(candidate_x)} samples")
                         candidate = self._fit_from_scratch(
-                            j, candidate_x, candidate_y, val_data, val_label)
+                            j, candidate_x, candidate_y, val_data, val_label,
+                            is_censored=candidate_is_censored, lower_bound=candidate_lb,
+                            use_cotraining_survival_loss=self.use_cotraining_ensemble_survival_loss_function)
 
                     if self.keep_best_model_mode is None:
                         # Legacy behavior: always accept the candidate.
                         h[j] = candidate
                         models_datasets[j] = (candidate_x, candidate_y)
+                        if self.use_cotraining_ensemble_survival_loss_function:
+                            censoring_info[j] = (candidate_is_censored, candidate_lb)
                     elif self.keep_best_model_mode == "val_rmse":
                         candidate_rmse = self._mse_on(candidate, val_data, val_label) ** 0.5
                         if candidate_rmse < val_rmses[j]:
@@ -850,6 +939,8 @@ class CoTrainingEnsemble_v2:
                                          f"{candidate_rmse:.4f} < best {val_rmses[j]:.4f}).")
                             h[j] = candidate
                             models_datasets[j] = (candidate_x, candidate_y)
+                            if self.use_cotraining_ensemble_survival_loss_function:
+                                censoring_info[j] = (candidate_is_censored, candidate_lb)
                             val_rmses[j] = candidate_rmse
                         else:
                             # Reject: keep the previous model, dataset and best RMSE untouched.
@@ -869,6 +960,8 @@ class CoTrainingEnsemble_v2:
                                          f"delta={delta:.4f} > 0).")
                             h[j] = candidate
                             models_datasets[j] = (candidate_x, candidate_y)
+                            if self.use_cotraining_ensemble_survival_loss_function:
+                                censoring_info[j] = (candidate_is_censored, candidate_lb)
                         else:
                             # Reject: keep the previous model and dataset untouched. The added
                             # units were already removed from remaining_suspension_ids during
@@ -929,7 +1022,7 @@ class CoTrainingEnsemble_v2:
             start: int,
             remaining_suspension_ids: torch.Tensor,
             width_norm: dict[int, dict[int, float]] | None = None,
-    ) -> tuple[list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]], torch.Tensor, int]:
+    ) -> tuple[list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]]], torch.Tensor, int]:
         """Phase 2: hand out a shared per-iteration budget of censored units round-robin.
 
         Rotating the starting model each iteration so no single model consistently gets first
@@ -938,7 +1031,7 @@ class CoTrainingEnsemble_v2:
 
         Returns ``(selected_per_model, remaining_suspension_ids, added)``.
         """
-        selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = [
+        selected_per_model: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]]] = [
             [] for _ in range(self.number_of_models)
         ]
         added = 0
@@ -980,16 +1073,38 @@ class CoTrainingEnsemble_v2:
 
     @staticmethod
     def _concat_selected_units(
-            selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+            selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]],
             yj: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Concatenate every ``(unit_id, xu, lu)`` newly assigned to a model into ``(new_xu, new_lu)``."""
-        new_xu = torch.cat([xu for _, xu, _ in selected], dim=0)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Concatenate every ``(unit_id, xu, lu, lb)`` newly assigned to a model.
+
+        Args:
+            selected: Per-unit ``(unit_id, xu, lu, lb)`` tuples, ``lb`` being the unit's
+                per-window survival lower bound (or ``None`` when ``suspension_lower_bounds``
+                wasn't given to ``train()``).
+            yj: The model's current targets, used only to match ``lu``/``lb``'s reshape to
+                ``yj``'s layout (``(N,)`` vs ``(N, 1)``).
+
+        Returns:
+            ``(new_xu, new_lu, new_is_censored, new_lb)`` -- ``new_is_censored`` is
+            ``ones(len(new_xu), dtype=bool)`` (newly-added units are censored by construction);
+            ``new_lb`` is built the same way as ``new_lu``, or ``None`` if any selected unit's
+            lower bound is unavailable.
+        """
+        new_xu = torch.cat([xu for _, xu, _, _ in selected], dim=0)
         new_lu = torch.cat(
-            [lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1) for _, _, lu in selected],
+            [lu.view(-1, yj.shape[1]) if yj.dim() > 1 else lu.view(-1) for _, _, lu, _ in selected],
             dim=0,
         )
-        return new_xu, new_lu
+        new_is_censored = torch.ones(len(new_xu), dtype=torch.bool)
+        if any(lb is None for _, _, _, lb in selected):
+            new_lb = None
+        else:
+            new_lb = torch.cat(
+                [lb.view(-1, yj.shape[1]) if yj.dim() > 1 else lb.view(-1) for _, _, _, lb in selected],
+                dim=0,
+            )
+        return new_xu, new_lu, new_is_censored, new_lb
 
     @staticmethod
     def _bootstrap_sample(
@@ -1051,19 +1166,54 @@ class CoTrainingEnsemble_v2:
             y: torch.Tensor,
             val_x: torch.Tensor | None,
             val_y: torch.Tensor | None,
+            is_censored: torch.Tensor | None = None,
+            lower_bound: torch.Tensor | None = None,
+            use_cotraining_survival_loss: bool = False,
     ) -> LightningModule:
         """Train one model from scratch (inline, this process).
 
         Uses the builder path (:func:`run_training_job` + rebuild from the returned CPU state
         dict) when configured via :meth:`setup_training_builder`, otherwise the legacy path
         (:meth:`_train_fun` on a deep-copied template).
+
+        Args:
+            model_index: Index of the model being trained.
+            x: Training features.
+            y: Training targets aligned with ``x``.
+            val_x: Optional validation features for early stopping / checkpointing.
+            val_y: Optional validation targets.
+            is_censored: Optional per-row censoring flag row-aligned with ``x``/``y``. Given
+                either for Initial training with ``train_with_censored_data=True`` (censored
+                rows carry a placeholder target, so ``BasicLightningModule.training_step``
+                applies plain ``survival_loss_function``) or for a from-scratch retrain
+                iteration when ``use_cotraining_ensemble_survival_loss_function=True`` (censored
+                rows already carry a real peer-assigned pseudo-label, see
+                ``use_cotraining_survival_loss``). Requires ``lower_bound`` and the builder path.
+            lower_bound: Optional per-row survival lower bound row-aligned with ``x``/``y``.
+                See ``is_censored``.
+            use_cotraining_survival_loss: When ``True`` (together with ``is_censored``/
+                ``lower_bound``), the rebuilt module applies
+                ``cotraining_ensemble_survival_loss_function`` instead of plain
+                ``survival_loss_function``. Only meaningful for a from-scratch retrain
+                iteration; Initial training never sets this (its censored rows have no real
+                label yet). ``False`` (default) keeps plain ``survival_loss_function``.
+
+        Returns:
+            The trained ``LightningModule``.
         """
         if self._use_builders:
-            spec = self._make_fit_spec(model_index, x, y, self._cpu_pair(val_x, val_y))
+            spec = self._make_fit_spec(
+                model_index, x, y, self._cpu_pair(val_x, val_y),
+                is_censored=is_censored, lower_bound=lower_bound,
+                use_cotraining_survival_loss=use_cotraining_survival_loss)
             spec.accelerator = self._inline_accelerator
             spec.devices = self._inline_devices
             result = run_training_job(spec)
             return self._rebuild_module(model_index, result["state_dict"])
+        if is_censored is not None or lower_bound is not None:
+            raise NotImplementedError(
+                "train_with_censored_data / use_cotraining_ensemble_survival_loss_function "
+                "require setup_training_builder (the builder path).")
         return self._train_fun(
             copy.deepcopy(self.lightning_modules[model_index]), model_index, x, y, val_x, val_y)
 
@@ -1073,6 +1223,9 @@ class CoTrainingEnsemble_v2:
             x: torch.Tensor,
             y: torch.Tensor,
             val_cpu: tuple[torch.Tensor | None, torch.Tensor | None],
+            is_censored: torch.Tensor | None = None,
+            lower_bound: torch.Tensor | None = None,
+            use_cotraining_survival_loss: bool = False,
     ) -> TrainingSpec:
         """Build a picklable :class:`TrainingSpec` for a from-scratch training that returns state."""
         return TrainingSpec(
@@ -1089,6 +1242,10 @@ class CoTrainingEnsemble_v2:
             return_state=True,
             accelerator="gpu",
             devices=1,
+            is_censored=is_censored.detach().cpu() if is_censored is not None else None,
+            lower_bound=lower_bound.detach().cpu() if lower_bound is not None else None,
+            use_cotraining_survival_loss=use_cotraining_survival_loss,
+            cotraining_survival_loss_lambda=self.cotraining_survival_loss_lambda,
         )
 
     def _rebuild_module(self, model_index: int, state_dict: dict[str, torch.Tensor]) -> LightningModule:
@@ -1119,6 +1276,8 @@ class CoTrainingEnsemble_v2:
             x: torch.Tensor,
             y: torch.Tensor,
             val_cpu: tuple[torch.Tensor | None, torch.Tensor | None],
+            is_censored: torch.Tensor | None = None,
+            lower_bound: torch.Tensor | None = None,
     ) -> LightningModule:
         """Warm-start fine-tune one model from ``current_state_dict`` on ``(x, y)``.
 
@@ -1134,6 +1293,12 @@ class CoTrainingEnsemble_v2:
             x: Training features (full accumulated dataset for this model).
             y: Training targets aligned with ``x``.
             val_cpu: ``(val_x, val_y)`` on CPU for early stopping / best-checkpoint selection.
+            is_censored: Optional per-row censoring flag row-aligned with ``x``/``y``. Only
+                given when ``self.use_cotraining_ensemble_survival_loss_function`` is ``True``:
+                makes the rebuilt module apply ``cotraining_ensemble_survival_loss_function``
+                instead of plain MSE. Requires ``lower_bound``.
+            lower_bound: Optional per-row survival lower bound row-aligned with ``x``/``y``.
+                See ``is_censored``.
 
         Returns:
             A fresh ``LightningModule`` rebuilt from the fine-tuned CPU state dict.
@@ -1157,6 +1322,10 @@ class CoTrainingEnsemble_v2:
             return_state=True,
             accelerator=self._inline_accelerator,
             devices=self._inline_devices,
+            is_censored=is_censored.detach().cpu() if is_censored is not None else None,
+            lower_bound=lower_bound.detach().cpu() if lower_bound is not None else None,
+            use_cotraining_survival_loss=self.use_cotraining_ensemble_survival_loss_function,
+            cotraining_survival_loss_lambda=self.cotraining_survival_loss_lambda,
         )
         result = run_finetune_job(spec)
         return self._rebuild_module(model_index, result["state_dict"])
@@ -1344,7 +1513,9 @@ class CoTrainingEnsemble_v2:
                 for j in range(n):
                     if selected_per_model[j]:
                         xj, yj = models_datasets[j]
-                        new_xu, new_lu = self._concat_selected_units(selected_per_model[j], yj)
+                        # Parallel path never carries censoring info (train_with_censored_data /
+                        # use_cotraining_ensemble_survival_loss_function are sequential-only).
+                        new_xu, new_lu, _, _ = self._concat_selected_units(selected_per_model[j], yj)
                         xj = torch.cat([xj, new_xu], dim=0)
                         yj = torch.cat([yj, new_lu], dim=0)
                         models_datasets[j] = (xj, yj)
@@ -1805,7 +1976,7 @@ class CoTrainingEnsemble_v2:
             norm_width: dict[int, dict[int, float]],
             model_index_to_exclude: int,
             width_norm: dict[int, dict[int, float]] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None] | None:
         r"""Select the censored unit the *other* models are most confident about.
 
         For each candidate unit u, the average **normalized** interval width (see
@@ -1847,8 +2018,10 @@ class CoTrainingEnsemble_v2:
                 predictions are excluded from both the width average and the pseudo-label.
 
         Returns:
-            ``(unit_id, xu, lu_p)`` for the selected unit, or ``None`` if no unit is
-            available (including when every peer's prediction is physically invalid).
+            ``(unit_id, xu, lu_p, lb)`` for the selected unit (``lb`` is the unit's per-window
+            survival lower bound, or ``None`` when ``suspension_lower_bounds`` wasn't given),
+            or ``None`` if no unit is available (including when every peer's prediction is
+            physically invalid).
         """
         # Collect every unit_id that at least one non-excluded model has scored.
         all_unit_ids: set[int] = {
@@ -1906,7 +2079,7 @@ class CoTrainingEnsemble_v2:
 
         most_confident_j = min(valid_contributors, key=lambda j: norm_width[j][best_unit_id_int])
 
-        unit_id, xu, lu_p, _, _, _, _, _, _ = all_preds[most_confident_j][best_unit_id_int]
+        unit_id, xu, lu_p, _, _, _, _, _, lb = all_preds[most_confident_j][best_unit_id_int]
 
         if self.peer_weighted_pseudo_label:
             # Blend all valid peers' per-window predictions, weighting each by
@@ -1983,7 +2156,7 @@ class CoTrainingEnsemble_v2:
                      f"unit, from {label_source}): "
                      f"{[round(v, 4) for v in lu_p.view(-1).tolist()]}")
 
-        return unit_id, xu, lu_p
+        return unit_id, xu, lu_p, lb
 
     def _check_if_training_is_possible(self):
         if not self._configured:

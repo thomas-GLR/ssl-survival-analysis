@@ -22,12 +22,25 @@ class BasicLightningModule(LightningModule):
             model: nn.Module,
             target_mean: float = 0.0,
             target_std: float = 1.0,
+            use_cotraining_ensemble_survival_loss_function: bool = False,
+            cotraining_survival_loss_lambda: float = 1.0,
     ):
         super(BasicLightningModule, self).__init__()
         # We need to ignore model to prevent UnpicklingError since PyTorch 2.6 with weights_only=True
         self.save_hyperparameters(ignore=['model'])
         self.net = model
         self.lr = lr
+        # CoTrainingEnsemble_v2-only (Scania) survival-loss selection for 4-element batches
+        # (x, y, is_censored, lower_bound). False/default keeps every other caller (COPROG,
+        # CoTrainingEnsemble v1, RSF, C-MAPSS, HPO) on the plain 2-element (x, y) MSE path
+        # untouched. use_cotraining_ensemble_survival_loss_function is flipped post-construction
+        # by both of CoTrainingEnsemble_v2's cotraining-iteration jobs -- the fine-tune job
+        # (models/cotraining_gpu_pool.run_finetune_job, which mirrors how it already overrides
+        # self.lr for the fine-tune's reduced learning rate) and the from-scratch retrain job
+        # (models/coprog_gpu_pool.run_training_job) -- the shared module_builder partial always
+        # constructs with the default (False), so Initial training is never affected by it.
+        self.use_cotraining_ensemble_survival_loss_function = use_cotraining_ensemble_survival_loss_function
+        self.cotraining_survival_loss_lambda = cotraining_survival_loss_lambda
         # RUL target standardization. The network learns/predicts in normalized
         # target space (loss is computed there), which keeps the MSE gradient on
         # an O(1) scale so the optimizer isn't dominated by the raw target
@@ -68,6 +81,33 @@ class BasicLightningModule(LightningModule):
         return t * self.target_std + self.target_mean
 
     def training_step(self, batch, batch_idx):
+        # CoTrainingEnsemble_v2 (Scania only) feeds a 4-element batch (x, y, is_censored,
+        # lower_bound) for Initial training with censored data and for cotraining-loss
+        # fine-tuning; every other caller keeps the plain (x, y) 2-element batch below.
+        if len(batch) == 4:
+            x, y, is_censored, lower_bound = batch
+            preds = self.net(x)
+            y_norm = (y - self.target_mean) / self.target_std
+            lower_bound_norm = (lower_bound - self.target_mean) / self.target_std
+            if self.use_cotraining_ensemble_survival_loss_function:
+                loss = self._cotraining_ensemble_survival_loss_function(
+                    preds, y_norm, is_censored, lower_bound_norm)
+            else:
+                loss = self._survival_loss_function(preds, y_norm, is_censored, lower_bound_norm)
+            # During Initial training the censored rows carry a dummy placeholder target, which
+            # would corrupt train_rmse, so only failed rows are tracked there. In a cotraining
+            # iteration (either a from-scratch retrain or a fine-tune -- both flip the flag
+            # below) every censored row carries a real peer-assigned pseudo-label, i.e. the very
+            # target the loss optimizes, so all rows are tracked and train_rmse reflects the
+            # full augmented training set.
+            if self.use_cotraining_ensemble_survival_loss_function:
+                tracked_mask = torch.ones_like(is_censored.view(-1), dtype=torch.bool)
+            else:
+                tracked_mask = ~is_censored.view(-1).bool()
+            self.training_step_outputs.extend(self._denorm(preds).detach()[tracked_mask])
+            self.training_step_targets.extend(y.detach()[tracked_mask])
+            return loss
+
         x, y = batch
         preds = self.net(x)
         # Loss is computed in normalized target space; predictions are stored
@@ -76,6 +116,101 @@ class BasicLightningModule(LightningModule):
         loss = F.mse_loss(preds, y_norm)
         self.training_step_outputs.extend(self._denorm(preds).detach())
         self.training_step_targets.extend(y.detach())
+        return loss
+
+    def _survival_loss_function(
+            self,
+            preds: torch.Tensor,
+            y_norm: torch.Tensor,
+            is_censored: torch.Tensor,
+            lower_bound_norm: torch.Tensor,
+    ) -> torch.Tensor:
+        """Survival loss for CoTrainingEnsemble_v2 Initial training with censored data.
+
+        Failed (uncensored) rows contribute their squared error against the true (normalized)
+        target. Censored rows have no ground truth yet (``y_norm`` is a dummy placeholder for
+        them, never read) -- they only contribute a squared error against their survival lower
+        bound, and only when the prediction falls below that bound; a prediction at or above the
+        bound is already consistent with the data and the row is dropped.
+
+        Args:
+            preds: Model predictions in normalized target space, shape ``(N,)`` or ``(N, 1)``.
+            y_norm: Normalized targets, meaningful for failed rows only.
+            is_censored: Per-row censoring flag (``True``/``1`` for censored rows).
+            lower_bound_norm: Normalized survival lower bound per row, meaningful for censored
+                rows only.
+
+        Returns:
+            Scalar loss tensor, graph-connected to ``preds`` even when no row contributes
+            (all-censored-above-bound batch).
+        """
+        preds_flat = preds.view(-1)
+        y_flat = y_norm.view(-1)
+        lb_flat = lower_bound_norm.view(-1)
+        censored_mask = is_censored.view(-1).bool()
+        failed_mask = ~censored_mask
+
+        failed_se = (preds_flat[failed_mask] - y_flat[failed_mask]) ** 2
+
+        censored_preds = preds_flat[censored_mask]
+        censored_lb = lb_flat[censored_mask]
+        violates = censored_preds < censored_lb
+        censored_se = (censored_preds[violates] - censored_lb[violates]) ** 2
+
+        total_n = failed_se.numel() + censored_se.numel()
+        if total_n == 0:
+            return (preds_flat * 0.0).sum()
+        return (failed_se.sum() + censored_se.sum()) / total_n
+
+    def _cotraining_ensemble_survival_loss_function(
+            self,
+            preds: torch.Tensor,
+            y_norm: torch.Tensor,
+            is_censored: torch.Tensor,
+            lower_bound_norm: torch.Tensor,
+    ) -> torch.Tensor:
+        """Survival loss for CoTrainingEnsemble_v2 fine-tuning iterations.
+
+        Unlike Initial training, every censored row here already carries a real pseudo-label
+        (assigned by a peer model during unit selection), never a placeholder. Failed rows
+        contribute a plain MSE term against their true target. Censored rows contribute a
+        ``cotraining_survival_loss_lambda``-weighted MSE term against their pseudo-label, plus an
+        extra MSE-against-lower-bound term computed only over the censored rows whose prediction
+        falls below their bound -- non-violating censored rows are already fully accounted for by
+        the pseudo-label term, so the bound term is averaged over the violating subset only.
+
+        Args:
+            preds: Model predictions in normalized target space, shape ``(N,)`` or ``(N, 1)``.
+            y_norm: Normalized targets -- true target for failed rows, pseudo-label for censored
+                rows.
+            is_censored: Per-row censoring flag (``True``/``1`` for censored rows).
+            lower_bound_norm: Normalized survival lower bound per row, meaningful for censored
+                rows only.
+
+        Returns:
+            Scalar loss tensor, graph-connected to ``preds`` even when a term has no rows.
+        """
+        preds_flat = preds.view(-1)
+        y_flat = y_norm.view(-1)
+        lb_flat = lower_bound_norm.view(-1)
+        censored_mask = is_censored.view(-1).bool()
+        failed_mask = ~censored_mask
+
+        loss = (preds_flat * 0.0).sum()
+
+        if failed_mask.any():
+            loss = loss + F.mse_loss(preds_flat[failed_mask], y_flat[failed_mask])
+
+        if censored_mask.any():
+            censored_preds = preds_flat[censored_mask]
+            censored_y = y_flat[censored_mask]
+            loss = loss + self.cotraining_survival_loss_lambda * F.mse_loss(censored_preds, censored_y)
+
+            censored_lb = lb_flat[censored_mask]
+            violates = censored_preds < censored_lb
+            if violates.any():
+                loss = loss + F.mse_loss(censored_preds[violates], censored_lb[violates])
+
         return loss
 
     def on_train_epoch_end(self):
