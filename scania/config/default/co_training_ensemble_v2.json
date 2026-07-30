@@ -90,6 +90,8 @@
     "bagging_failure_data": false,
     "keep_best_model_mode": null,
     "isotonic_time_weighting":  false,
-    "computing_weight_mode": "val_rmse"
+    "computing_weight_mode": "val_rmse",
+    "use_cotraining_ensemble_survival_loss_function": true,
+    "cotraining_survival_loss_lambda": 0.1
   }
 }
