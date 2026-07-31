@@ -187,3 +187,40 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
     # Chunk size for inference forward passes; caps peak memory during conformal scoring/metrics.
     "inference_batch_size",
 ]
+
+# =======================================================
+# HYPERPARAMETER OPTIMIZATION (CoTrainingEnsemble_v2, Scania)
+# =======================================================
+
+# Every lever swept by the benchmark. Each key maps to a *list* of candidate values in the
+# hyper_parameter_optimization_co_training_ensemble_v2.json "hyper_parameters" block; the
+# benchmark takes their (pruned, deduped) cartesian product. suspension_pool_size and add_ratio
+# are swept too, so unlike NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS they live here and
+# not in the fixed training block.
+NECESSARY_HPO_CO_TRAINING_ENSEMBLE_V2_HYPER_PARAMETER_KEYS = [
+    "use_monotone_projection",
+    "monotone_residual_weight",
+    "use_fine_tuning",
+    "fine_tune_lr_factor",
+    "fine_tune_max_epochs",
+    # Paired element-wise with fine_tune_max_epochs (same length), never crossed with it.
+    "fine_tune_patience",
+    "fine_tune_from_initial_model",
+    "peer_weighted_pseudo_label",
+    "keep_best_model_mode",
+    "isotonic_time_weighting",
+    "computing_weight_mode",
+    "use_cotraining_ensemble_survival_loss_function",
+    "cotraining_survival_loss_lambda",
+    "suspension_pool_size",
+    "add_ratio",
+]
+
+# Held constant across every configuration of the sweep. train_with_censored_data is optional
+# (defaults to False) and only affects the one-off shared initial training.
+NECESSARY_HPO_CO_TRAINING_ENSEMBLE_V2_TRAINING_KEYS = [
+    "iterations",
+    "confidence",
+    "inference_batch_size",
+    "bagging_failure_data",
+]

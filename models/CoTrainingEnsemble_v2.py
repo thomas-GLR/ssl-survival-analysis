@@ -138,8 +138,9 @@ class CoTrainingEnsemble_v2:
                 candidate (same delta pattern as ``Coprog``'s confidence measure, but gating model
                 acceptance rather than unit selection).
             In both non-``None`` modes, a rejection reverts the model/dataset to their
-            pre-iteration state and permanently drops the iteration's added censored units (they
-            are not returned to the pool; mirrors ``CoTrainingEnsemble_v3``).
+            pre-iteration state and **returns** the iteration's added censored units to the pool
+            of remaining censored units, so they stay eligible for selection in later iterations
+            (they are never committed to a dataset, hence still unlabeled).
         :param isotonic_time_weighting: bool
             When ``True``, the monotone (isotonic) projection of each unit's pseudo-labels is
             fitted with per-window ``sample_weight`` proportional to the local time gap
@@ -402,6 +403,9 @@ class CoTrainingEnsemble_v2:
             weight_mode: str = "min",
             metrics_file: str | None = None,
             log_file: str | None = None,
+            pretrained_models: list[LightningModule] | None = None,
+            pretrained_models_datasets: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+            pool_seed: int | None = None,
     ) -> None:
         r"""The train algorithm for co-training ensemble v2.
 
@@ -507,6 +511,27 @@ class CoTrainingEnsemble_v2:
                 ``verbose``). The path stays active on the instance after ``train``
                 returns, so logs from a subsequent ``calculate_weights`` call are
                 captured too.
+            pretrained_models:
+                Optional already-trained module per model (one entry per model, same order as
+                ``models``), typically produced by an earlier
+                :meth:`pretrain_initial_models` call. When given, **Initial training is
+                skipped** and these modules are used as the iteration-0 state; must be passed
+                together with ``pretrained_models_datasets``. This is what lets a hyperparameter
+                sweep run every configuration against byte-identical starting models instead of
+                retraining them each time (so a difference in the results is attributable to the
+                hyperparameters, not to a different random initialization). ``bagging_failure_data``
+                and ``train_with_censored_data`` then apply to whoever produced the pretrained
+                models, not to this call. Sequential path only.
+            pretrained_models_datasets:
+                Each pretrained model's own ``(x, y)`` training split (the second element returned
+                by :meth:`pretrain_initial_models`). Required together with ``pretrained_models``.
+            pool_seed:
+                Optional seed for a **dedicated** RNG used only to draw the per-iteration censored
+                candidate pool. With it, the sequence of pools is reproducible across runs — the
+                pool still differs from one iteration to the next, but iteration ``i`` draws the
+                same units in every run — because the generator is isolated from the global RNG,
+                which model training advances by a different amount depending on the configuration.
+                ``None`` (default) keeps using the global RNG.
         """
         self._log_file_path = log_file
 
@@ -529,6 +554,23 @@ class CoTrainingEnsemble_v2:
                 "use_cotraining_ensemble_survival_loss_function are only supported on the "
                 "sequential path; they cannot be combined with multi-GPU parallel (gpu_ids "
                 "with >= 2 GPUs).")
+
+        # Injected pretrained models replace the sequential path's Initial-training block; the
+        # parallel path runs its own (and would silently ignore them).
+        if (pretrained_models is None) != (pretrained_models_datasets is None):
+            raise ValueError(
+                "pretrained_models and pretrained_models_datasets must be provided together.")
+        if pretrained_models is not None:
+            if self._parallel:
+                raise ValueError(
+                    "pretrained_models is only supported on the sequential path; it cannot be "
+                    "combined with multi-GPU parallel (gpu_ids with >= 2 GPUs).")
+            if (len(pretrained_models) != self.number_of_models
+                    or len(pretrained_models_datasets) != self.number_of_models):
+                raise ValueError(
+                    f"pretrained_models and pretrained_models_datasets must both have one entry "
+                    f"per model ({self.number_of_models}), got {len(pretrained_models)} and "
+                    f"{len(pretrained_models_datasets)}.")
 
         # Fine-tuning warm-starts from the builder-rebuilt module and reuses the builder's
         # batch-size / shuffle config, so it requires setup_training_builder (like v3).
@@ -619,7 +661,12 @@ class CoTrainingEnsemble_v2:
                      f"peer_weighted_pseudo_label: {self.peer_weighted_pseudo_label} |"
                      f"keep_best_model_mode: {self.keep_best_model_mode} |"
                      f"isotonic_time_weighting: {self.isotonic_time_weighting} |"
-                     f"bagging_failure_data: {self.bagging_failure_data}")
+                     f"bagging_failure_data: {self.bagging_failure_data} |"
+                     f"computing_weight_mode: {self.computing_weight_mode} |"
+                     f"use_cotraining_ensemble_survival_loss_function: "
+                     f"{self.use_cotraining_ensemble_survival_loss_function} |"
+                     f"cotraining_survival_loss_lambda: {self.cotraining_survival_loss_lambda} |"
+                     f"pool_seed: {pool_seed}")
 
         total_suspension_units = len(torch.unique(suspension_ids))
         # Candidate pool size (a count of units) derived once from the fraction; the actual pool is
@@ -660,66 +707,44 @@ class CoTrainingEnsemble_v2:
             )
             return
 
-        models_datasets = []
+        if pretrained_models is not None:
+            # Reusing already-trained models (see the ``pretrained_models`` docstring): every
+            # config of a hyperparameter sweep starts from the identical Initial-training result.
+            h = list(pretrained_models)
+            models_datasets = list(pretrained_models_datasets)
+            self._log(1, f"[CoTraining] Initial training skipped: reusing {len(h)} pretrained "
+                         f"model(s) (dataset sizes: {[len(x) for x, _ in models_datasets]}).")
+        else:
+            h, models_datasets = self.pretrain_initial_models(
+                failure_data=failure_data,
+                failure_label=failure_label,
+                val_data=val_data,
+                val_label=val_label,
+                train_with_censored_data=train_with_censored_data,
+                suspension_data=suspension_data,
+                suspension_lower_bounds=suspension_lower_bounds,
+            )
+
         # Parallel bookkeeping to models_datasets: per-model (is_censored, lower_bound) tensors,
         # row-aligned with models_datasets[j], maintained only when
         # use_cotraining_ensemble_survival_loss_function needs it to build fine-tune or
         # from-scratch-retrain batches. None when the feature is off, so the all-defaults path
-        # pays no extra bookkeeping.
+        # pays no extra bookkeeping. Every model starts with failure-only rows (nothing censored
+        # is in models_datasets yet), whether they were just trained or handed in pretrained.
         censoring_info: list[tuple[torch.Tensor, torch.Tensor]] | None = (
-            [] if self.use_cotraining_ensemble_survival_loss_function else None
+            [(torch.zeros(len(x_j), dtype=torch.bool), torch.zeros_like(y_j))
+             for x_j, y_j in models_datasets]
+            if self.use_cotraining_ensemble_survival_loss_function else None
         )
-        h: list[LightningModule] = []
         # Per-model validation RMSE, maintained only when keep_best_model_mode == "val_rmse" needs
         # it to accept/reject a candidate. None otherwise ("delta_criterion" recomputes its
         # comparison fresh from h[j]/models_datasets[j] each iteration, and peer-weighted
         # pseudo-labels use each peer's per-unit confidence score instead), so the all-defaults
         # path pays no extra forward pass.
         track_val_rmse = self.keep_best_model_mode == "val_rmse"
-        val_rmses: list[float] | None = [] if track_val_rmse else None
-
-        for j in range(self.number_of_models):
-            if self.bagging_failure_data:
-                x_i, y_i = self._bootstrap_sample(failure_data, failure_label)
-            else:
-                x_i, y_i = failure_data, failure_label
-
-            # models_datasets stays failure-only even when train_with_censored_data is on: it is
-            # the "L" set used for RMSE metrics / delta_criterion / confidence weighting, and
-            # only the one-off fit call below needs the censored-augmented batch.
-            models_datasets.append((x_i, y_i))
-            if censoring_info is not None:
-                censoring_info.append((
-                    torch.zeros(len(x_i), dtype=torch.bool),
-                    torch.zeros_like(y_i),
-                ))
-
-            if train_with_censored_data:
-                is_censored_i = torch.cat([
-                    torch.zeros(len(x_i), dtype=torch.bool),
-                    torch.ones(len(suspension_data), dtype=torch.bool),
-                ])
-                lower_bound_i = torch.cat([torch.zeros_like(y_i), suspension_lower_bounds], dim=0)
-                fit_x = torch.cat([x_i, suspension_data], dim=0)
-                # Censored rows have no ground truth yet: a placeholder target, never read
-                # (survival_loss_function only checks censored rows against lower_bound_i).
-                fit_y = torch.cat([y_i, torch.zeros_like(suspension_lower_bounds)], dim=0)
-                self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure "
-                             f"samples + {len(suspension_data)} censored samples "
-                             f"(survival_loss_function)...")
-                h_j = self._fit_from_scratch(
-                    j, fit_x, fit_y, val_data, val_label,
-                    is_censored=is_censored_i, lower_bound=lower_bound_i)
-            else:
-                self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure samples...")
-                h_j = self._fit_from_scratch(j, x_i, y_i, val_data, val_label)
-
-            h.append(h_j)
-
-            if track_val_rmse:
-                val_rmses.append(self._mse_on(h_j, val_data, val_label) ** 0.5)
-
-        self._log(1, f"[CoTraining] Initial training done.")
+        val_rmses: list[float] | None = (
+            [self._mse_on(h_j, val_data, val_label) ** 0.5 for h_j in h] if track_val_rmse else None
+        )
 
         # Snapshot of every model right after Initial training (before any censored unit is
         # added), kept only when fine_tune_from_initial_model is on. A plain list copy is
@@ -744,6 +769,10 @@ class CoTrainingEnsemble_v2:
 
         remaining_suspension_ids = torch.unique(suspension_ids)
 
+        # Dedicated pool RNG (see the ``pool_seed`` docstring): kept separate from the global RNG
+        # so the pool sequence does not shift with how much randomness model training consumes.
+        pool_generator = torch.Generator().manual_seed(pool_seed) if pool_seed is not None else None
+
         for i in range(iterations):
             if len(remaining_suspension_ids) == 0:
                 self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
@@ -753,7 +782,8 @@ class CoTrainingEnsemble_v2:
             # means the same units are not always scored, and (unlike scoring all remaining units)
             # it bounds the per-iteration conformal cost.
             pool_size_iter = min(pool_size, len(remaining_suspension_ids))
-            shuffled_ids = remaining_suspension_ids[torch.randperm(len(remaining_suspension_ids))]
+            shuffled_ids = remaining_suspension_ids[
+                torch.randperm(len(remaining_suspension_ids), generator=pool_generator)]
             pool_ids = shuffled_ids[:pool_size_iter]
 
             self._log(1, f"[CoTraining] --- Iteration {i + 1}/{iterations} | "
@@ -880,6 +910,11 @@ class CoTrainingEnsemble_v2:
                              f"no censored unit available for any model.")
                 break
 
+            # Unit ids whose candidate model was rejected by keep-best-model this iteration.
+            # They go back into remaining_suspension_ids below instead of being lost, so a later
+            # iteration (with better models / a different peer ranking) can select them again.
+            requeued_ids: list[int] = []
+
             for j in range(self.number_of_models):
                 if selected_per_model[j]:
                     xj, yj = models_datasets[j]
@@ -943,12 +978,13 @@ class CoTrainingEnsemble_v2:
                                 censoring_info[j] = (candidate_is_censored, candidate_lb)
                             val_rmses[j] = candidate_rmse
                         else:
-                            # Reject: keep the previous model, dataset and best RMSE untouched.
-                            # The added units were already removed from remaining_suspension_ids
-                            # during assignment, so a rejection discards them for good (matches v3).
+                            # Reject: keep the previous model, dataset and best RMSE untouched,
+                            # and hand this iteration's units back to the remaining pool so they
+                            # stay selectable in later iterations.
+                            requeued_ids.extend(int(entry[0]) for entry in selected_per_model[j])
                             self._log(1, f"[CoTraining]   Model {j}: iteration {i + 1} rejected "
                                          f"(val_rmse {candidate_rmse:.4f} >= best {val_rmses[j]:.4f}); "
-                                         f"reverted and dropped {n_added} censored sample(s).")
+                                         f"reverted and returned {n_added} censored unit(s) to the pool.")
                     else:  # "delta_criterion"
                         # delta = MSE(h_j, L) - MSE(h'_j, L), same pattern as Coprog's confidence
                         # measure: L = (xj, yj) is this model's dataset before this iteration's
@@ -963,12 +999,26 @@ class CoTrainingEnsemble_v2:
                             if self.use_cotraining_ensemble_survival_loss_function:
                                 censoring_info[j] = (candidate_is_censored, candidate_lb)
                         else:
-                            # Reject: keep the previous model and dataset untouched. The added
-                            # units were already removed from remaining_suspension_ids during
-                            # assignment, so a rejection discards them for good (matches v3).
+                            # Reject: keep the previous model and dataset untouched, and hand
+                            # this iteration's units back to the remaining pool so they stay
+                            # selectable in later iterations.
+                            requeued_ids.extend(int(entry[0]) for entry in selected_per_model[j])
                             self._log(1, f"[CoTraining]   Model {j}: iteration {i + 1} rejected "
                                          f"(delta_criterion delta={delta:.4f} <= 0); "
-                                         f"reverted and dropped {n_added} censored sample(s).")
+                                         f"reverted and returned {n_added} censored unit(s) to the pool.")
+
+            # Put the rejected units back among the remaining censored units. They were removed
+            # during assignment (so no two models could take the same unit this iteration); the
+            # rejection means they were never committed to any dataset, hence they are still
+            # unlabeled and eligible for the next iteration's pool draw.
+            if requeued_ids:
+                remaining_suspension_ids = torch.cat([
+                    remaining_suspension_ids,
+                    torch.tensor(requeued_ids, dtype=remaining_suspension_ids.dtype,
+                                 device=remaining_suspension_ids.device),
+                ])
+                self._log(1, f"[CoTraining]   Returned {len(requeued_ids)} censored unit(s) to the "
+                             f"remaining pool ({len(remaining_suspension_ids)} available).")
 
             if metrics_enabled:
                 self._log_stage_metrics(
@@ -1009,6 +1059,94 @@ class CoTrainingEnsemble_v2:
         self._log(1, f"[CoTraining] Training complete.")
         self.lightning_modules = h
         self._models_datasets = models_datasets
+
+    def pretrain_initial_models(
+            self,
+            failure_data: torch.Tensor,
+            failure_label: torch.Tensor,
+            val_data: torch.Tensor,
+            val_label: torch.Tensor,
+            train_with_censored_data: bool = False,
+            suspension_data: torch.Tensor | None = None,
+            suspension_lower_bounds: torch.Tensor | None = None,
+    ) -> tuple[list[LightningModule], list[tuple[torch.Tensor, torch.Tensor]]]:
+        r"""Run **Initial training**: fit every model from scratch before any censored unit is added.
+
+        This is the block :meth:`train` runs at its start; it is public so a caller can run it
+        **once** and then replay :meth:`train` many times from the identical starting models (see
+        ``train``'s ``pretrained_models``), which is what makes the configurations of a
+        hyperparameter sweep comparable.
+
+        Each model is fitted on the failure data — an independent bootstrap resample of it when
+        ``bagging_failure_data`` is on — optionally augmented with the censored data under
+        ``survival_loss_function`` (``train_with_censored_data``).
+
+        Args:
+            failure_data: Features of the failure (labelled) data.
+            failure_label: Targets aligned with ``failure_data``.
+            val_data: Validation features, for early stopping / best-checkpoint selection.
+            val_label: Validation targets aligned with ``val_data``.
+            train_with_censored_data: When ``True``, each model additionally trains on
+                ``suspension_data`` with ``BasicLightningModule.survival_loss_function`` (censored
+                rows carry a placeholder target and are only scored against their lower bound).
+                Requires ``suspension_data`` and ``suspension_lower_bounds``.
+            suspension_data: The censored data. Required when ``train_with_censored_data``.
+            suspension_lower_bounds: Per-window survival lower bounds row-aligned with
+                ``suspension_data``. Required when ``train_with_censored_data``.
+
+        Returns:
+            ``(h, models_datasets)`` — the trained module per model, and each model's own
+            ``(x, y)`` training split. ``models_datasets`` stays **failure-only** even when
+            ``train_with_censored_data`` is on: it is the "L" set used for the RMSE metrics,
+            ``delta_criterion`` and the confidence weighting, and only the fit call itself needs
+            the censored-augmented batch.
+
+        Raises:
+            ValueError: If ``train_with_censored_data`` is set without the censored data or its
+                lower bounds.
+        """
+        if train_with_censored_data and (suspension_data is None or suspension_lower_bounds is None):
+            raise ValueError(
+                "train_with_censored_data requires suspension_data and suspension_lower_bounds.")
+
+        self._check_if_training_is_possible()
+
+        h: list[LightningModule] = []
+        models_datasets: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+        for j in range(self.number_of_models):
+            if self.bagging_failure_data:
+                x_i, y_i = self._bootstrap_sample(failure_data, failure_label)
+            else:
+                x_i, y_i = failure_data, failure_label
+
+            models_datasets.append((x_i, y_i))
+
+            if train_with_censored_data:
+                is_censored_i = torch.cat([
+                    torch.zeros(len(x_i), dtype=torch.bool),
+                    torch.ones(len(suspension_data), dtype=torch.bool),
+                ])
+                lower_bound_i = torch.cat([torch.zeros_like(y_i), suspension_lower_bounds], dim=0)
+                fit_x = torch.cat([x_i, suspension_data], dim=0)
+                # Censored rows have no ground truth yet: a placeholder target, never read
+                # (survival_loss_function only checks censored rows against lower_bound_i).
+                fit_y = torch.cat([y_i, torch.zeros_like(suspension_lower_bounds)], dim=0)
+                self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure "
+                             f"samples + {len(suspension_data)} censored samples "
+                             f"(survival_loss_function)...")
+                h_j = self._fit_from_scratch(
+                    j, fit_x, fit_y, val_data, val_label,
+                    is_censored=is_censored_i, lower_bound=lower_bound_i)
+            else:
+                self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure samples...")
+                h_j = self._fit_from_scratch(j, x_i, y_i, val_data, val_label)
+
+            h.append(h_j)
+
+        self._log(1, f"[CoTraining] Initial training done.")
+
+        return h, models_datasets
 
     # ------------------------------------------------------------------ #
     # Shared phase helpers (used by both the sequential and parallel paths)
@@ -1572,16 +1710,20 @@ class CoTrainingEnsemble_v2:
         Compute and append one row of per-stage metrics to ``metrics_file``.
 
         For the current models ``h`` this records, per model, the train RMSE (on that
-        model's own accumulated ``models_datasets`` split), the validation RMSE, the test
-        RMSE and the test score; then the averages of the per-model test RMSE / test score
-        (arithmetic mean, ignoring weights); and finally the test RMSE / test score of the
-        weighted-ensemble prediction, whose weights are computed on the validation set via
-        ``_compute_weights`` (so ``self.weights`` is left untouched).
+        model's own accumulated ``models_datasets`` split), the validation RMSE and score,
+        the test RMSE and the test score; then the averages of the per-model validation and
+        test RMSE / score (arithmetic mean, ignoring weights); and finally the validation and
+        test RMSE / score of the weighted-ensemble prediction, whose weights are computed on
+        the validation set via ``_compute_weights`` (so ``self.weights`` is left untouched).
 
-        The reported test score (per model, averaged and weighted) comes from
-        ``score_callback`` (e.g. the Scania score), while the ensemble weights are derived
-        from ``weight_callback`` (e.g. RMSE) — the two are intentionally decoupled so the
+        The reported score (per model, averaged and weighted) comes from ``score_callback``
+        (e.g. the Scania score), while the ensemble weights are derived from
+        ``weight_callback`` (e.g. RMSE) — the two are intentionally decoupled so the
         score columns are not just the RMSE used for weighting.
+
+        Note the validation metrics are in-sample with respect to the ensemble weights: the
+        same validation set produces the weights, so ``weighted_val_*`` is optimistic and
+        only meaningful for tracking a stage-to-stage trend, not as a held-out estimate.
 
         Args:
             stage: label for the row ("initial", "iteration_<k>" or "final").
@@ -1595,9 +1737,12 @@ class CoTrainingEnsemble_v2:
             metrics_file: destination CSV; header written only when it does not yet exist.
         """
         test_label_flat = test_label.view(-1).float()
+        val_label_flat = val_label.view(-1).float()
 
         train_rmses: list[float] = []
         val_rmses: list[float] = []
+        val_scores: list[float] = []
+        val_preds: list[torch.Tensor] = []
         test_rmses: list[float] = []
         test_scores: list[float] = []
         test_preds: list[torch.Tensor] = []
@@ -1605,7 +1750,11 @@ class CoTrainingEnsemble_v2:
         for j, model in enumerate(h):
             xj, yj = models_datasets[j]
             train_rmses.append(self._mse_on(model, xj, yj) ** 0.5)
-            val_rmses.append(self._mse_on(model, val_data, val_label) ** 0.5)
+
+            val_pred_j = self._predict(model, val_data).view(-1).to(val_label_flat.device)
+            val_preds.append(val_pred_j)
+            val_rmses.append((((val_label_flat - val_pred_j) ** 2).mean().item()) ** 0.5)
+            val_scores.append(score_callback(val_pred_j, val_label_flat))
 
             pred_j = self._predict(model, test_data).view(-1).to(test_label_flat.device)
             test_preds.append(pred_j)
@@ -1613,6 +1762,8 @@ class CoTrainingEnsemble_v2:
             test_scores.append(score_callback(pred_j, test_label_flat))
 
         n = len(h)
+        avg_val_rmse = sum(val_rmses) / n
+        avg_val_score = sum(val_scores) / n
         avg_test_rmse = sum(test_rmses) / n
         avg_test_score = sum(test_scores) / n
 
@@ -1629,16 +1780,25 @@ class CoTrainingEnsemble_v2:
         weighted_test_rmse = (((test_label_flat - weighted_pred) ** 2).mean().item()) ** 0.5
         weighted_test_score = score_callback(weighted_pred, test_label_flat)
 
+        weighted_val_pred = torch.stack(
+            [w * pred for w, pred in zip(weights, val_preds)], dim=0
+        ).sum(dim=0).view(-1)
+        weighted_val_rmse = (((val_label_flat - weighted_val_pred) ** 2).mean().item()) ** 0.5
+        weighted_val_score = score_callback(weighted_val_pred, val_label_flat)
+
         header = ["stage"]
         for j in range(n):
-            header += [f"train_rmse_{j}", f"val_rmse_{j}", f"test_rmse_{j}", f"test_score_{j}"]
+            header += [f"train_rmse_{j}", f"val_rmse_{j}", f"val_score_{j}",
+                       f"test_rmse_{j}", f"test_score_{j}"]
+        header += ["avg_val_rmse", "avg_val_score", "weighted_val_rmse", "weighted_val_score"]
         header += ["avg_test_rmse", "avg_test_score", "weighted_test_rmse", "weighted_test_score"]
         for j in range(n):
             header += [f"weight_{j}"]
 
         row = [stage]
         for j in range(n):
-            row += [train_rmses[j], val_rmses[j], test_rmses[j], test_scores[j]]
+            row += [train_rmses[j], val_rmses[j], val_scores[j], test_rmses[j], test_scores[j]]
+        row += [avg_val_rmse, avg_val_score, weighted_val_rmse, weighted_val_score]
         row += [avg_test_rmse, avg_test_score, weighted_test_rmse, weighted_test_score]
         for j in range(n):
             row += [weights[j]]
@@ -1653,6 +1813,9 @@ class CoTrainingEnsemble_v2:
             writer.writerow(row)
 
         self._log(1, f"[CoTraining] Metrics [{stage}] | "
+                     f"avg val RMSE: {avg_val_rmse:.4f} | avg val score: {avg_val_score:.4f} | "
+                     f"weighted val RMSE: {weighted_val_rmse:.4f} | "
+                     f"weighted val score: {weighted_val_score:.4f} | "
                      f"avg test RMSE: {avg_test_rmse:.4f} | avg test score: {avg_test_score:.4f} | "
                      f"weighted test RMSE: {weighted_test_rmse:.4f} | "
                      f"weighted test score: {weighted_test_score:.4f}")
