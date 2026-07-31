@@ -569,10 +569,10 @@ class ScaniaDataModule(LightningDataModule):
         for name in self._splits:
             df = pd.read_csv(os.path.join(self.cache_dir, f"{name}.csv"))
             # Features are already normalized in the cache -> norm_type=None.
-            # only_final mirrors _preprocess_and_split: test only.
+            # only_final mirrors _preprocess_and_split: test and val only.
             sets[name] = ScaniaDataset(
                 df, norm_type=None, norm_params=None,
-                only_final=(name == "test"),
+                only_final=(name in ("test", "val")),
                 **self._dataset_kwargs(),
             )
 
