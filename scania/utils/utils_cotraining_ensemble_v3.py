@@ -1,19 +1,22 @@
-"""Scania training entry point for :class:`models.CoTrainingEnsemble` (v1).
+"""Scania training entry point for :class:`models.CoTrainingEnsemble_v3` (v3).
 
-Mirrors :mod:`scania.utils.utils_coprog` but for a co-training ensemble with a **configurable
-number of models** (driven by the config ``models`` list) using the four allowed architectures
-(``cnn``, ``lstm``, ``transformer_features``, ``transformer_time_sequence``). At the end it
-writes one prediction file per model plus the weighted-ensemble prediction (like COPROG).
+Same structure as :mod:`scania.utils.utils_cotraining_ensemble_v2` (configurable number of
+models, per-model prediction files), but v3 is single-GPU and uses owner-based confidence
+selection over a ``predict_int`` interval, a pseudo-label taken from the owner models' own
+predictions, backward extrapolation of the last-window RUL, and fine-tuning with per-model
+best-model retention. It therefore takes the extra confidence / fine-tuning knobs, always
+threads the per-window ``time_step`` (backward extrapolation) and the per-window survival
+``lower_bound`` (confidence score), and can use a dedicated calibration split for ``crepes``.
 
-The heavy lifting shared with v2 (model/builder construction, output saving) lives in
-:mod:`scania.utils.utils_cotraining_common`; the model-building primitives and the RMSE
-weighting callback are reused from :mod:`scania.utils.utils_coprog`.
+Shared model/builder construction and output saving come from
+:mod:`scania.utils.utils_cotraining_common`; the RMSE weighting callback is reused from
+:mod:`scania.utils.utils_coprog`.
 """
 
 import os
 from datetime import datetime
 
-from models.CoTrainingEnsemble import CoTrainingEnsemble, SelectionMode
+from models.CoTrainingEnsemble_v3 import CoTrainingEnsemble_v3
 from scania.dataset import ScaniaDataModule
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
 from scania.utils.utils_coprog import _criteria_callback_for_coprog, _score_callback_for_coprog
@@ -38,6 +41,7 @@ def train_model(
     data_fraction: float,
     val_rate: float,
     test_rate: float,
+    calib_rate: float,
     stratify: bool,
     norm_type: str | None,
     shuffle_loader: bool,
@@ -53,44 +57,62 @@ def train_model(
     iterations: int,
     suspension_pool_size: float,
     add_ratio: float,
-    is_fine_tuning_during_finding_best_suspension_data: bool,
-    is_fine_tuning_for_last_step: bool,
+    confidence: float,
     fine_tune_lr_factor: float,
     fine_tune_max_epochs: int,
+    fine_tune_patience: int,
+    difficulty_space: str = "raw",
+    confidence_threshold: float | None = None,
+    w_mono: float = 1.0,
+    w_lb: float = 1.0,
+    keep_best_model: bool = True,
+    acceptance_metric: str = "val_rmse",
     inference_batch_size: int | None = None,
     # Others
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
-    """Train a :class:`models.CoTrainingEnsemble` on the Scania Component X dataset.
+    """Train a :class:`models.CoTrainingEnsemble_v3` on the Scania Component X dataset.
 
     Args:
         checkpoints_path: Root directory for model checkpoints.
         results_path: Root directory for result CSVs.
-        model_version: The dispatched model version (``CO_TRAINING_ENSEMBLE``).
+        model_version: The dispatched model version (``CO_TRAINING_ENSEMBLE_V3``).
         models: The config ``models`` list; one self-contained entry per model (see
             :func:`scania.utils.utils_cotraining_common.parse_models_config`).
         dataset_root: Path to the Scania dataset.
-        sequence_len, seed, val_rate, test_rate, stratify, norm_type, shuffle_loader,
-        cache_dir, num_workers, pin_memory, return_sequence_label, batch_size, counter_mode,
-        include_histograms, histogram_mode:
-            ``ScaniaDataModule`` construction params.
+        sequence_len, seed, data_fraction, val_rate, test_rate, calib_rate, stratify, norm_type,
+        shuffle_loader, cache_dir, num_workers, pin_memory, return_sequence_label, batch_size,
+        counter_mode, include_histograms, histogram_mode: ``ScaniaDataModule`` construction params.
+            ``calib_rate > 0`` carves a dedicated by-vehicle calibration split used to calibrate the
+            ``crepes`` conformal regressors (instead of the validation set).
         iterations: Number of co-training iterations.
         suspension_pool_size: Fraction in ``(0, 1]`` of censored units sampled as the pool each
             iteration.
-        add_ratio: Fraction in ``(0, 1]`` of the pool to add per iteration.
-        is_fine_tuning_during_finding_best_suspension_data: Fine-tune (vs from-scratch) during
-            the candidate search.
-        is_fine_tuning_for_last_step: Fine-tune (vs from-scratch) after selecting censored data.
-        fine_tune_lr_factor: LR multiplier applied while fine-tuning (see ``CoTrainingEnsemble``).
-        fine_tune_max_epochs: Max epochs per fine-tuning call (candidate search and last-step
-            retrain). Capped well below the from-scratch ``max_epochs`` so the many fine-tune
-            fits stay cheap; applied to every model.
-        inference_batch_size: If set, chunk every ``_predict`` forward pass into batches of this
-            size so peak (host) memory during candidate scoring / metrics stays ``O(batch)``.
-            Needed to fit small budgets (e.g. Colab T4). ``None`` keeps single-shot inference.
-        gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
-            more → parallel training across those GPUs.
+        add_ratio: Per-model top fraction in ``(0, 1]`` — each model selects its top ``add_ratio``
+            of the pool (by confidence) per iteration; ownership follows from which models selected
+            each unit.
+        confidence: Confidence level in ``(0, 1)`` passed to ``crepes`` ``predict_int``.
+        fine_tune_lr_factor: Learning-rate multiplier for fine-tuning (warm start).
+        fine_tune_max_epochs: Max epochs per fine-tuning call.
+        fine_tune_patience: ``EarlyStopping`` patience per fine-tuning call.
+        difficulty_space: ``"raw"`` (default) or ``"latent"`` — where the conformal difficulty
+            estimator measures each unit's neighbourhood. ``"latent"`` uses each model's own
+            pre-head embedding so the models disagree about which units they understand best.
+        confidence_threshold: Optional lower bound in ``(0, 1]`` on a unit's confidence; when set,
+            only units at or above it are selectable. ``None`` disables the gate.
+        w_mono: Non-negative weight of the monotonicity-violation term in the confidence score.
+        w_lb: Non-negative weight of the lower-bound-violation term in the confidence score.
+        keep_best_model: When ``True`` (default), a fine-tuned model is kept per iteration only if
+            its acceptance metric improved (else reverted and its added units dropped). ``False``
+            keeps every fine-tuned model — the baseline to compare retention against.
+        acceptance_metric: ``"val_rmse"`` (default) or ``"score"`` — what retention minimises on
+            the acceptance set. ``"score"`` uses the Scania score (penalises over-prediction),
+            useful when val RMSE improves but the test score keeps worsening.
+        inference_batch_size: If set, chunk every forward pass into batches of this size to cap
+            peak memory. ``None`` keeps single-shot inference.
+        gpu_ids: GPU id(s). ``None`` → auto (single GPU); ``[g]`` → pinned to GPU ``g``. v3 is
+            single-GPU: if several ids are passed only the first is used.
         datetime_for_folders: Timestamp used to name the output folders.
 
     Returns:
@@ -112,7 +134,7 @@ def train_model(
     if val_rate <= 0:
         raise ValueError(
             "The co-training ensemble needs a validation set for early stopping / best-model "
-            "selection and for the ensemble weights. Set validation_rate > 0 in the config."
+            "selection, conformal calibration and the ensemble weights. Set validation_rate > 0."
         )
 
     dataset_kwargs = {
@@ -121,6 +143,7 @@ def train_model(
         "data_fraction": data_fraction,
         "val_rate": val_rate,
         "test_rate": test_rate,
+        "calib_rate": calib_rate,
         "stratify": stratify,
         "norm_type": norm_type,
         "shuffle_loader": shuffle_loader,
@@ -145,10 +168,20 @@ def train_model(
 
     features_uncensored, targets_uncensored, features_censored, ids_censored = \
         scania_data_module.get_cotraining_tensors("train")
-    # Labelled (uncensored) validation data: used both for early stopping / best-checkpoint
-    # selection during training and to compute the ensemble weights (instead of the test set).
+    # Per-window time_step for the censored data (row-aligned with the censored features/ids),
+    # used to backward-extrapolate each selected unit's last-window RUL to its earlier windows.
+    _, _, suspension_time_steps = scania_data_module.get_censored_time_steps("train")
+    # Per-window survival lower bounds (always needed: the confidence score's lower-bound term).
+    _, _, suspension_lower_bounds = scania_data_module.get_censored_lower_bounds("train")
+    # Labelled (uncensored) validation data: early stopping / best-checkpoint selection and the
+    # ensemble weights (instead of the test set).
     val_features, val_targets, _, _ = scania_data_module.get_cotraining_tensors("val")
     test_features, test_targets, _, _ = scania_data_module.get_cotraining_tensors("test")
+    # Dedicated calibration split for the crepes conformal regressors (else the ensemble falls
+    # back to the validation set inside train()).
+    calib_features, calib_targets = None, None
+    if calib_rate > 0:
+        calib_features, calib_targets, _, _ = scania_data_module.get_cotraining_tensors("calib")
 
     nn_modules, module_builders, meta = parse_models_config(
         models_cfg=models,
@@ -162,10 +195,16 @@ def train_model(
         "iterations": iterations,
         "suspension_pool_size": suspension_pool_size,
         "add_ratio": add_ratio,
-        "is_fine_tuning_during_finding_best_suspension_data": is_fine_tuning_during_finding_best_suspension_data,
-        "is_fine_tuning_for_last_step": is_fine_tuning_for_last_step,
+        "confidence": confidence,
+        "difficulty_space": difficulty_space,
+        "confidence_threshold": confidence_threshold,
+        "w_mono": w_mono,
+        "w_lb": w_lb,
+        "keep_best_model": keep_best_model,
+        "acceptance_metric": acceptance_metric,
         "fine_tune_lr_factor": fine_tune_lr_factor,
         "fine_tune_max_epochs": fine_tune_max_epochs,
+        "fine_tune_patience": fine_tune_patience,
         "inference_batch_size": inference_batch_size,
         "lr": meta["lr"],
         "max_epochs": meta["max_epochs"],
@@ -179,18 +218,24 @@ def train_model(
         model_parameters={"models": models},
     )
 
-    print(f"Creating co-training ensemble with {number_of_models} models: {meta['version_strs']}")
+    print(f"Creating co-training ensemble v3 with {number_of_models} models: {meta['version_strs']}")
 
-    ensemble = CoTrainingEnsemble(
+    ensemble = CoTrainingEnsemble_v3(
         models=nn_modules,
         verbose=1,
-        fine_tune_lr_factor=fine_tune_lr_factor,
+        confidence=confidence,
         inference_batch_size=inference_batch_size,
+        difficulty_space=difficulty_space,
+        confidence_threshold=confidence_threshold,
+        w_mono=w_mono,
+        w_lb=w_lb,
+        keep_best_model=keep_best_model,
+        acceptance_metric=acceptance_metric,
+        fine_tune_lr_factor=fine_tune_lr_factor,
+        fine_tune_max_epochs=fine_tune_max_epochs,
+        fine_tune_patience=fine_tune_patience,
     )
 
-    # gpu_ids (from --gpu-ids): None -> single GPU / auto; [g] -> pinned; [g0, g1, ...] ->
-    # parallel training distributed round-robin across those GPUs. Builders must be picklable
-    # (module-level function + functools.partial) so they survive the process boundary.
     print(f"Co-training ensemble GPU selection: {gpu_ids if gpu_ids else 'auto (single GPU)'}")
 
     ensemble.setup_training_builder(
@@ -199,20 +244,14 @@ def train_model(
         patiences=meta["patiences"],
         batchs_size=[batch_size] * number_of_models,
         shuffle_dataloaders=[True] * number_of_models,
-        # Same fine-tune epoch budget for every model; capped below the from-scratch
-        # max_epochs so the many per-candidate / last-step fine-tune fits stay cheap.
-        fine_tune_max_epochs=[fine_tune_max_epochs] * number_of_models,
         gpu_ids=gpu_ids,
     )
 
-    print("Training co-training ensemble (v1)...")
+    print("Training co-training ensemble (v3)...")
 
-    # Persistent run log next to the results. Created (truncated) here with a metadata
-    # header, then handed to the ensemble which appends every log message under it
-    # regardless of verbose (mirrors the C_MAPSS co-training entry point).
     log_file_path = os.path.join(results_path, "log.txt")
     with open(log_file_path, "w", encoding="utf-8") as f:
-        f.write("=== Co-Training Ensemble (v1) run ===\n")
+        f.write("=== Co-Training Ensemble (v3) run ===\n")
         f.write(f"Datetime: {datetime_for_folders}\n")
         f.write(f"Model version: {model_version.value}\n")
         f.write(f"Models ({number_of_models}): {meta['version_strs']}\n")
@@ -220,22 +259,20 @@ def train_model(
         f.write("=====================================\n")
 
     ensemble.train(
-        is_fine_tuning_during_finding_best_suspension_data=is_fine_tuning_during_finding_best_suspension_data,
-        is_fine_tuning_for_last_step=is_fine_tuning_for_last_step,
-        selection_mode=SelectionMode.VOTING,
         train_with_censored_data=False,
         failure_data=features_uncensored,
         failure_label=targets_uncensored,
         suspension_data=features_censored,
         suspension_ids=ids_censored,
+        suspension_time_steps=suspension_time_steps,
+        suspension_lower_bounds=suspension_lower_bounds,
         iterations=iterations,
         suspension_pool_size=suspension_pool_size,
         add_ratio=add_ratio,
         val_data=val_features,
         val_label=val_targets,
-        # Per-stage metrics (initial / iteration_k / final). The score columns use the Scania
-        # score, while the reported weights use RMSE + "min" (matching calculate_weights below).
-        # Runs in the main process (safe for the parallel path).
+        calib_data=calib_features,
+        calib_label=calib_targets,
         test_data=test_features,
         test_label=test_targets,
         score_callback=_score_callback_for_coprog,
@@ -245,7 +282,6 @@ def train_model(
         log_file=log_file_path,
     )
 
-    # Ensemble weights are computed on the validation set (not the test set) to avoid leakage.
     ensemble.calculate_weights(
         x_test=val_features,
         target=val_targets,

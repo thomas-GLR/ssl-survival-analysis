@@ -25,6 +25,8 @@ def get_necessary_dataset_keys(model_version: ModelVersion, necessary_keys_modul
             return necessary_keys_module.NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
             return necessary_keys_module.NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V2_KEYS
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V3:
+            return necessary_keys_module.NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V3_KEYS
         case ModelVersion.TRANSFORMER_FEATURES:
             return necessary_keys_module.NECESSARY_DATASET_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
@@ -55,6 +57,8 @@ def get_necessary_model_keys(model_version: ModelVersion, necessary_keys_module:
             return necessary_keys_module.NECESSARY_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
             return necessary_keys_module.NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V3:
+            return necessary_keys_module.NECESSARY_CO_TRAINING_ENSEMBLE_V3_KEYS
         case ModelVersion.TRANSFORMER_FEATURES:
             return necessary_keys_module.NECESSARY_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
@@ -85,6 +89,8 @@ def get_necessary_training_keys(model_version: ModelVersion, necessary_keys_modu
             return necessary_keys_module.NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
             return necessary_keys_module.NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V3:
+            return necessary_keys_module.NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V3_KEYS
         case ModelVersion.TRANSFORMER_FEATURES:
             return necessary_keys_module.NECESSARY_TRAINING_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:

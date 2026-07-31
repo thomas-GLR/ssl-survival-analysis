@@ -2,26 +2,27 @@
   "dataset_params": {
     "sequence_len": 32,
     "seed": 42,
-    "data_fraction": 1.0,
+    "data_fraction": 0.1,
     "val_rate": 0.2,
     "test_rate": 0.1,
+    "calib_rate": 0.1,
     "stratify": true,
     "norm_type": "z-score",
-    "num_workers": 4,
+    "num_workers": 2,
     "pin_memory": true,
     "return_sequence_label": false,
     "batch_size": 256,
     "shuffle_loader": true,
     "counter_mode": "both",
     "include_histograms": false,
-    "histogram_mode": "sum"
+    "histogram_mode": "zhist"
   },
   "model_params": {
     "models": [
       {
         "cnn": {
           "model_params": {},
-          "lr": 0.0002,
+          "lr": 0.0004,
           "max_epochs": 500,
           "patience": 50,
           "rul_target_standardization": true
@@ -55,31 +56,23 @@
           "patience": 50,
           "rul_target_standardization": true
         }
-      },
-      {
-        "transformer_time_sequence": {
-          "model_params": {
-            "transformer_encoder_head_num": 8,
-            "transformer_num_layer": 2,
-            "fc_layer_dim": 128,
-            "fc_dropout": 0.2
-          },
-          "lr": 0.0002,
-          "max_epochs": 500,
-          "patience": 50,
-          "rul_target_standardization": true
-        }
       }
     ]
   },
   "training_params": {
-    "iterations": 10,
+    "iterations": 20,
     "suspension_pool_size": 0.1,
     "add_ratio": 0.05,
-    "is_fine_tuning_during_finding_best_suspension_data": true,
-    "is_fine_tuning_for_last_step": false,
+    "confidence": 0.95,
+    "difficulty_space": "latent",
+    "confidence_threshold": null,
+    "w_mono": 0.2,
+    "w_lb": 0.6,
+    "keep_best_model": true,
+    "acceptance_metric": "val_rmse",
     "fine_tune_lr_factor": 0.1,
-    "fine_tune_max_epochs": 10,
+    "fine_tune_max_epochs": 50,
+    "fine_tune_patience": 10,
     "inference_batch_size": 1024
   }
 }
