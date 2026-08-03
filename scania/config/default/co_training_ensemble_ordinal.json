@@ -1,0 +1,86 @@
+{
+  "dataset_params": {
+    "sequence_len": 32,
+    "seed": 42,
+    "data_fraction": 1.0,
+    "calib_rate": 0.1,
+    "norm_type": "z-score",
+    "num_workers": 4,
+    "pin_memory": true,
+    "return_sequence_label": false,
+    "batch_size": 256,
+    "shuffle_loader": true,
+    "counter_mode": "both",
+    "include_histograms": false,
+    "histogram_mode": "sum"
+  },
+  "model_params": {
+    "models": [
+      {
+        "cnn": {
+          "model_params": {},
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50
+        }
+      },
+      {
+        "lstm": {
+          "model_params": {
+            "hidden_dim": 256,
+            "lstm_num_layers": 3,
+            "lstm_dropout": 0.3,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50
+        }
+      },
+      {
+        "transformer_features": {
+          "model_params": {
+            "transformer_encoder_head_num": 8,
+            "transformer_num_layer": 2,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50
+        }
+      },
+      {
+        "transformer_time_sequence": {
+          "model_params": {
+            "transformer_encoder_head_num": 8,
+            "transformer_num_layer": 2,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 500,
+          "patience": 50
+        }
+      }
+    ]
+  },
+  "training_params": {
+    "iterations": 20,
+    "suspension_pool_size": 0.1,
+    "add_ratio": 0.05,
+    "confidence": 0.99,
+    "p_value_treshold": 0.7,
+    "inference_batch_size": 1024,
+    "num_classes": 5,
+    "bagging_failure_data": false,
+    "use_fine_tuning": false,
+    "fine_tune_lr_factor": 0.1,
+    "fine_tune_max_epochs": 20,
+    "fine_tune_patience": 5,
+    "keep_best_model_mode": null,
+    "computing_weight_mode": "f1_score_macro",
+    "pool_seed": 42
+  }
+}

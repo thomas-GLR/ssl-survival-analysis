@@ -41,6 +41,25 @@ NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V2_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
+# The ordinal ensemble uses ScaniaClassificationDataModule, whose val/test splits come from the
+# fixed validation_*/test_* label files rather than being carved out of the train pool — so it
+# takes no val_rate / test_rate / stratify.
+NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_ORDINAL_KEYS = [
+    "sequence_len",
+    "seed",
+    "data_fraction",
+    "calib_rate",
+    "norm_type",
+    "num_workers",
+    "pin_memory",
+    "return_sequence_label",
+    "batch_size",
+    "shuffle_loader",
+    "counter_mode",
+    "include_histograms",
+    "histogram_mode",
+]
+
 NECESSARY_DATASET_PYCLUS_KEYS = NECESSARY_DATASET_RSF_KEYS
 
 NECESSARY_DATASET_TRANSFORMER_FEATURES_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
@@ -109,6 +128,9 @@ NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
     "models",
 ]
 NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
+    "models",
+]
+NECESSARY_CO_TRAINING_ENSEMBLE_ORDINAL_KEYS = [
     "models",
 ]
 
@@ -184,6 +206,18 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
     "suspension_pool_size",
     "add_ratio",
     "confidence",
+    # Chunk size for inference forward passes; caps peak memory during conformal scoring/metrics.
+    "inference_batch_size",
+]
+
+# ``confidence`` sizes the conformal prediction sets and ``p_value_treshold`` is the minimum
+# per-window certainty; together they decide which censored vehicles a model may self-label.
+NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_ORDINAL_KEYS = [
+    "iterations",
+    "suspension_pool_size",
+    "add_ratio",
+    "confidence",
+    "p_value_treshold",
     # Chunk size for inference forward passes; caps peak memory during conformal scoring/metrics.
     "inference_batch_size",
 ]

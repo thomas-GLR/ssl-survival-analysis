@@ -1,0 +1,76 @@
+from torch import nn
+
+
+class Simple_LSTM(nn.Module):
+    """
+    Simple LSTM.
+    The model come from :
+
+        Ricardo Dintén, Marta Zorrilla, Bruno Veloso, João Gama (2026).
+        "Building of transformer-based RUL predictors supported by explainability
+        techniques: Application on real industrial datasets"
+
+    The orginal code can be found here : https://github.com/DintenR/Transformer-based-RUL-predictors/tree/main
+    See : CMAPSS > models > Simple_LSTM.py
+    """
+    def __init__(
+            self,
+            feature_num,
+            sequence_len,
+            hidden_dim,
+            lstm_num_layers,
+            lstm_dropout,
+            fc_layer_dim,
+            fc_dropout,
+            **kwargs
+    ):
+        super(Simple_LSTM, self).__init__()
+
+        self.feature_num = feature_num
+        self.sequence_len = sequence_len
+
+        self.lstm_hidden_size = hidden_dim
+        self.lstm_num_layers = lstm_num_layers
+
+        self.fc_layer_dim = fc_layer_dim
+        self.fc_dropout = fc_dropout
+
+        self.output_dim = 1
+        self.lstm_dropout = lstm_dropout
+
+        # lstm
+        # batch_first is crucial here because we use data_loaders than put batch in first dimension !!!!!
+        self.lstm = nn.LSTM(
+            feature_num,
+            self.lstm_hidden_size,
+            num_layers=self.lstm_num_layers,
+            dropout=self.lstm_dropout,
+            batch_first=True
+        )
+
+        self.norm = nn.BatchNorm1d(self.lstm_hidden_size)
+
+        # fc layers
+        self.linear = nn.Sequential(
+            nn.Linear(self.lstm_hidden_size, self.fc_layer_dim),
+            nn.LeakyReLU(),
+            nn.BatchNorm1d(self.fc_layer_dim),
+            nn.Dropout(self.fc_dropout),
+            nn.Linear(self.fc_layer_dim, self.output_dim),
+        )
+
+
+    # x represents our data
+    def forward(self, x):
+        # LSTM/
+        x, _ = self.lstm(x)
+        
+        # Raw
+        x = x.contiguous()
+        x = x[:, -1, :]
+
+        x = self.norm(x)
+
+        x = self.linear(x)
+
+        return x
