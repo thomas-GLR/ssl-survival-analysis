@@ -28,10 +28,11 @@ Scania specifics vs C_MAPSS:
   (the time observed until the end of the study, or a value derived from it)
   is kept instead, so a model can enforce "prediction respects the observed
   survival time".
-- The test split is additionally built with ``only_final=True`` (set
-  internally by the data module, never exposed publicly), so evaluation
-  sees exactly one window per vehicle -- its last, possibly truncated,
-  readout -- instead of every sliding-window stride.
+- The val and test splits are additionally built with ``only_final=True``
+  (set internally by the data module, never exposed publicly), so early
+  stopping and evaluation both see exactly one window per vehicle -- its
+  last, possibly truncated, readout -- instead of every sliding-window
+  stride.
 """
 
 from typing import ClassVar
@@ -403,8 +404,8 @@ class ScaniaBaseDataset(Dataset):
             If True, keep only the last sliding window per vehicle (the
             window ending at that vehicle's final row) instead of every
             stride. Mirrors CMAPSS's ``only_final``. This is an internal
-            flag: the data module sets it (only for its test split); it
-            is never part of the module's public config surface.
+            flag: the data module sets it (for its val and test splits);
+            it is never part of the module's public config surface.
         :param seed:
             Seeds numpy for reproducibility.
         """

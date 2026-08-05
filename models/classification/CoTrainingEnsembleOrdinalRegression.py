@@ -26,9 +26,10 @@ The algorithm is specified in ``algorithm_architecture/CoTrainingEnsembleClassif
 import csv
 import gc
 import os
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from enum import Enum
+from itertools import combinations
 from typing import Callable
 
 import numpy as np
@@ -101,6 +102,21 @@ _REPORTED_METRIC_FUNCTIONS: dict[str, Callable[[torch.Tensor, torch.Tensor], flo
 }
 
 
+# Rejection reasons counted by ``_filter_unit``, in the order the rules are applied, and also
+# the order they are reported in the per-model filter summary.
+_FILTER_AMBIGUOUS = "ambiguous"
+_FILTER_UNCERTAIN = "uncertain"
+_FILTER_DECREASING = "decreasing"
+_FILTER_IMPOSSIBLE = "impossible"
+
+_FILTER_REASONS: tuple[str, ...] = (
+    _FILTER_AMBIGUOUS,
+    _FILTER_UNCERTAIN,
+    _FILTER_DECREASING,
+    _FILTER_IMPOSSIBLE,
+)
+
+
 @dataclass
 class _UnitPrediction:
     """One model's usable prediction for one censored vehicle.
@@ -168,8 +184,8 @@ class CoTrainingEnsembleOrdinalRegression:
                 used here; the modules actually trained are rebuilt from ``module_builders``.
             weights: Optional pre-set ensemble weights (one per model). Normally left ``None``
                 and computed by :meth:`calculate_weights` after training.
-            verbose: 0 = silent, 1 = per-iteration progress and every selection decision,
-                2 = also per-model candidate rankings.
+            verbose: 0 = silent, 1 = per-iteration progress plus the per-model filter and
+                assignment summaries, 2 = also per-model scoring traces.
             num_classes: Number of ordered failure-urgency classes.
             bagging_failure_data: When ``True``, each model's initial training set is a
                 bootstrap resample of the labelled data, adding diversity to the committee.
@@ -511,6 +527,7 @@ class CoTrainingEnsembleOrdinalRegression:
                 conformal = self._build_calibrated_conformal_classifier(hj, calib_data, calib_label)
 
                 candidates: list[_UnitPrediction] = []
+                rejections: Counter[str] = Counter()
                 for unit_id in pool_ids:
                     mask = (suspension_ids == unit_id)
                     xu = suspension_data[mask]
@@ -524,11 +541,14 @@ class CoTrainingEnsembleOrdinalRegression:
                     prediction_set = conformal.predict_set(
                         alphas, confidence=self.confidence, smoothing=False)
 
-                    filtered = self._filter_unit(j, int(unit_id), p_values, prediction_set, bounds_u)
+                    filtered = self._filter_unit(
+                        j, int(unit_id), p_values, prediction_set, bounds_u, rejections)
                     if filtered is None:
                         continue
                     labels, confidence = filtered
                     candidates.append(_UnitPrediction(unit_id, xu, labels, confidence))
+
+                self._log_filter_summary(j, len(pool_ids), rejections)
 
                 # Bigger mean p-value = more confident, so sort descending (best candidate first).
                 candidates.sort(key=lambda c: c.confidence, reverse=True)
@@ -656,11 +676,14 @@ class CoTrainingEnsembleOrdinalRegression:
             p_values: np.ndarray,
             prediction_set: np.ndarray,
             class_upper_bounds: torch.Tensor,
+            rejection_counts: Counter[str],
     ) -> tuple[np.ndarray, float] | None:
         """Decide whether one model may use one censored vehicle, and with which labels.
 
         Four rules, all of which must hold for **every** window of the vehicle. The first
-        violation found short-circuits, and is logged with the reason and the proof.
+        violation found short-circuits, and its reason is counted in ``rejection_counts`` —
+        the per-unit proofs are kept commented out because they flood the console; the caller
+        reports the aggregated counts through :meth:`_log_filter_summary`.
 
         1. The conformal prediction set at ``confidence`` must be a singleton — otherwise the
            model is formally undecided between several classes.
@@ -678,13 +701,17 @@ class CoTrainingEnsembleOrdinalRegression:
             p_values: ``(n_windows, num_classes)`` conformal p-values, time-ordered.
             prediction_set: ``(n_windows, num_classes)`` binary conformal prediction sets.
             class_upper_bounds: ``(n_windows,)`` upper bound on the true class per window.
+            rejection_counts: Mutated in place — the reason of a rejection (one of
+                :data:`_FILTER_REASONS`) is incremented by one.
 
         Returns:
             ``(labels, confidence)`` where ``labels`` is the ``(n_windows,)`` predicted class
             sequence and ``confidence`` its mean p-value, or ``None`` if the vehicle was
             rejected.
         """
-        prefix = f"[CoTraining]     Model {model_index} dropped unit {unit_id}"
+        # Only needed by the per-unit proofs below, which stay commented out; see the summary
+        # logged by ``_log_filter_summary`` instead.
+        # prefix = f"[CoTraining]     Model {model_index} dropped unit {unit_id}"
 
         set_sizes = prediction_set.sum(axis=1)
         ambiguous = np.flatnonzero(set_sizes != 1)
@@ -694,6 +721,7 @@ class CoTrainingEnsembleOrdinalRegression:
             # self._log(2, f"{prefix} | reason=ambiguous_prediction_set | proof=window {w} of "
             #              f"{len(set_sizes)} has prediction set {members} at confidence "
             #              f"{self.confidence} (p-values {np.round(p_values[w], 4).tolist()})")
+            rejection_counts[_FILTER_AMBIGUOUS] += 1
             return None
 
         labels = prediction_set.argmax(axis=1)
@@ -706,6 +734,7 @@ class CoTrainingEnsembleOrdinalRegression:
             # self._log(2, f"{prefix} | reason=p_value_below_threshold | proof=window {w} of "
             #              f"{len(labels)} predicts class {int(labels[w])} with p-value "
             #              f"{chosen_p[w]:.4f} < {self.p_value_treshold}")
+            rejection_counts[_FILTER_UNCERTAIN] += 1
             return None
 
         decreasing = np.flatnonzero(np.diff(labels) < 0)
@@ -714,6 +743,7 @@ class CoTrainingEnsembleOrdinalRegression:
             # self._log(2, f"{prefix} | reason=non_monotone_labels | proof=class drops from "
             #              f"{int(labels[w])} at window {w} to {int(labels[w + 1])} at window "
             #              f"{w + 1}; urgency can only increase | sequence={labels.tolist()}")
+            rejection_counts[_FILTER_DECREASING] += 1
             return None
 
         bounds = class_upper_bounds.detach().cpu().numpy()
@@ -724,9 +754,31 @@ class CoTrainingEnsembleOrdinalRegression:
             #              f"{len(labels)} predicts class {int(labels[w])} but the observed "
             #              f"survival time only allows up to class {int(bounds[w])} | "
             #              f"sequence={labels.tolist()} | bounds={bounds.astype(int).tolist()}")
+            rejection_counts[_FILTER_IMPOSSIBLE] += 1
             return None
 
         return labels, float(chosen_p.mean())
+
+    def _log_filter_summary(
+            self,
+            model_index: int,
+            pool_size: int,
+            rejection_counts: Counter[str],
+    ) -> None:
+        """Log how many pooled vehicles one model lost to the filters, and to which rule.
+
+        Replaces the per-unit rejection logs of :meth:`_filter_unit`, which flood the console
+        as soon as the pool holds more than a handful of vehicles.
+
+        Args:
+            model_index: Index of the model that was scoring the pool.
+            pool_size: Number of censored vehicles the model scored this iteration.
+            rejection_counts: Rejection counts per reason, as filled by :meth:`_filter_unit`.
+        """
+        filtered = sum(rejection_counts.values())
+        detail = " | ".join(f"{reason}: {rejection_counts[reason]}" for reason in _FILTER_REASONS)
+        self._log(1, f"[CoTraining]   Model {model_index} filter summary | "
+                     f"filtered {filtered}/{pool_size} unit(s) | {detail}")
 
     def _log_confidence_ranking(
             self,
@@ -776,6 +828,8 @@ class CoTrainingEnsembleOrdinalRegression:
         unit_ids = sorted({uid for preds in all_preds.values() for uid in preds})
 
         eligible: list[_UnitAssignment] = []
+        dropped_unanimous = 0
+        dropped_tied_majority = 0
 
         for unit_id in unit_ids:
             survivors = [j for j in range(self.number_of_models) if unit_id in all_preds[j]]
@@ -793,16 +847,18 @@ class CoTrainingEnsembleOrdinalRegression:
                 groups.setdefault(tuple(all_preds[j][unit_id].labels.tolist()), []).append(j)
 
             if len(groups) == 1 and len(survivors) == self.number_of_models:
-                self._log(2, f"[CoTraining]     Unit {unit_id} dropped | reason=unanimous | "
-                             f"proof=all {self.number_of_models} models predict "
-                             f"{list(groups)[0]}; no model would learn anything")
+                # self._log(2, f"[CoTraining]     Unit {unit_id} dropped | reason=unanimous | "
+                #              f"proof=all {self.number_of_models} models predict "
+                #              f"{list(groups)[0]}; no model would learn anything")
+                dropped_unanimous += 1
                 continue
 
             sizes = sorted((len(members) for members in groups.values()), reverse=True)
             if len(sizes) >= 2 and sizes[0] == sizes[1]:
-                detail = {seq: members for seq, members in groups.items()}
-                self._log(2, f"[CoTraining]     Unit {unit_id} dropped | reason=tied_majority | "
-                             f"proof=groups {detail} have no strict majority")
+                # detail = {seq: members for seq, members in groups.items()}
+                # self._log(2, f"[CoTraining]     Unit {unit_id} dropped | reason=tied_majority | "
+                #              f"proof=groups {detail} have no strict majority")
+                dropped_tied_majority += 1
                 continue
 
             # To select who are the owners and who are the receivers,
@@ -823,11 +879,17 @@ class CoTrainingEnsembleOrdinalRegression:
                 prediction=all_preds[owners[0]][unit_id],
             ))
 
+        self._log(1, f"[CoTraining]   Agreement summary | {len(unit_ids)} unit(s) with at least "
+                     f"one usable prediction | dropped unanimous: {dropped_unanimous} | "
+                     f"dropped tied_majority: {dropped_tied_majority} | "
+                     f"eligible: {len(eligible)}")
+
         eligible.sort(key=lambda e: e.score, reverse=True)
 
         selected_per_model: list[list[_UnitPrediction]] = [[] for _ in range(self.number_of_models)]
+        chosen = eligible[:n_add]
         added = 0
-        for assignment in eligible[:n_add]:
+        for assignment in chosen:
             prediction = assignment.prediction
             # self._log(2, f"[CoTraining]     Unit {assignment.unit_id} selected | "
             #              f"owners={assignment.owners} | receivers={assignment.receivers} | "
@@ -841,8 +903,56 @@ class CoTrainingEnsembleOrdinalRegression:
 
         self._log(1, f"[CoTraining]   Assigned {added}/{n_add} unit(s) | per-model received: "
                      f"{[len(s) for s in selected_per_model]}")
+        self._log_assignment_summary(chosen, selected_per_model)
 
         return selected_per_model, remaining_suspension_ids, added
+
+    def _log_assignment_summary(
+            self,
+            chosen: list[_UnitAssignment],
+            selected_per_model: list[list[_UnitPrediction]],
+    ) -> None:
+        """Log, per model, what this iteration's assignment produced.
+
+        Replaces the per-unit selection log, which flooded the console. Three views are
+        reported: the class distribution of the pseudo-labelled sequences each model receives,
+        how many vehicles each model owns (i.e. it was in the majority group and therefore
+        learns nothing from them), and how many vehicles every combination of models owns
+        together — a direct read on how much the committee agrees.
+
+        Args:
+            chosen: The assignments consumed this iteration.
+            selected_per_model: ``selected_per_model[j]`` holds the predictions handed to
+                model ``j``.
+        """
+        owners_per_model = [
+            sum(1 for assignment in chosen if j in assignment.owners)
+            for j in range(self.number_of_models)
+        ]
+
+        for j in range(self.number_of_models):
+            class_counts: Counter[int] = Counter()
+            for prediction in selected_per_model[j]:
+                class_counts.update(int(label) for label in prediction.labels)
+
+            distribution = " | ".join(
+                f"class {c}: {class_counts.get(c, 0)} sequences" for c in range(self.num_classes))
+            self._log(1, f"[CoTraining]   Model {j} assignment summary | "
+                         f"owned {owners_per_model[j]} unit(s) | "
+                         f"received {len(selected_per_model[j])} unit(s) | {distribution}")
+
+        # Every combination of at least two models, so a pair that never co-owns a vehicle is
+        # visible as a zero rather than silently missing.
+        co_ownership: list[str] = []
+        for size in range(2, self.number_of_models + 1):
+            for combination in combinations(range(self.number_of_models), size):
+                shared = sum(
+                    1 for assignment in chosen
+                    if all(j in assignment.owners for j in combination))
+                co_ownership.append(f"models {combination}: {shared}")
+
+        if co_ownership:
+            self._log(1, f"[CoTraining]   Units co-owned | {' | '.join(co_ownership)}")
 
     @staticmethod
     def _concat_selected_units(

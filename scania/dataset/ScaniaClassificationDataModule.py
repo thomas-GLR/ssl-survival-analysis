@@ -14,15 +14,18 @@ train/val/test/calib from):
        NaN-fill, counter-mode transform, merge TTE, derive is_censored) --
        see ``ScaniaBaseDataModule._read_and_transform_readouts`` /
        ``_merge_tte_and_censor``.
-    2. optionally subsample a fraction of the pool (data_fraction < 1.0),
-       stratified by is_censored -- val/test are never subsampled, since
-       they come from separate fixed files.
-    3. draw a calibration set from the pool's *uncensored* vehicles only
+    2. draw a calibration set from the pool's *uncensored* vehicles only
        (censored vehicles have no known class_label to calibrate against,
        so they always stay in train), stratified by each vehicle's final
        (last-readout) class label so calib mirrors the overall
        uncensored-train class distribution. No length-quantile
        stratification (unlike regression's calib/val/test split).
+    3. optionally subsample a fraction of the *remaining* (train) vehicles
+       (data_fraction < 1.0), stratified by is_censored. Unlike the
+       regression module, data_fraction shrinks the train split only: calib
+       is carved out first and val/test come from separate fixed files, so
+       all three evaluation-side splits keep their full size whatever
+       data_fraction is set to.
     4. no tail truncation anywhere (train, calib, val, test) -- val/test's
        last readout already reflects the label file's evaluation point.
     5. build a ScaniaClassificationDataset per split; z-score params are fit
@@ -106,8 +109,13 @@ class ScaniaClassificationDataModule(ScaniaBaseDataModule):
 
         rng = np.random.default_rng(self.seed)
         vehicle_status = readouts[[VEHICLE_ID, IS_CENSORED]].drop_duplicates(VEHICLE_ID)
-        readouts, vehicle_status = self._apply_data_fraction(readouts, vehicle_status, rng)
 
+        # 2. calib is carved out of the *full* pool, before data_fraction, so
+        #    that shrinking the dataset leaves the evaluation-side splits
+        #    untouched: val/test come from fixed files and are never
+        #    subsampled, and calib must behave the same way (a conformal
+        #    calibration set shrinking with data_fraction would widen the
+        #    intervals for reasons unrelated to the model being calibrated).
         calib_ids: set = set()
         if "calib" in self._splits:
             calib_ids = self._draw_calib_ids(readouts, vehicle_status, rng)
@@ -115,6 +123,10 @@ class ScaniaClassificationDataModule(ScaniaBaseDataModule):
         vids = readouts[VEHICLE_ID]
         calib_df = readouts[vids.isin(calib_ids)] if "calib" in self._splits else None
         train_df = readouts[~vids.isin(calib_ids)]
+
+        # 3. data_fraction then shrinks the train split only.
+        train_status = vehicle_status[~vehicle_status[VEHICLE_ID].isin(calib_ids)]
+        train_df, _ = self._apply_data_fraction(train_df, train_status, rng)
         # No tail truncation anywhere in this module (train, calib, val, test).
 
         # --- val/test: fixed files, not carved out of the train pool ------ #
@@ -188,10 +200,14 @@ class ScaniaClassificationDataModule(ScaniaBaseDataModule):
         mode uses per-row), so calib mirrors the overall uncensored-train
         class distribution. No length-quantile stratification.
 
-        :param readouts: train-pool readouts, already data_fraction-filtered,
-            sorted by (vehicle_id, time_step).
+        Called on the *full* train pool, before any data_fraction
+        subsampling, so the calibration set keeps its full size regardless
+        of ``self.data_fraction`` (see the module docstring, step 2).
+
+        :param readouts: full train-pool readouts, sorted by
+            (vehicle_id, time_step).
         :param vehicle_status: one row per vehicle with VEHICLE_ID + IS_CENSORED
-            (same filtering as ``readouts``).
+            (same vehicles as ``readouts``).
         :param rng: shared random generator (consumes one permutation per
             class stratum).
         :return: set of vehicle ids drawn into calib.
@@ -244,6 +260,11 @@ class ScaniaClassificationDataModule(ScaniaBaseDataModule):
         omitted: nothing in this module's preprocessing depends on it (there
         is no truncation step), it only affects windowing at
         dataset-construction time (already covered by ``_dataset_kwargs()``).
+
+        ``cache_version`` is bumped whenever the split algorithm changes in a
+        way no other key captures -- v2: calib is now drawn before (instead of
+        after) data_fraction subsampling, so both the calib/train membership
+        and the rng draw order differ for the same config.
         """
         return {
             "feature_cols": self.feature_cols,
@@ -254,7 +275,7 @@ class ScaniaClassificationDataModule(ScaniaBaseDataModule):
             "data_fraction": self.data_fraction,
             "include_histograms": self.include_histograms,
             "histogram_mode": self.histogram_mode,
-            "cache_version": 1,
+            "cache_version": 2,
         }
 
     def _cache_columns(self, split: str) -> list[str]:

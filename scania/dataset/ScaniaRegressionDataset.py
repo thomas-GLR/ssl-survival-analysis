@@ -9,10 +9,11 @@ normalization, censoring bookkeeping) with :class:`ScaniaBaseDataset`.
 - Censored rows have **no** RUL (label is NaN); a ``rul_lower_bound`` (the time
   observed until the end of the study) is kept instead, so a model can enforce
   "predicted RUL >= observed survival time".
-- The test split is additionally built with ``only_final=True`` (set
-  internally by ``ScaniaRegressionDataModule``, never exposed publicly), so
-  evaluation sees exactly one window per vehicle -- its last, possibly
-  truncated, readout -- instead of every sliding-window stride.
+- The val and test splits are additionally built with ``only_final=True``
+  (set internally by ``ScaniaRegressionDataModule``, never exposed publicly),
+  so early stopping and evaluation both see exactly one window per vehicle --
+  its last, possibly truncated, readout -- instead of every sliding-window
+  stride.
 """
 
 import numpy as np

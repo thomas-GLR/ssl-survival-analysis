@@ -26,8 +26,9 @@ Pipeline (see the project plan for the rationale):
         target near end-of-life isn't trivially ~0 (train is never
         truncated; censored vehicles are never truncated)
     6. build a ScaniaRegressionDataset per split; z-score params are fit on train only;
-       the test dataset additionally uses only_final=True (one window per
-       vehicle, mirroring CMAPSS); val/calib keep every window
+       the val and test datasets additionally use only_final=True (one window
+       per vehicle, mirroring CMAPSS), so early stopping is measured on the
+       same kind of set as the final evaluation; train/calib keep every window
     7. cache the processed splits so later runs skip preprocessing
 
 The module exposes the standard ``train/val/test_dataloader`` (uncensored
@@ -156,10 +157,11 @@ class ScaniaRegressionDataModule(ScaniaBaseDataModule):
             calib_df = self._truncate_uncensored_tail(calib_df, rng)
 
         # 6. build datasets; z-score params fit on train, reused for val/test/calib.
-        #    Test additionally uses only_final=True (only the last window per
-        #    vehicle kept), mirroring CMAPSS's use_only_final_on_test. calib (like
-        #    val) keeps every window -- conformal calibration needs a large residual
-        #    pool, not a single window per vehicle.
+        #    Val and test additionally use only_final=True (only the last window
+        #    per vehicle kept), mirroring CMAPSS's use_only_final_on_test, so the
+        #    early-stopping metric is computed on the same kind of set as the
+        #    final evaluation. calib keeps every window -- conformal calibration
+        #    needs a large residual pool, not a single window per vehicle.
         self.train_set = self.DATASET_CLASS(
             train_df,
             norm_type=self.norm_type,
@@ -354,11 +356,11 @@ class ScaniaRegressionDataModule(ScaniaBaseDataModule):
             "data_fraction": self.data_fraction,
             "include_histograms": self.include_histograms,
             "histogram_mode": self.histogram_mode,
-            "cache_version": 2,
+            "cache_version": 3,
         }
 
     def _cache_columns(self, split: str) -> list[str]:
         return [VEHICLE_ID, TIME_STEP] + self.feature_cols + [LENGTH_OF_STUDY_TIME_STEP, IS_CENSORED]
 
     def _only_final_for_cached_split(self, split: str) -> bool:
-        return split == "test"
+        return split in ("val", "test")
