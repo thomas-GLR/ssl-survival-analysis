@@ -14,7 +14,7 @@ import os
 from datetime import datetime
 
 from models.CoTrainingEnsemble import CoTrainingEnsemble, SelectionMode
-from scania.dataset import ScaniaDataModule
+from scania.dataset import ScaniaRegressionDataModule
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
 from scania.utils.utils_coprog import _criteria_callback_for_coprog, _score_callback_for_coprog
 from scania.utils.utils_scania import (
@@ -71,7 +71,7 @@ def train_model(
         dataset_root: Path to the Scania dataset.
         sequence_len, seed, val_rate, test_rate, stratify, norm_type, shuffle_loader,
         cache_dir, num_workers, pin_memory, return_sequence_label, batch_size, counter_mode:
-            ``ScaniaDataModule`` construction params.
+            ``ScaniaRegressionDataModule`` construction params.
         iterations: Number of co-training iterations.
         suspension_pool_size: Fraction in ``(0, 1]`` of censored units sampled as the pool each
             iteration.
@@ -133,7 +133,7 @@ def train_model(
     print("Creating data loader with the following parameters :")
     print(dataset_kwargs)
 
-    scania_data_module = ScaniaDataModule(**dataset_kwargs)
+    scania_data_module = ScaniaRegressionDataModule(**dataset_kwargs)
     scania_data_module.setup()
 
     feature_num = len(scania_data_module.feature_cols)

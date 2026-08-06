@@ -72,7 +72,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cache_dir",
         default=os.getenv("CACHE_DIR", None),
-        help="Base cache directory (defaults to <data_dir>/scania_cache)",
+        help="Base cache directory (defaults to <data_dir>/scania_cache_regression)",
     )
     parser.add_argument(
         "--output_dir",

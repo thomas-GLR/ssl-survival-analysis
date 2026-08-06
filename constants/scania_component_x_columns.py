@@ -1,6 +1,7 @@
 ##################################################### Common columns #####################################################
 VEHICLE_ID = "vehicle_id"
 CLASS_LABEL = "class_label"
+IS_CENSORED = "is_censored"
 
 ##################################################### train_operational_readouts.csv #####################################################
 
@@ -123,7 +124,7 @@ COLUMN_397_35 = "397_35"
 
 ##################################################### Numerical counter feature groups #####################################################
 
-# Single-index numerical counter columns used as features by ScaniaDataModule.
+# Single-index numerical counter columns used as features by ScaniaRegressionDataModule.
 # Built from the name constants above so the raw strings live only in one place.
 COUNTER_COLUMNS = [
     COLUMN_171_0,
@@ -141,7 +142,7 @@ COUNTER_COLUMNS = [
 # Multi-bin histogram variables. Each key is a Scania feature id and the value is
 # the ordered list of its per-bin columns. These are cumulative per-bin counts
 # (a distribution), so they are normalized with a dedicated sum-based normalizer
-# (see ScaniaDataset.HistogramFeatureNormalizer), never z-scored or differenced.
+# (see ScaniaBaseDataset.HistogramFeatureNormalizer), never z-scored or differenced.
 # Built from the name constants above so the raw strings live only in one place.
 HISTOGRAM_FEATURE_COLUMNS = {
     "167": [
@@ -185,7 +186,7 @@ HISTOGRAM_COLUMNS = [column for columns in HISTOGRAM_FEATURE_COLUMNS.values() fo
 # Group-level ZHist distance features (one continuous feature per histogram
 # group). Used when histogram_mode == "zhist" in place of the raw per-bin
 # columns: each group is collapsed into a single signed chi2-distance-from-
-# population feature (see ScaniaDataset.ZHistFeatureNormalizer). Group order is
+# population feature (see ScaniaBaseDataset.ZHistFeatureNormalizer). Group order is
 # preserved so the feature ordering stays stable.
 ZHIST_FEATURE_COLUMNS = [f"zhist_{group}" for group in HISTOGRAM_FEATURE_COLUMNS]
 

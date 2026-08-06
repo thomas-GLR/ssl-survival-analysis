@@ -1,0 +1,59 @@
+{
+  "dataset_params": {
+    "sequence_len": 32,
+    "seed": 42,
+    "data_fraction": 0.1,
+    "calib_rate": 0.1,
+    "norm_type": "z-score",
+    "num_workers": 0,
+    "pin_memory": false,
+    "return_sequence_label": false,
+    "batch_size": 128,
+    "shuffle_loader": true,
+    "counter_mode": "both",
+    "include_histograms": false,
+    "histogram_mode": "zhist"
+  },
+  "model_params": {
+    "models": [
+      {
+        "cnn": {
+          "model_params": {},
+          "lr": 0.0002,
+          "max_epochs": 1,
+          "patience": 5
+        }
+      },
+      {
+        "transformer_features": {
+          "model_params": {
+            "transformer_encoder_head_num": 8,
+            "transformer_num_layer": 2,
+            "fc_layer_dim": 128,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.0002,
+          "max_epochs": 1,
+          "patience": 5
+        }
+      }
+    ]
+  },
+  "training_params": {
+    "iterations": 2,
+    "suspension_pool_size": 0.05,
+    "add_ratio": 0.5,
+    "confidence": 0.99,
+    "p_value_treshold": 0.7,
+    "inference_batch_size": 64,
+    "num_classes": 5,
+    "bagging_failure_data": false,
+    "use_fine_tuning": false,
+    "fine_tune_lr_factor": 0.1,
+    "fine_tune_max_epochs": 1,
+    "fine_tune_patience": 5,
+    "keep_best_model_mode": null,
+    "computing_weight_mode": "f1_score_macro",
+    "pool_seed": 42
+  }
+}

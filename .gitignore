@@ -7,8 +7,11 @@
 /outputs
 /checkpoints
 /scania_cache
+/scania_cache_regression
+/scania_cache_classification
 __pycache__/
 /lightning_logs
 lab.ipynb
 /algorithm_architecture
 /conformal_prediction
+/visualisation/data

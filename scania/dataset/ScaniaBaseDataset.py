@@ -7,25 +7,35 @@ readouts into sliding-window sequences, mirroring the contract of
 (Coprog) / self-supervised training code can consume Scania data unchanged.
 
 The dataframe passed to ``__init__`` is expected to already be pre-processed by
-``ScaniaDataModule`` (per-vehicle NaN fill + counter differencing done, TTE
+a Scania data module (per-vehicle NaN fill + counter differencing done, TTE
 merged), i.e. it holds, per readout row:
 
     vehicle_id, time_step, <counter delta features...>,
     length_of_study_time_step, is_censored
 
-This class only computes the RUL target, normalizes the features (z-score) and
-generates the windowed arrays.
+This class normalizes the features (z-score) and generates the windowed
+arrays; it does not know what the label means. Subclasses (e.g.
+``ScaniaRegressionDataset``, ``ScaniaClassificationDataset``) implement
+``_compute_labels`` to populate ``self.df[self.LABEL_COL]`` (the training
+target, NaN where unknown) and ``self.df[self.BOUND_COL]`` (a bound on the
+unknown label that always holds, even for rows where ``LABEL_COL`` is NaN --
+a lower bound on RUL for regression, an upper bound on class index for
+classification).
 
 Scania specifics vs C_MAPSS:
 - Censoring is real (``in_study_repair == 0``), never synthetically generated.
-- Censored rows have **no** RUL (label is NaN); a ``rul_lower_bound`` (the time
-  observed until the end of the study) is kept instead, so a model can enforce
-  "predicted RUL >= observed survival time".
-- The test split is additionally built with ``only_final=True`` (set
-  internally by ``ScaniaDataModule``, never exposed publicly), so evaluation
-  sees exactly one window per vehicle -- its last, possibly truncated,
-  readout -- instead of every sliding-window stride.
+- Censored rows have **no** known label (``LABEL_COL`` is NaN); ``BOUND_COL``
+  (the time observed until the end of the study, or a value derived from it)
+  is kept instead, so a model can enforce "prediction respects the observed
+  survival time".
+- The val and test splits are additionally built with ``only_final=True``
+  (set internally by the data module, never exposed publicly), so early
+  stopping and evaluation both see exactly one window per vehicle -- its
+  last, possibly truncated, readout -- instead of every sliding-window
+  stride.
 """
+
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -36,14 +46,9 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from constants.scania_component_x_columns import (
     VEHICLE_ID,
     TIME_STEP,
-    LENGTH_OF_STUDY_TIME_STEP,
+    IS_CENSORED,
     COUNTER_COLUMNS,
 )
-
-# Columns produced by this class / expected in the pre-processed frame.
-IS_CENSORED = "is_censored"
-RUL = "rul"
-RUL_LOWER_BOUND = "rul_lower_bound"
 
 
 class HistogramFeatureNormalizer:
@@ -169,7 +174,7 @@ class ZHistFeatureNormalizer:
         vehicle (ZHist's ``time`` column); the first readout of each vehicle
         keeps its own ``time_step`` (elapsed since the start of the study). This
         assumes ``x`` is already sorted by ``(vehicle_id, time_step)``, which is
-        the case for every split produced by ``ScaniaDataModule``.
+        the case for every split produced by ``ScaniaRegressionDataModule``.
 
         :param x: dataframe holding ``vehicle_id`` and ``time_step``.
         :return: ``(n_rows,)`` dwell weights.
@@ -316,7 +321,16 @@ class ZHistFeatureNormalizer:
         }
 
 
-class ScaniaDataset(Dataset):
+class ScaniaBaseDataset(Dataset):
+    """Shared sliding-window sequence dataset for Scania readouts.
+
+    Subclasses must set the class-level ``LABEL_COL``/``BOUND_COL`` column
+    names and implement ``_compute_labels`` (see module docstring).
+    """
+
+    LABEL_COL: ClassVar[str]
+    BOUND_COL: ClassVar[str]
+
     def __init__(
             self,
             data_df: pd.DataFrame,
@@ -382,16 +396,16 @@ class ScaniaDataset(Dataset):
             val/test. If ``None`` and ``histogram_mode == 'zhist'``, they are
             fit here.
         :param return_sequence_label:
-            If True, ``__getitem__``/label array return the RUL for every step
-            of the window instead of only the last step.
+            If True, ``__getitem__``/label array return the label for every
+            step of the window instead of only the last step.
         :param return_id:
             If True, ``__getitem__`` also returns the vehicle id.
         :param only_final:
             If True, keep only the last sliding window per vehicle (the
             window ending at that vehicle's final row) instead of every
             stride. Mirrors CMAPSS's ``only_final``. This is an internal
-            flag: ``ScaniaDataModule`` sets it (only for its test split); it
-            is never part of the module's public config surface.
+            flag: the data module sets it (for its val and test splits);
+            it is never part of the module's public config surface.
         :param seed:
             Seeds numpy for reproducibility.
         """
@@ -440,7 +454,7 @@ class ScaniaDataset(Dataset):
         self.id_array: np.ndarray | None = None
         self.is_censored_array: np.ndarray | None = None
 
-        self.count_rul()
+        self._compute_labels()
 
         if self.norm_type:
             self._normalization()
@@ -454,8 +468,9 @@ class ScaniaDataset(Dataset):
         """
         :return: (sequence, target[, id])
             sequence: FloatTensor (sequence_len, n_features)
-            target:   FloatTensor (1,) last-step RUL, or (sequence_len,) if
-                      return_sequence_label. NaN for censored windows.
+            target:   FloatTensor (1,) last-step label, or (sequence_len,) if
+                      return_sequence_label. NaN for windows with an unknown
+                      label (e.g. censored, in the regression subclass).
         """
         seq = torch.from_numpy(self._get_window(i))
         if self.return_sequence_label:
@@ -468,24 +483,20 @@ class ScaniaDataset(Dataset):
         return tuple(items)
 
     # ------------------------------------------------------------------ #
-    # Target / RUL
+    # Target / label
     # ------------------------------------------------------------------ #
-    def count_rul(self) -> None:
-        df = self.df
+    def _compute_labels(self) -> None:
+        """Populate ``self.df[self.LABEL_COL]`` and ``self.df[self.BOUND_COL]``.
 
-        # Time observed until the end of the study. For uncensored vehicles the
-        # study ends at failure, so this is the true RUL. For censored vehicles
-        # the true RUL is unknown but is at least this large (a lower bound).
-        time_to_study_end = df[LENGTH_OF_STUDY_TIME_STEP] - df[TIME_STEP]
-
-        df[RUL_LOWER_BOUND] = time_to_study_end
-        df[RUL] = time_to_study_end.astype(np.float64)
-
-        # Censored data has no known RUL -> NaN label (never used as a training
-        # target; the uncensored-only loaders drop these rows).
-        df.loc[df[IS_CENSORED] == 1, RUL] = np.nan
-
-        self.df = df
+        Must be implemented by subclasses. ``LABEL_COL`` is the training
+        target (NaN wherever the true label is unknown); ``BOUND_COL`` is a
+        bound on that label that always holds, even where ``LABEL_COL`` is
+        NaN (a lower bound on RUL for regression, an upper bound on class
+        index for classification).
+        """
+        raise NotImplementedError(
+            "Subclasses must set self.df[self.LABEL_COL] and self.df[self.BOUND_COL]."
+        )
 
     # ------------------------------------------------------------------ #
     # Normalization (z-score for counters, sum-based for histograms)
@@ -587,8 +598,8 @@ class ScaniaDataset(Dataset):
         # this, so the z-scores themselves are unchanged.
         features = df[self.feature_cols].to_numpy(dtype=np.float32)
         self._feat_flat = features
-        rul = df[RUL].to_numpy(dtype=np.float32)
-        rul_lower_bound = df[RUL_LOWER_BOUND].to_numpy(dtype=np.float32)
+        label = df[self.LABEL_COL].to_numpy(dtype=np.float32)
+        bound = df[self.BOUND_COL].to_numpy(dtype=np.float32)
         censored = df[IS_CENSORED].to_numpy()
         rows_number = len(df)
 
@@ -629,12 +640,12 @@ class ScaniaDataset(Dataset):
                 count_chunks.append(np.full(len(sequence_group), seq_len, dtype=np.int32))
 
                 if self.return_sequence_label:
-                    rul_sw = np.lib.stride_tricks.sliding_window_view(rul, seq_len, axis=0)
-                    label_chunks.append(rul_sw[sequence_group])
+                    label_sw = np.lib.stride_tricks.sliding_window_view(label, seq_len, axis=0)
+                    label_chunks.append(label_sw[sequence_group])
                 else:
-                    label_chunks.append(rul[last])
+                    label_chunks.append(label[last])
 
-                lb_chunks.append(rul_lower_bound[last])
+                lb_chunks.append(bound[last])
                 id_chunks.append(vehicules_ids[sequence_group])
                 cens_chunks.append(censored[sequence_group])
 
@@ -649,12 +660,12 @@ class ScaniaDataset(Dataset):
             if self.return_sequence_label:
                 for start, count in zip(short_starts, short_counts):
                     label_chunks.append(
-                        np.pad(rul[start: start + count], (seq_len - count, 0), "edge")[np.newaxis]
+                        np.pad(label[start: start + count], (seq_len - count, 0), "edge")[np.newaxis]
                     )
             else:
-                label_chunks.append(rul[short_starts + short_counts - 1])
+                label_chunks.append(label[short_starts + short_counts - 1])
 
-            lb_chunks.append(rul_lower_bound[short_starts + short_counts - 1])
+            lb_chunks.append(bound[short_starts + short_counts - 1])
             id_chunks.append(vehicules_ids[short_starts])
             cens_chunks.append(censored[short_starts])
 
@@ -781,10 +792,17 @@ class ScaniaDataset(Dataset):
 
     def get_censored_lower_bounds(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Censored windows with their survival lower bound. Returns:
-            (features_censored, ids_censored, lower_bounds_censored)
-        ``lower_bounds_censored`` (N, 1) = time observed until end of study; a
-        model's predicted RUL for these windows should be >= this value.
+        Censored windows with their label bound (``self.BOUND_COL``). Returns:
+            (features_censored, ids_censored, bounds_censored)
+
+        The name is kept for backward compatibility, but the direction of the
+        bound depends on the subclass: for ``ScaniaRegressionDataset`` it is a
+        LOWER bound on the unknown true RUL (predicted RUL should be >= this
+        value); for ``ScaniaClassificationDataset`` it is an UPPER bound on the
+        unknown true class index (predicted class should be <= this value,
+        since a higher class index means more urgent/shorter RUL and class is
+        a non-increasing step function of survival time). Callers must
+        interpret the returned bound according to which subclass produced it.
         """
         # Same censored-index order as get_censored_split_tensors so the returned
         # lower bounds stay row-aligned with that method's censored features

@@ -11,7 +11,7 @@ from sklearn.model_selection import GridSearchCV, StratifiedKFold, cross_val_sco
 from sksurv.ensemble import RandomSurvivalForest
 
 from dataset.ScikitDataset import ScikitDataset
-from scania.dataset import ScaniaDataModule
+from scania.dataset import ScaniaRegressionDataModule
 from scania.utils.utils_scania import assert_data_is_valid, create_and_get_checkpoints_results_path
 
 
@@ -53,7 +53,7 @@ def train_model(
 
     print("Loading dataset...")
 
-    scania_data_module = ScaniaDataModule(
+    scania_data_module = ScaniaRegressionDataModule(
         data_dir=dataset_root,
         batch_size=None,
         sequence_len=1,
@@ -70,7 +70,7 @@ def train_model(
         histogram_mode=histogram_mode,
     )
 
-    # Transform the ScaniaDataModule into the scikit-survival format expected by RSF:
+    # Transform the ScaniaRegressionDataModule into the scikit-survival format expected by RSF:
     # every readout row is one individual (Time=time_step, Status=failure). Training
     # keeps all rows (censoring handled via Status); the test set keeps uncensored
     # (failure) rows only so a true RUL exists for RMSE/score.

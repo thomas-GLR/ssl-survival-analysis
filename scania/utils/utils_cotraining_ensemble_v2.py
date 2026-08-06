@@ -14,7 +14,7 @@ import os
 from datetime import datetime
 
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
-from scania.dataset import ScaniaDataModule
+from scania.dataset import ScaniaRegressionDataModule
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
 from scania.utils.utils_coprog import _criteria_callback_for_coprog, _score_callback_for_coprog
 from scania.utils.utils_scania import (
@@ -54,7 +54,7 @@ def train_model(
     suspension_pool_size: float,
     add_ratio: float,
     confidence: float,
-    # calib_rate is a dataset_params key (forwarded to ScaniaDataModule below); it is placed
+    # calib_rate is a dataset_params key (forwarded to ScaniaRegressionDataModule below); it is placed
     # here, after the required params, only because it is optional (default 0.0, backward
     # compatible with configs predating it) and Python requires defaulted params to follow
     # every non-default one.
@@ -78,7 +78,7 @@ def train_model(
         sequence_len, seed, val_rate, test_rate, stratify, norm_type, shuffle_loader,
         cache_dir, num_workers, pin_memory, return_sequence_label, batch_size, counter_mode,
         include_histograms, histogram_mode:
-            ``ScaniaDataModule`` construction params.
+            ``ScaniaRegressionDataModule`` construction params.
         calib_rate: Optional fraction (sibling of ``val_rate``/``test_rate``) of vehicles set
             aside as a dedicated calibration split. When ``> 0``, the ``crepes`` conformal
             regressors are calibrated on this held-out set instead of ``val_data`` (which is
@@ -150,7 +150,7 @@ def train_model(
     print("Creating data loader with the following parameters :")
     print(dataset_kwargs)
 
-    scania_data_module = ScaniaDataModule(**dataset_kwargs)
+    scania_data_module = ScaniaRegressionDataModule(**dataset_kwargs)
     scania_data_module.setup()
 
     feature_num = len(scania_data_module.feature_cols)
