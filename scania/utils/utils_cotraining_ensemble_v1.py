@@ -11,6 +11,7 @@ weighting callback are reused from :mod:`scania.utils.utils_coprog`.
 """
 
 import os
+import time
 from datetime import datetime
 
 from models.CoTrainingEnsemble import CoTrainingEnsemble, SelectionMode
@@ -220,6 +221,8 @@ def train_model(
         f.write(f"GPU selection: {gpu_ids if gpu_ids else 'auto (single GPU)'}\n")
         f.write("=====================================\n")
 
+    training_start = time.perf_counter()
+
     ensemble.train(
         is_fine_tuning_during_finding_best_suspension_data=is_fine_tuning_during_finding_best_suspension_data,
         is_fine_tuning_for_last_step=is_fine_tuning_for_last_step,
@@ -246,6 +249,9 @@ def train_model(
         log_file=log_file_path,
     )
 
+    training_time_seconds = time.perf_counter() - training_start
+    print(f"Co-training ensemble (v1) trained in {training_time_seconds:.1f}s")
+
     # Ensemble weights are computed on the validation set (not the test set) to avoid leakage.
     ensemble.calculate_weights(
         x_test=val_features,
@@ -262,4 +268,6 @@ def train_model(
         test_features=test_features,
         test_targets=test_targets,
         version_strs=meta["version_strs"],
+        # v1 keeps no per-iteration bookkeeping, so only the total is reported.
+        training_time_seconds=training_time_seconds,
     )

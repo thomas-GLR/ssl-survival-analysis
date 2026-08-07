@@ -213,7 +213,8 @@ After a run you will find, under `--results-path` (inside the `--run-name`
 sub-folder if given):
 
 - `coprog-scania.csv` — per-model and weighted-ensemble RMSE / score plus the
-  ensemble weights `weight_h1` / `weight_h2`.
+  ensemble weights `weight_h1` / `weight_h2`, and `training_time_seconds` (the
+  wall-clock duration of `Coprog.train`).
 - `coprog-per-stage-scania.csv` — metrics tracked at each stage of the
   co-training loop (initial / per-iteration / final).
 - the saved training parameters and a run log;
@@ -434,7 +435,10 @@ sub-folder if given):
 
 - `co_training_ensemble-scania.csv` — per-model and weighted-ensemble RMSE /
   score plus the ensemble weights (`test_rmse_h{i}` / `test_score_h{i}` /
-  `weight_h{i}` per model, and `test_rmse_weighted` / `test_score_weighted`).
+  `weight_h{i}` per model, and `test_rmse_weighted` / `test_score_weighted`),
+  and `training_time_seconds` (the wall-clock duration of the whole training
+  step). `avg_iteration_time_seconds` is always empty for v1, which keeps no
+  per-iteration bookkeeping — see v2 below.
 - `co_training_ensemble-per-stage-scania.csv` — metrics tracked at each stage of
   the co-training loop (initial / per-iteration / final).
 - `predictions_co_training_ensemble_test_h{i}_scania.csv` — one per-model
@@ -577,7 +581,9 @@ As for v1, `--benchmark-version test` runs a fast smoke-test config
 Same as v1, but with the `co_training_ensemble_v2` prefix:
 
 - `co_training_ensemble_v2-scania.csv` — per-model and weighted-ensemble RMSE /
-  score plus the ensemble weights.
+  score plus the ensemble weights, then `training_time_seconds` (wall-clock of
+  the whole training step) and `avg_iteration_time_seconds` (its mean per
+  co-training iteration).
 - `co_training_ensemble_v2-per-stage-scania.csv` — per-stage co-training metrics.
 - `predictions_co_training_ensemble_v2_test_h{i}_scania.csv` (per model) and
   `predictions_co_training_ensemble_v2_test_weighted_scania.csv`.
@@ -585,6 +591,31 @@ Same as v1, but with the `co_training_ensemble_v2` prefix:
 
 and, under `--checkpoints-path`, one trained model per base model, named
 `co_training_ensemble_v2_<version>_<i>.pth`.
+
+##### Timing columns of the per-stage file
+
+The per-stage file ends with a block of wall-clock durations **in seconds**, one
+set per row:
+
+| column | meaning |
+| --- | --- |
+| `conformal_time_{j}` | model `j`'s `crepes` calibration + interval scoring of the pooled censored units |
+| `conformal_time_total` | all models' conformal scoring |
+| `train_time_{j}` | the fit of model `j` in this stage (fine-tune or from-scratch retrain) |
+| `train_time_total` | all models' training in this stage |
+| `iteration_time_total` | the whole iteration, excluding the metric computation itself |
+
+Anything a stage did not do is left **empty** (`NaN` when read with `pandas`):
+
+- the `initial` row has no conformal scoring and no iteration time — and no
+  training time at all when the models were **reloaded from disk** instead of
+  trained (the `--pretrained-models-dir` path of the HPO sweep, see below);
+- within an iteration, a model that received no censored unit was not trained;
+- the `final` row is a pure re-evaluation, so every duration is empty.
+
+On the multi-GPU parallel path the models run concurrently: the per-model columns
+are each worker's own compute time, while the `*_total` columns are the
+wall-clock of the whole phase — so the total is *smaller* than the sum.
 
 ### Hyperparameter optimisation (HPO)
 

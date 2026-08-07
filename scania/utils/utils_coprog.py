@@ -1,4 +1,5 @@
 import functools
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -248,6 +249,8 @@ def train_model(
 
     print(f"Training Coprog model...")
 
+    training_start = time.perf_counter()
+
     coprog.train(
         failure_data=features_uncensored,
         failure_label=targets_uncensored,
@@ -267,6 +270,9 @@ def train_model(
         weight_mode="min",
         metrics_file=f"{results_path}/{model_version.value}-per-stage-scania.csv",
     )
+
+    training_time_seconds = time.perf_counter() - training_start
+    print(f"Coprog trained in {training_time_seconds:.1f}s")
 
     # Ensemble weights are computed on the validation set, not the test set,
     # to avoid leaking test information into the weighting.
@@ -326,7 +332,8 @@ def train_model(
         'test_rmse_weighted',
         'test_score_weighted',
         'weight_h1',
-        'weight_h2'
+        'weight_h2',
+        'training_time_seconds'
     ])
 
     scores.loc[0] = [
@@ -337,7 +344,8 @@ def train_model(
         rmse_weighted,
         score_weighted,
         coprog.w1,
-        coprog.w2
+        coprog.w2,
+        training_time_seconds
     ]
 
     # Save the results

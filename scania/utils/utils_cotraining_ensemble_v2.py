@@ -378,4 +378,6 @@ def train_model(
         test_features=test_features,
         test_targets=test_targets,
         version_strs=meta["version_strs"],
+        training_time_seconds=ensemble.training_duration_seconds,
+        avg_iteration_time_seconds=ensemble.average_iteration_duration_seconds,
     )

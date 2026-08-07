@@ -907,6 +907,10 @@ def _run_one_configuration(
             test_features=data["test_features"],
             test_targets=data["test_targets"],
             version_strs=meta["version_strs"],
+            # Initial training is not part of this: every configuration reuses the shared
+            # pretrained models, so the duration covers the co-training iterations only.
+            training_time_seconds=ensemble.training_duration_seconds,
+            avg_iteration_time_seconds=ensemble.average_iteration_duration_seconds,
         )
 
 
