@@ -12,7 +12,8 @@ from scania.utils import (
     extract_dataset_params_from_config,
     extract_model_params_from_config,
     extract_training_params_from_config,
-    get_necessary_training_keys
+    get_necessary_training_keys,
+    override_dataset_params_from_cache_manifest,
 )
 from scania.utils import (
     train_model_lightning,
@@ -35,6 +36,7 @@ def reproduce_result(
         benchmark_version: str = "default",
         run_name: str = "",
         gpu_ids: list[int] | None = None,
+        force_load_from_cache: bool = False,
 ):
     config_path = f"{config_path}/{benchmark_version}"
     config_model_file_path = f"{config_path}/{model_version.value}.json"
@@ -71,6 +73,18 @@ def reproduce_result(
         necessary_keys=necessary_training_keys,
     )
 
+    # Pinned to an existing cache: the split-defining params come from its manifest instead of
+    # this model's config, so every benchmarked model sees the same vehicles. Done before the
+    # try/except below on purpose -- a missing or incomplete cache must fail loudly rather than
+    # be swallowed into the run log with a zero exit code.
+    if force_load_from_cache:
+        assert os.path.exists(dataset_cache_dir), f"{dataset_cache_dir} does not exist."
+        dataset_params = override_dataset_params_from_cache_manifest(
+            dataset_params=dataset_params,
+            cache_dir=dataset_cache_dir,
+            dataset_root=dataset_root,
+        )
+
     train_model = _get_train_model_method(model_version)
 
     benchmark_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -93,6 +107,7 @@ def reproduce_result(
             results_path=results_path,
             model_version=model_version,
             cache_dir=dataset_cache_dir,
+            force_load_from_cache=force_load_from_cache,
             dataset_root=dataset_root,
             datetime_for_folders=benchmark_datetime,
             **dataset_params,
@@ -194,6 +209,20 @@ def _parse_args() -> argparse.Namespace:
         help="Root directory of the cache to build Scania dataset",
     )
     parser.add_argument(
+        "--force-load-from-cache",
+        action="store_true",
+        help=(
+            "Pin the run to the dataset cache in --dataset-cache-dir: load its splits as-is, "
+            "never re-preprocess and never overwrite it. Every split-defining dataset param "
+            "(sequence_len, seed, data_fraction, val/test/calib rates, stratify, norm_type, "
+            "counter_mode, histograms) is taken from the cache's manifest.json instead of the "
+            "model config; only num_workers, pin_memory, batch_size, shuffle_loader and "
+            "return_sequence_label still come from the config. Use it to benchmark several "
+            "models on one identical set of vehicles. Errors out if the cache is missing or "
+            "incomplete."
+        ),
+    )
+    parser.add_argument(
         "--benchmark-version",
         default="default",
         help="The benchmark version",
@@ -241,6 +270,7 @@ def main() -> None:
         benchmark_version=args.benchmark_version,
         run_name=args.run_name,
         gpu_ids=args.gpu_ids,
+        force_load_from_cache=args.force_load_from_cache,
     )
 
 if __name__ == "__main__":

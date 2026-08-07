@@ -78,6 +78,7 @@ def train_model(
     use_cotraining_ensemble_survival_loss_function: bool = False,
     cotraining_survival_loss_lambda: float = 1.0,
     # Others
+    force_load_from_cache: bool = False,
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
@@ -160,6 +161,10 @@ def train_model(
         cotraining_survival_loss_lambda: Weight of the pseudo-label MSE term in
             ``cotraining_ensemble_survival_loss_function``. Only used when
             ``use_cotraining_ensemble_survival_loss_function`` is ``True``.
+        force_load_from_cache: When ``True``, the data module reads the splits straight out of
+            ``cache_dir`` and adopts every split-defining param from its ``manifest.json``,
+            never re-preprocessing and never overwriting the cache. Used to pin every
+            benchmarked model to one identical set of vehicles.
         gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
             more → parallel training across those GPUs.
         datetime_for_folders: Timestamp used to name the output folders.
@@ -205,6 +210,7 @@ def train_model(
         "counter_mode": counter_mode,
         "include_histograms": include_histograms,
         "histogram_mode": histogram_mode,
+        "force_load_from_cache": force_load_from_cache,
     }
 
     print("Creating data loader with the following parameters :")

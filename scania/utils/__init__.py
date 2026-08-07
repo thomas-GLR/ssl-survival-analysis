@@ -1,6 +1,9 @@
 from scania.utils.utils_scania import (
+    LOADER_ONLY_DATASET_KEYS,
     assert_data_is_valid,
     create_and_get_checkpoints_results_path,
+    override_dataset_params_from_cache_manifest,
+    resolve_cache_dir,
     get_necessary_dataset_keys,
     get_necessary_model_keys,
     extract_dataset_params_from_config,
@@ -40,4 +43,7 @@ __all__ = [
     "run_hyper_parameter_optimization",
     "build_configurations",
     "HPO_CONFIG_FILE",
+    "override_dataset_params_from_cache_manifest",
+    "resolve_cache_dir",
+    "LOADER_ONLY_DATASET_KEYS",
 ]

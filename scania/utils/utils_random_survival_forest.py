@@ -39,6 +39,7 @@ def train_model(
         include_histograms: bool = False,
         histogram_mode: str = "sum",
         # Others params
+        force_load_from_cache: bool = False,
         model_kwargs=None,
         variance_warning_threshold: float = 0.05,  # Threshold for stability warning
         datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
@@ -68,6 +69,11 @@ def train_model(
         counter_mode=counter_mode,
         include_histograms=include_histograms,
         histogram_mode=histogram_mode,
+        # RSF consumes ScaniaDataset.df row-wise (see ScikitDataset.from_scania), never the
+        # windows, so adopting the cache's sequence_len over the sequence_len=1 above changes
+        # nothing it reads -- it only lets RSF share the benchmark splits instead of rebuilding
+        # (and overwriting) the cache with its own.
+        force_load_from_cache=force_load_from_cache,
     )
 
     # Transform the ScaniaDataModule into the scikit-survival format expected by RSF:

@@ -43,6 +43,17 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Cache directory of the Scania dataset (defaults to <dataset-root>/scania_cache)",
     )
+    parser.add_argument(
+        "--force-load-from-cache",
+        action="store_true",
+        help=(
+            "Pin the sweep to the dataset cache in --dataset-cache-dir: load its splits as-is, "
+            "never re-preprocess and never overwrite it. Every split-defining dataset param is "
+            "taken from the cache's manifest.json instead of the benchmark config; only "
+            "num_workers, pin_memory, batch_size, shuffle_loader and return_sequence_label still "
+            "come from the config. Errors out if the cache is missing or incomplete."
+        ),
+    )
     parser.add_argument("--benchmark-version", default="default", help="The benchmark version")
     parser.add_argument("--run-name", default="", help="The name of the RUN")
     parser.add_argument(
@@ -116,6 +127,7 @@ def main() -> None:
         resume=args.resume,
         pretrained_models_dir=args.pretrained_models_dir,
         gpu_id=args.gpu_id,
+        force_load_from_cache=args.force_load_from_cache,
     )
 
 

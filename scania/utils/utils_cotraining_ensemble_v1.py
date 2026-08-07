@@ -57,6 +57,7 @@ def train_model(
     fine_tune_max_epochs: int,
     inference_batch_size: int | None = None,
     # Others
+    force_load_from_cache: bool = False,
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
@@ -86,6 +87,10 @@ def train_model(
         inference_batch_size: If set, chunk every ``_predict`` forward pass into batches of this
             size so peak (host) memory during candidate scoring / metrics stays ``O(batch)``.
             Needed to fit small budgets (e.g. Colab T4). ``None`` keeps single-shot inference.
+        force_load_from_cache: When ``True``, the data module reads the splits straight out of
+            ``cache_dir`` and adopts every split-defining param from its ``manifest.json``,
+            never re-preprocessing and never overwriting the cache. Used to pin every
+            benchmarked model to one identical set of vehicles.
         gpu_ids: GPU id(s). ``None`` → single GPU / auto (sequential); ``[g]`` → pinned; two or
             more → parallel training across those GPUs.
         datetime_for_folders: Timestamp used to name the output folders.
@@ -128,6 +133,7 @@ def train_model(
         "batch_size": batch_size,
         "sequence_len": sequence_len,
         "counter_mode": counter_mode,
+        "force_load_from_cache": force_load_from_cache,
     }
 
     print("Creating data loader with the following parameters :")
