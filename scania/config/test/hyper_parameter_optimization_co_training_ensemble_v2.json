@@ -2,32 +2,32 @@
   "hyper_parameters": {
     "use_monotone_projection": [true],
     "monotone_residual_weight": [1.0],
-    "use_fine_tuning": [false],
-    "fine_tune_lr_factor": [0.2],
-    "fine_tune_max_epochs": [10],
-    "fine_tune_patience": [5],
+    "use_fine_tuning": [true],
+    "fine_tune_lr_factor": [0.3],
+    "fine_tune_max_epochs": [1],
+    "fine_tune_patience": [1],
     "fine_tune_from_initial_model": [true],
     "peer_weighted_pseudo_label": [false],
-    "keep_best_model_mode": [null, "val_rmse", "delta_criterion"],
+    "keep_best_model_mode": ["val_rmse"],
     "isotonic_time_weighting": [true],
     "computing_weight_mode": ["val_rmse"],
-    "use_cotraining_ensemble_survival_loss_function": [true, false],
-    "cotraining_survival_loss_lambda": [0.1, 0.3, 0.7, 1],
+    "use_cotraining_ensemble_survival_loss_function": [true],
+    "cotraining_survival_loss_lambda": [0.7],
     "suspension_pool_size": [0.35],
-    "add_ratio": [0.05, 0.1]
+    "add_ratio": [0.1]
   },
   "training_params": {
-    "iterations": 2,
-    "confidence": 0.9,
+    "iterations": 20,
+    "confidence": 0.95,
     "inference_batch_size": 64,
     "bagging_failure_data": false
   },
   "dataset_params": {
-    "sequence_len": 32,
+    "sequence_len": 48,
     "seed": 42,
     "data_fraction": 0.05,
-    "val_rate": 0.2,
-    "test_rate": 0.1,
+    "val_rate": 0.15,
+    "test_rate": 0.15,
     "calib_rate": 0.1,
     "stratify": true,
     "norm_type": "z-score",
@@ -52,10 +52,11 @@
         }
       },
       {
-        "transformer_features": {
+        "lstm": {
           "model_params": {
-            "transformer_encoder_head_num": 8,
-            "transformer_num_layer": 2,
+            "hidden_dim": 256,
+            "lstm_num_layers": 3,
+            "lstm_dropout": 0.3,
             "fc_layer_dim": 128,
             "fc_dropout": 0.2
           },

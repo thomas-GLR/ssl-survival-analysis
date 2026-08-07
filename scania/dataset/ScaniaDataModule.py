@@ -30,6 +30,12 @@ Pipeline (see the project plan for the rationale):
        vehicle, mirroring CMAPSS); val/calib keep every window
     7. cache the processed splits so later runs skip preprocessing
 
+``force_load_from_cache=True`` short-circuits the whole pipeline: the splits
+are read straight out of ``cache_dir`` and every split-defining parameter is
+adopted from its ``manifest.json`` (see ``_apply_cached_config``), so a set of
+models trained with different configs can still be benchmarked on one identical
+set of vehicles. Nothing is ever written back on that path.
+
 The module exposes the standard ``train/val/test_dataloader`` (uncensored
 ``(x, y)`` batches) plus convenience accessors for the co-training (Coprog) and
 self-supervised paradigms.
@@ -85,6 +91,7 @@ class ScaniaDataModule(LightningDataModule):
             counter_mode: str = "cumulative",
             include_histograms: bool = False,
             histogram_mode: str = "sum",
+            force_load_from_cache: bool = False,
     ):
         super().__init__()
         assert (
@@ -118,33 +125,9 @@ class ScaniaDataModule(LightningDataModule):
         self.counter_mode = counter_mode
         self.include_histograms = include_histograms
         self.histogram_mode = histogram_mode
+        self.force_load_from_cache = force_load_from_cache
 
-        # Raw counter columns as they appear in the CSV (what we read/difference).
-        self._base_counter_cols = list(COUNTER_COLUMNS)
-        # Raw histogram bin columns to READ / NaN-fill from the CSV (a
-        # distribution per feature; never differenced by counter_mode).
-        self._raw_histogram_cols = list(HISTOGRAM_COLUMNS) if include_histograms else []
-        # Histogram FEATURE columns fed to the model. In "sum" mode these are the
-        # raw per-bin columns (sum-normalized by HistogramFeatureNormalizer); in
-        # "zhist" mode each group is collapsed to one continuous zhist_<group>
-        # feature (ZHistFeatureNormalizer), computed from the raw bins inside
-        # ScaniaDataset.
-        if not include_histograms:
-            self._histogram_cols = []
-        elif histogram_mode == "zhist":
-            self._histogram_cols = list(ZHIST_FEATURE_COLUMNS)
-        else:
-            self._histogram_cols = list(HISTOGRAM_COLUMNS)
-        # Feature columns actually fed to the model. In "both" mode the per-step
-        # deltas are appended as separate "<counter>_delta" columns, doubling the
-        # counter feature count; "delta"/"cumulative" keep the base columns (same
-        # names, different values). Histogram feature columns, if enabled, are
-        # appended last so feature ordering stays stable.
-        if counter_mode == "both":
-            counter_feature_cols = self._base_counter_cols + [f"{c}_delta" for c in self._base_counter_cols]
-        else:
-            counter_feature_cols = list(self._base_counter_cols)
-        self.feature_cols = counter_feature_cols + self._histogram_cols
+        self._derive_feature_columns()
 
         self.train_set: ScaniaDataset | None = None
         self.val_set: ScaniaDataset | None = None
@@ -153,6 +136,47 @@ class ScaniaDataModule(LightningDataModule):
         self.norm_params: np.ndarray | None = None
         self.hist_norm_params: dict[str, float] | None = None
         self.zhist_norm_params: dict | None = None
+
+    def _derive_feature_columns(self) -> None:
+        """Recompute the column lists implied by the current feature settings.
+
+        Called from ``__init__`` and again by :meth:`_apply_cached_config`, which
+        may replace ``counter_mode`` / ``include_histograms`` / ``histogram_mode``
+        with the values recorded in a cache manifest.
+
+        Sets ``_base_counter_cols``, ``_raw_histogram_cols``, ``_histogram_cols``
+        and ``feature_cols`` on ``self``.
+
+        Returns:
+            None.
+        """
+        # Raw counter columns as they appear in the CSV (what we read/difference).
+        self._base_counter_cols = list(COUNTER_COLUMNS)
+        # Raw histogram bin columns to READ / NaN-fill from the CSV (a
+        # distribution per feature; never differenced by counter_mode).
+        self._raw_histogram_cols = list(HISTOGRAM_COLUMNS) if self.include_histograms else []
+        # Histogram FEATURE columns fed to the model. In "sum" mode these are the
+        # raw per-bin columns (sum-normalized by HistogramFeatureNormalizer); in
+        # "zhist" mode each group is collapsed to one continuous zhist_<group>
+        # feature (ZHistFeatureNormalizer), computed from the raw bins inside
+        # ScaniaDataset.
+        if not self.include_histograms:
+            self._histogram_cols = []
+        elif self.histogram_mode == "zhist":
+            self._histogram_cols = list(ZHIST_FEATURE_COLUMNS)
+        else:
+            self._histogram_cols = list(HISTOGRAM_COLUMNS)
+        # Feature columns actually fed to the model. In "both" mode the per-step
+        # deltas are appended as separate "<counter>_delta" columns, doubling the
+        # counter feature count; "delta"/"cumulative" keep the base columns (same
+        # names, different values). Histogram feature columns, if enabled, are
+        # appended last so feature ordering stays stable.
+        if self.counter_mode == "both":
+            counter_feature_cols = (
+                self._base_counter_cols + [f"{c}_delta" for c in self._base_counter_cols])
+        else:
+            counter_feature_cols = list(self._base_counter_cols)
+        self.feature_cols = counter_feature_cols + self._histogram_cols
 
     @property
     def feature_num(self) -> int:
@@ -164,6 +188,15 @@ class ScaniaDataModule(LightningDataModule):
     def setup(self, stage: str | None = None) -> None:
         if self.train_set is not None:
             return  # already set up
+
+        if self.force_load_from_cache:
+            # Pinned to an existing cache: adopt its split-defining config, load the CSVs, and
+            # never fall through to _preprocess_and_split/_save_cache -- a shared benchmark cache
+            # must stay byte-identical across every model it is compared on.
+            self._apply_cached_config()
+            print(f"[Scania] force-load-from-cache: using cached splits from {self.cache_dir}")
+            self._load_from_cache()
+            return
 
         if self._cache_is_valid():
             print(f"[Scania] Loading preprocessed data from cache: {self.cache_dir}")
@@ -514,6 +547,89 @@ class ScaniaDataModule(LightningDataModule):
             "censored": int((cens == 1).sum()),
         }
 
+    def _read_manifest(self) -> dict:
+        """Read ``manifest.json`` out of :attr:`cache_dir`.
+
+        Returns:
+            The parsed manifest dictionary.
+
+        Raises:
+            FileNotFoundError: If the cache directory holds no manifest.
+        """
+        manifest_path = os.path.join(self.cache_dir, MANIFEST_FILE)
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(
+                f"No {MANIFEST_FILE} in {self.cache_dir}; cannot force-load the Scania dataset "
+                f"from cache. Build the cache first (run without force_load_from_cache), or point "
+                f"the cache directory at one that already holds it.")
+        with open(manifest_path, "r") as f:
+            return json.load(f)
+
+    def _apply_cached_config(self) -> None:
+        """Adopt the split-defining params recorded in the cache manifest.
+
+        Everything in ``manifest["config"]`` -- i.e. every param that changes the cached CSV
+        content -- replaces the value this module was constructed with, so a run pinned to a
+        cache is described by that cache rather than by whichever model config JSON launched it.
+        The loader-side params (``batch_size``, ``num_workers``, ``pin_memory``,
+        ``shuffle_loader``, ``return_sequence_label``) are deliberately absent from
+        :meth:`_cache_config` and therefore stay under the caller's control.
+
+        ``_splits`` and the feature-column lists are recomputed from the adopted values, so a
+        cache written with ``calib_rate > 0`` makes ``calib.csv`` available to every model --
+        those that have no use for a calibration split simply leave ``calib_set`` untouched.
+
+        Returns:
+            None.
+
+        Raises:
+            FileNotFoundError: If the manifest or any split CSV it implies is missing.
+            ValueError: If the manifest's feature columns disagree with the ones derived from
+                its own config, which means the cache was written by incompatible code.
+        """
+        manifest = self._read_manifest()
+        config = manifest.get("config")
+        if not isinstance(config, dict):
+            raise ValueError(
+                f"{os.path.join(self.cache_dir, MANIFEST_FILE)} has no 'config' block; it was not "
+                f"written by ScaniaDataModule._save_cache.")
+
+        self.norm_type = config["norm_type"]
+        self.val_rate = config["val_rate"]
+        self.test_rate = config["test_rate"]
+        self.calib_rate = config["calib_rate"]
+        self.stratify = config["stratify"]
+        self.n_quantile_length_strata = config["n_quantile_length_strata"]
+        self.seed = config["seed"]
+        self.sequence_len = config["sequence_len"]
+        self.counter_mode = config["counter_mode"]
+        self.data_fraction = config["data_fraction"]
+        self.include_histograms = config["include_histograms"]
+        self.histogram_mode = config["histogram_mode"]
+
+        self._splits = BASE_SPLITS + (("calib",) if self.calib_rate > 0 else ())
+        self._derive_feature_columns()
+
+        cached_feature_cols = manifest.get("feature_cols", config.get("feature_cols"))
+        if cached_feature_cols is not None and list(cached_feature_cols) != self.feature_cols:
+            raise ValueError(
+                f"Cache at {self.cache_dir} lists feature columns that do not match the ones "
+                f"derived from its own config (counter_mode={self.counter_mode}, "
+                f"include_histograms={self.include_histograms}, "
+                f"histogram_mode={self.histogram_mode}). Cached: {list(cached_feature_cols)}; "
+                f"derived: {self.feature_cols}. The cache was written by incompatible code.")
+
+        missing = [
+            f"{name}.csv" for name in self._splits
+            if not os.path.exists(os.path.join(self.cache_dir, f"{name}.csv"))
+        ]
+        if missing:
+            raise FileNotFoundError(
+                f"Cache at {self.cache_dir} is incomplete: missing {', '.join(missing)} "
+                f"(splits required by the manifest: {', '.join(self._splits)}).")
+
+        print(f"[Scania] force-load-from-cache: dataset params taken from {MANIFEST_FILE}: {config}")
+
     def _cache_is_valid(self) -> bool:
         manifest_path = os.path.join(self.cache_dir, MANIFEST_FILE)
         if not os.path.exists(manifest_path):
@@ -556,9 +672,7 @@ class ScaniaDataModule(LightningDataModule):
         print(f"[Scania] Cache written to {self.cache_dir}")
 
     def _load_from_cache(self) -> None:
-        manifest_path = os.path.join(self.cache_dir, MANIFEST_FILE)
-        with open(manifest_path, "r") as f:
-            manifest = json.load(f)
+        manifest = self._read_manifest()
         if manifest.get("norm_params") is not None:
             self.norm_params = np.asarray(manifest["norm_params"], dtype=np.float64)
         self.hist_norm_params = manifest.get("hist_norm_params")

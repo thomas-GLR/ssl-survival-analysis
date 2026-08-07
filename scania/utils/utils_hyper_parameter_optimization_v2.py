@@ -44,7 +44,11 @@ from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
 from scania.dataset import ScaniaDataModule
 from scania.utils.utils_coprog import _criteria_callback_for_coprog, _score_callback_for_coprog
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
-from scania.utils.utils_scania import assert_data_is_valid, save_train_parameters
+from scania.utils.utils_scania import (
+    assert_data_is_valid,
+    override_dataset_params_from_cache_manifest,
+    save_train_parameters,
+)
 from shared.utils import ModelVersion
 from shared.utils.config import assert_params_contains_all_key, extract_data_from_config
 
@@ -99,6 +103,7 @@ def run_hyper_parameter_optimization(
         resume: str | None = None,
         pretrained_models_dir: str | None = None,
         gpu_id: int | None = None,
+        force_load_from_cache: bool = False,
 ) -> str:
     """Run the full grid benchmark and return the path of the run folder.
 
@@ -122,6 +127,10 @@ def run_hyper_parameter_optimization(
             to reuse. ``None`` looks inside the run folder and, failing that, trains them.
         gpu_id: Single GPU id to train on, or ``None`` for auto. The sweep is sequential by design
             (every opt-in lever is sequential-only in ``CoTrainingEnsemble_v2``).
+        force_load_from_cache: When ``True``, the data module reads the splits straight out of
+            ``cache_dir`` and every split-defining dataset param is taken from its
+            ``manifest.json`` instead of the benchmark config; the cache is never rebuilt nor
+            overwritten. Pins the sweep to the same vehicles other benchmarked models use.
 
     Returns:
         The absolute path of the run folder holding every configuration's artifacts and the
@@ -137,6 +146,15 @@ def run_hyper_parameter_optimization(
     )
 
     hyper_parameters, training_params, dataset_params, model_params = _load_config(config_file_path)
+
+    # Applied here, before `seed` and `sequence_len` are read out of dataset_params below: the
+    # models must be built for the splits the cache actually holds, not for the config's.
+    if force_load_from_cache:
+        dataset_params = override_dataset_params_from_cache_manifest(
+            dataset_params=dataset_params,
+            cache_dir=cache_dir,
+            dataset_root=dataset_root,
+        )
 
     if run_name:
         results_path = os.path.join(results_path, run_name)
@@ -197,7 +215,13 @@ def run_hyper_parameter_optimization(
     # reuses the same in-memory tensors.
     # ---------------------------------------------------------------- #
     dataset_kwargs = dict(dataset_params)
-    dataset_kwargs.update({"data_dir": dataset_root, "cache_dir": cache_dir})
+    dataset_kwargs.update({
+        "data_dir": dataset_root,
+        "cache_dir": cache_dir,
+        "force_load_from_cache": force_load_from_cache,
+    })
+    # Only a fallback: under force_load_from_cache the module overrides calib_rate (and every
+    # other split-defining param) with the cache manifest's value.
     dataset_kwargs.setdefault("calib_rate", 0.0)
 
     log("Creating the data module (shared by every configuration)...")

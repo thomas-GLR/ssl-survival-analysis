@@ -7,6 +7,45 @@
 The script to train and evaluate models on the Scania Component X dataset is
 [`run_train_scania.py`](run_train_scania.py).
 
+### Benchmarking several models on the same splits
+
+Each model has its own config JSON with its own `dataset_params`, and
+`ScaniaDataModule` rebuilds the cache whenever those differ from the ones the
+cache was written with. So running `lstm` then `co_training_ensemble_v2`
+against one `--dataset-cache-dir` re-splits the vehicles in between: each model
+ends up measured on a different test set, and their RMSE / score are not
+comparable. (`rsf` is the worst case — it uses `sequence_len=1` internally, so
+it always invalidates and overwrites a shared cache.)
+
+`--force-load-from-cache` fixes this. Pass it to
+[`run_train_scania.py`](run_train_scania.py) or
+[`run_hpo_co_training_ensemble_v2_scania.py`](run_hpo_co_training_ensemble_v2_scania.py)
+and the run is **pinned** to the cache in `--dataset-cache-dir`:
+
+- the splits are loaded as-is — never re-preprocessed, never overwritten;
+- every split-defining dataset param (`sequence_len`, `seed`, `data_fraction`,
+  `val_rate` / `test_rate` / `calib_rate`, `stratify`, `n_quantile_length_strata`,
+  `norm_type`, `counter_mode`, `include_histograms`, `histogram_mode`) is taken
+  from the cache's `manifest.json` instead of the model config, and the
+  overrides are printed at startup;
+- only the loader-side knobs still come from the config: `num_workers`,
+  `pin_memory`, `batch_size`, `shuffle_loader`, `return_sequence_label`;
+- a missing or incomplete cache is a hard error, never a silent rebuild.
+
+If the cache holds a calibration split (`calib_rate > 0`), it is loaded for
+every model; only `co_training_ensemble_v2` uses it (for the `crepes` conformal
+calibration) and the others simply ignore it.
+
+Build the reference cache once by running any model **without** the flag, then
+add it to every subsequent run:
+
+```bash
+python run_train_scania.py --model-version lstm --config-path ./scania/config \
+  --checkpoints-path ./checkpoints --results-path ./outputs \
+  --dataset-root ./data/Scania_component_X \
+  --dataset-cache-dir ./scania_cache --force-load-from-cache
+```
+
 ### Coprog
 
 Coprog is a **co-training** model: two different base models (e.g. a CNN and a
@@ -43,6 +82,7 @@ python run_train_scania.py --model-version coprog --config-path ./scania/config 
 | `--results-path` | yes | Where the metrics CSVs and the run log are written. Created if missing. |
 | `--dataset-root` | yes | Root folder of the Scania Component X data files (readouts / TTE / specifications CSVs). |
 | `--dataset-cache-dir` | yes | Folder used to cache the processed dataset splits (built once, reused afterwards). |
+| `--force-load-from-cache` | no (flag) | Pin the run to the cache in `--dataset-cache-dir` — see [Benchmarking several models on the same splits](#benchmarking-several-models-on-the-same-splits). |
 | `--benchmark-version` | no (default `default`) | Selects the config **sub-folder** to read, i.e. `<config-path>/<benchmark-version>/coprog.json`. `default` is the full run; `test` is a fast smoke-test config (1 epoch, 2 iterations). |
 | `--run-name` | no (default `""`) | Optional name; when set, results and checkpoints are written under a sub-folder of this name. |
 | `--gpu-ids` | no (default `None`) | GPU selection — see below. **Coprog only.** |
@@ -222,6 +262,7 @@ python run_train_scania.py --model-version co_training_ensemble --config-path ./
 | `--results-path` | yes | Where the metrics CSVs and the run log are written. Created if missing. |
 | `--dataset-root` | yes | Root folder of the Scania Component X data files (readouts / TTE / specifications CSVs). |
 | `--dataset-cache-dir` | yes | Folder used to cache the processed dataset splits (built once, reused afterwards). |
+| `--force-load-from-cache` | no (flag) | Pin the run to the cache in `--dataset-cache-dir` — see [Benchmarking several models on the same splits](#benchmarking-several-models-on-the-same-splits). |
 | `--benchmark-version` | no (default `default`) | Selects the config **sub-folder** to read, i.e. `<config-path>/<benchmark-version>/co_training_ensemble.json`. `default` is the full run; `test` is a fast smoke-test config (1 epoch, 2 iterations). |
 | `--run-name` | no (default `""`) | Optional name; when set, results and checkpoints are written under a sub-folder of this name. |
 | `--gpu-ids` | no (default `None`) | GPU selection — see below. |

@@ -55,6 +55,7 @@ def train_model(
     coprog_suspension_pool_size: int,
     rul_target_standardization: list[bool],
     # Others
+    force_load_from_cache: bool = False,
     gpu_ids: list[int] | None = None,
     datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
@@ -127,6 +128,7 @@ def train_model(
         counter_mode=counter_mode,
         include_histograms=include_histograms,
         histogram_mode=histogram_mode,
+        force_load_from_cache=force_load_from_cache,
     )
 
     scania_data_module.setup()
