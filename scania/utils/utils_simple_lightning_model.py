@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -71,7 +72,8 @@ def train_model(
         results_path=results_path,
     )
 
-    scores = pd.DataFrame(columns=['train_rmse', 'val_rmse', 'test_rmse', 'test_score'])
+    scores = pd.DataFrame(
+        columns=['train_rmse', 'val_rmse', 'test_rmse', 'test_score', 'training_time_seconds'])
 
     dataset_kwargs = {
         'data_dir': dataset_root,
@@ -252,7 +254,12 @@ def train_model(
         callbacks=[early_stop_callback, checkpoint_callback],
     )
 
+    training_start = time.perf_counter()
+
     trainer.fit(lightning_module, datamodule=scania_data_module)
+
+    training_time_seconds = time.perf_counter() - training_start
+    print(f"{model_version.value} trained in {training_time_seconds:.1f}s")
 
     callbacks_metrics = trainer.callback_metrics
     train_rmse = callbacks_metrics['train_rmse']
@@ -266,7 +273,7 @@ def train_model(
     test_score = callbacks_metrics['test_score']
 
     # Add the results to the dataframe
-    scores.loc[0] = [train_rmse, val_rmse, test_rmse, test_score]
+    scores.loc[0] = [train_rmse, val_rmse, test_rmse, test_score, training_time_seconds]
 
     # Save the results
     scores.to_csv(f'{results_path}/{model_version.value}-scania.csv', index=False)

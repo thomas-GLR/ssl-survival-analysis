@@ -30,6 +30,7 @@ import os
 import queue as _queue
 import shutil
 import tempfile
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -397,9 +398,13 @@ def run_finetune_job(spec: FineTuneSpec) -> dict[str, Any]:
     Module-level and picklable, so it runs unchanged in a worker process and inline.
 
     :param spec: The fine-tune job description.
-    :return: A dict possibly containing ``"sse"`` (if ``spec.eval_x`` was given) and
-        ``"state_dict"`` (CPU tensors, if ``spec.return_state`` was set).
+    :return: A dict always containing ``"elapsed_seconds"`` (this job's own wall-clock, which the
+        caller cannot measure when jobs run concurrently), and possibly ``"sse"`` (if
+        ``spec.eval_x`` was given) and ``"state_dict"`` (CPU tensors, if ``spec.return_state``
+        was set).
     """
+    job_start = time.perf_counter()
+
     model = spec.module_builder()
     model.load_state_dict(spec.current_state_dict)
 
@@ -443,7 +448,7 @@ def run_finetune_job(spec: FineTuneSpec) -> dict[str, Any]:
         devices=spec.devices,
     )
 
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"elapsed_seconds": time.perf_counter() - job_start}
     if spec.eval_x is not None and spec.eval_y is not None:
         result["sse"] = _summed_squared_error(model, spec.eval_x, spec.eval_y)
     if spec.return_state:
@@ -465,15 +470,19 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
     conformally) does not hard-depend on it.
 
     :param spec: The conformal-scoring job description.
-    :return: ``{"units": [(unit_id, label, lower, upper, width, residual, raw_label), ...]}``
-        with one entry per pooled unit (order matches ``spec.unit_ids``). ``label`` is the raw
-        per-window pseudo-label, or its monotone projection when
-        ``spec.use_monotone_projection`` is set; ``raw_label`` is always the pre-projection
-        prediction (equal to ``label`` when projection is off), kept for effectiveness logging;
-        ``residual`` is ``0.0`` when projection is off.
+    :return: ``{"units": [(unit_id, label, lower, upper, width, residual, raw_label), ...],
+        "elapsed_seconds": float}`` with one unit entry per pooled unit (order matches
+        ``spec.unit_ids``). ``label`` is the raw per-window pseudo-label, or its monotone
+        projection when ``spec.use_monotone_projection`` is set; ``raw_label`` is always the
+        pre-projection prediction (equal to ``label`` when projection is off), kept for
+        effectiveness logging; ``residual`` is ``0.0`` when projection is off.
+        ``elapsed_seconds`` is this job's own wall-clock, which the caller cannot measure when
+        jobs run concurrently.
     """
     from crepes import WrapRegressor
     from crepes.extras import DifficultyEstimator
+
+    job_start = time.perf_counter()
 
     model = spec.module_builder()
     model.load_state_dict(spec.state_dict)
@@ -516,7 +525,7 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
         # raw_label (lu_p) is kept alongside the (possibly projected) label so the selection
         # step can log predictions before vs after projection.
         units.append((unit_id, label, lower, upper, upper - lower, residual, lu_p))
-    return {"units": units}
+    return {"units": units, "elapsed_seconds": time.perf_counter() - job_start}
 
 
 def _worker_loop(

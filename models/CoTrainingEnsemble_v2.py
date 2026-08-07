@@ -2,6 +2,7 @@ import copy
 import csv
 import gc
 import os
+import time
 from collections import OrderedDict
 from typing import Callable
 
@@ -255,6 +256,28 @@ class CoTrainingEnsemble_v2:
         # Optional path to a .txt log file (set by ``train``). When not None, every
         # ``_log`` message is appended to it regardless of ``verbose``.
         self._log_file_path: str | None = None
+
+        # Wall-clock bookkeeping (seconds), filled by ``train`` / ``_train_parallel``. Read by the
+        # Scania entry points to report the run duration in ``<model_version>-scania.csv``.
+        # ``_initial_train_durations`` holds one entry per model for Initial training, and is a
+        # list of ``None`` when Initial training was skipped because pretrained models were
+        # injected (nothing was trained, only reloaded from disk).
+        self.training_duration_seconds: float | None = None
+        self.iteration_durations_seconds: list[float] = []
+        self._initial_train_durations: list[float | None] = []
+
+    @property
+    def average_iteration_duration_seconds(self) -> float | None:
+        """Mean wall-clock duration (seconds) of one co-training iteration.
+
+        Returns:
+            The average of :attr:`iteration_durations_seconds`, or ``None`` when no iteration
+            completed (e.g. ``train`` has not run yet, or it stopped early before the first
+            iteration finished).
+        """
+        if not self.iteration_durations_seconds:
+            return None
+        return sum(self.iteration_durations_seconds) / len(self.iteration_durations_seconds)
 
     def _log(self, level: int, message: str) -> None:
         if self.verbose >= level:
@@ -532,6 +555,12 @@ class CoTrainingEnsemble_v2:
                 same units in every run — because the generator is isolated from the global RNG,
                 which model training advances by a different amount depending on the configuration.
                 ``None`` (default) keeps using the global RNG.
+
+        Note:
+            On return, :attr:`training_duration_seconds` holds this call's wall-clock duration and
+            :attr:`iteration_durations_seconds` one entry per completed iteration (see
+            :attr:`average_iteration_duration_seconds`). The finer-grained per-model conformal and
+            training durations are written to ``metrics_file`` rather than kept in memory.
         """
         self._log_file_path = log_file
 
@@ -668,6 +697,12 @@ class CoTrainingEnsemble_v2:
                      f"cotraining_survival_loss_lambda: {self.cotraining_survival_loss_lambda} |"
                      f"pool_seed: {pool_seed}")
 
+        # Wall-clock bookkeeping for this run (see ``training_duration_seconds`` /
+        # ``iteration_durations_seconds``). Reset here so a second train() call starts clean.
+        train_start = time.perf_counter()
+        self.training_duration_seconds = None
+        self.iteration_durations_seconds = []
+
         total_suspension_units = len(torch.unique(suspension_ids))
         # Candidate pool size (a count of units) derived once from the fraction; the actual pool is
         # re-sampled at random from the remaining units every iteration.
@@ -705,6 +740,7 @@ class CoTrainingEnsemble_v2:
                 weight_mode=weight_mode,
                 metrics_file=metrics_file,
             )
+            self.training_duration_seconds = time.perf_counter() - train_start
             return
 
         if pretrained_models is not None:
@@ -712,6 +748,9 @@ class CoTrainingEnsemble_v2:
             # config of a hyperparameter sweep starts from the identical Initial-training result.
             h = list(pretrained_models)
             models_datasets = list(pretrained_models_datasets)
+            # Nothing was trained here -- the models only came back from disk -- so the "initial"
+            # row reports no training time at all rather than a misleading zero.
+            self._initial_train_durations = [None] * self.number_of_models
             self._log(1, f"[CoTraining] Initial training skipped: reusing {len(h)} pretrained "
                          f"model(s) (dataset sizes: {[len(x) for x, _ in models_datasets]}).")
         else:
@@ -765,6 +804,7 @@ class CoTrainingEnsemble_v2:
                 weight_callback=weight_callback,
                 weight_mode=weight_mode,
                 metrics_file=metrics_file,
+                train_times=self._initial_train_durations,
             )
 
         remaining_suspension_ids = torch.unique(suspension_ids)
@@ -774,6 +814,8 @@ class CoTrainingEnsemble_v2:
         pool_generator = torch.Generator().manual_seed(pool_seed) if pool_seed is not None else None
 
         for i in range(iterations):
+            iteration_start = time.perf_counter()
+
             if len(remaining_suspension_ids) == 0:
                 self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
                 break
@@ -802,6 +844,8 @@ class CoTrainingEnsemble_v2:
             #  unit's per-window survival lower bound, or None when suspension_lower_bounds isn't
             #  given -- used by _voting_censored_data_selection's physical-validity filter)
             all_preds: dict[int, OrderedDict] = {}
+            # Per-model duration of the conformal block below, reported in the metrics file.
+            conformal_times: list[float | None] = [None] * self.number_of_models
 
             for j in range(self.number_of_models):
                 hj = h[j]
@@ -810,6 +854,7 @@ class CoTrainingEnsemble_v2:
                 self._log(2, f"[CoTraining]   Model {j}: calibrating conformal regressor and "
                              f"scoring {len(pool_ids)} pooled censored units...")
 
+                conformal_start = time.perf_counter()
                 wrapper = self._build_calibrated_regressor(hj, xj, calib_data_eff, calib_label_eff)
 
                 # Collect each unit's rows, its per-window pseudo-labels, its (optional) per-window
@@ -864,6 +909,8 @@ class CoTrainingEnsemble_v2:
                     (uid.item(), (uid, xu, lu_p, lower, upper, width, residual, raw_lu_p, lb))
                     for uid, xu, lu_p, lower, upper, width, residual, raw_lu_p, lb in candidates
                 )
+                # Stop the clock before the teardown below: that is memory hygiene, not scoring.
+                conformal_times[j] = time.perf_counter() - conformal_start
 
                 if self.verbose >= 2:
                     ranking = [(uid.item(), round(w, 4)) for uid, _, _, _, _, w, _, _, _ in candidates]
@@ -915,6 +962,10 @@ class CoTrainingEnsemble_v2:
             # iteration (with better models / a different peer ranking) can select them again.
             requeued_ids: list[int] = []
 
+            # Per-model training duration for this iteration; a model that received no unit is
+            # never trained and keeps None (an empty cell in the metrics file).
+            train_times: list[float | None] = [None] * self.number_of_models
+
             for j in range(self.number_of_models):
                 if selected_per_model[j]:
                     xj, yj = models_datasets[j]
@@ -948,6 +999,7 @@ class CoTrainingEnsemble_v2:
                                      f"{' from initial model' if self.fine_tune_from_initial_model else ''}) | "
                                      f"added {n_added} unit(s) | "
                                      f"dataset size: {len(candidate_x)} samples")
+                        fit_start = time.perf_counter()
                         candidate = self._fine_tune(
                             j, self._cpu_state_dict(warm_start_model), candidate_x, candidate_y,
                             self._cpu_pair(val_data, val_label),
@@ -956,10 +1008,15 @@ class CoTrainingEnsemble_v2:
                         self._log(1, f"[CoTraining]   Retraining model {j} from scratch | "
                                      f"added {n_added} unit(s) | "
                                      f"dataset size: {len(candidate_x)} samples")
+                        fit_start = time.perf_counter()
                         candidate = self._fit_from_scratch(
                             j, candidate_x, candidate_y, val_data, val_label,
                             is_censored=candidate_is_censored, lower_bound=candidate_lb,
                             use_cotraining_survival_loss=self.use_cotraining_ensemble_survival_loss_function)
+
+                    # A candidate that keep_best_model_mode later rejects still cost this much:
+                    # the training happened, only its result is thrown away.
+                    train_times[j] = time.perf_counter() - fit_start
 
                     if self.keep_best_model_mode is None:
                         # Legacy behavior: always accept the candidate.
@@ -1020,6 +1077,11 @@ class CoTrainingEnsemble_v2:
                 self._log(1, f"[CoTraining]   Returned {len(requeued_ids)} censored unit(s) to the "
                              f"remaining pool ({len(remaining_suspension_ids)} available).")
 
+            # Closed here, before the metrics below: those are instrumentation (extra forward
+            # passes on the val/test sets), not part of the co-training iteration itself.
+            iteration_time = time.perf_counter() - iteration_start
+            self.iteration_durations_seconds.append(iteration_time)
+
             if metrics_enabled:
                 self._log_stage_metrics(
                     stage=f"iteration_{i + 1}",
@@ -1033,6 +1095,9 @@ class CoTrainingEnsemble_v2:
                     weight_callback=weight_callback,
                     weight_mode=weight_mode,
                     metrics_file=metrics_file,
+                    conformal_times=conformal_times,
+                    train_times=train_times,
+                    iteration_time=iteration_time,
                 )
 
             # Drop this iteration's scoring structures (each holds full per-unit tensors)
@@ -1056,7 +1121,11 @@ class CoTrainingEnsemble_v2:
                 metrics_file=metrics_file,
             )
 
-        self._log(1, f"[CoTraining] Training complete.")
+        self.training_duration_seconds = time.perf_counter() - train_start
+        self._log(1, f"[CoTraining] Training complete in "
+                     f"{self.training_duration_seconds:.1f}s "
+                     f"({len(self.iteration_durations_seconds)} iteration(s), average "
+                     f"{self.average_iteration_duration_seconds or 0.0:.1f}s each).")
         self.lightning_modules = h
         self._models_datasets = models_datasets
 
@@ -1101,6 +1170,9 @@ class CoTrainingEnsemble_v2:
             ``delta_criterion`` and the confidence weighting, and only the fit call itself needs
             the censored-augmented batch.
 
+            As a side effect, ``self._initial_train_durations`` is reset to this call's per-model
+            fit durations (seconds), reported in the ``initial`` row of the per-stage metrics file.
+
         Raises:
             ValueError: If ``train_with_censored_data`` is set without the censored data or its
                 lower bounds.
@@ -1113,6 +1185,9 @@ class CoTrainingEnsemble_v2:
 
         h: list[LightningModule] = []
         models_datasets: list[tuple[torch.Tensor, torch.Tensor]] = []
+        # Per-model Initial-training durations, reported in the "initial" row of the per-stage
+        # metrics file. Reset here so a second call does not accumulate.
+        self._initial_train_durations = []
 
         for j in range(self.number_of_models):
             if self.bagging_failure_data:
@@ -1135,13 +1210,16 @@ class CoTrainingEnsemble_v2:
                 self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure "
                              f"samples + {len(suspension_data)} censored samples "
                              f"(survival_loss_function)...")
+                fit_start = time.perf_counter()
                 h_j = self._fit_from_scratch(
                     j, fit_x, fit_y, val_data, val_label,
                     is_censored=is_censored_i, lower_bound=lower_bound_i)
             else:
                 self._log(1, f"[CoTraining] Initial training of model {j} on {len(x_i)} failure samples...")
+                fit_start = time.perf_counter()
                 h_j = self._fit_from_scratch(j, x_i, y_i, val_data, val_label)
 
+            self._initial_train_durations.append(time.perf_counter() - fit_start)
             h.append(h_j)
 
         self._log(1, f"[CoTraining] Initial training done.")
@@ -1524,6 +1602,7 @@ class CoTrainingEnsemble_v2:
 
             # --- Initial training: one from-scratch job per model, round-robin. ---
             self._log(1, f"[CoTraining] Initial parallel training of {n} models...")
+            initial_start = time.perf_counter()
             job_ids = {
                 j: pool.submit_job(
                     pool.round_robin_gpu(j),
@@ -1531,7 +1610,12 @@ class CoTrainingEnsemble_v2:
                 for j in range(n)
             }
             results = pool.gather(list(job_ids.values()))
+            # Wall-clock of the whole phase; the per-model figures below are each worker's own
+            # compute time, so they sum to more than this when several GPUs run at once.
+            initial_wall_time = time.perf_counter() - initial_start
             h = [self._rebuild_module(j, results[job_ids[j]]["state_dict"]) for j in range(n)]
+            self._initial_train_durations = [
+                results[job_ids[j]].get("elapsed_seconds") for j in range(n)]
             self._log(1, f"[CoTraining] Initial training done.")
 
             if metrics_enabled:
@@ -1541,11 +1625,15 @@ class CoTrainingEnsemble_v2:
                     val_label=val_label, score_callback=score_callback,
                     weight_callback=weight_callback,
                     weight_mode=weight_mode, metrics_file=metrics_file,
+                    train_times=self._initial_train_durations,
+                    train_time_total=initial_wall_time,
                 )
 
             remaining_suspension_ids = torch.unique(suspension_ids)
 
             for i in range(iterations):
+                iteration_start = time.perf_counter()
+
                 if len(remaining_suspension_ids) == 0:
                     self._log(1, f"[CoTraining] Early stop at iteration {i}: no remaining censored units.")
                     break
@@ -1573,6 +1661,7 @@ class CoTrainingEnsemble_v2:
                 )
 
                 score_jobs: dict[int, int] = {}
+                conformal_start = time.perf_counter()
                 for j in range(n):
                     xj, yj = models_datasets[j]
                     self._log(2, f"[CoTraining]   Model {j}: submitting conformal scoring of "
@@ -1595,6 +1684,9 @@ class CoTrainingEnsemble_v2:
                     score_jobs[j] = pool.submit_conformal(pool.round_robin_gpu(j), spec)
 
                 results = pool.gather(list(score_jobs.values()))
+                conformal_wall_time = time.perf_counter() - conformal_start
+                conformal_times: list[float | None] = [
+                    results[score_jobs[j]].get("elapsed_seconds") for j in range(n)]
 
                 # Rebuild all_preds[j] from each worker's per-unit
                 # (unit_id, label, lower, upper, width, residual, raw_label), adding back the
@@ -1648,6 +1740,8 @@ class CoTrainingEnsemble_v2:
 
                 # --- Phase 3: retrain the updated models from scratch, in parallel. ---
                 retrain_jobs: dict[int, int] = {}
+                train_times: list[float | None] = [None] * n
+                retrain_start = time.perf_counter()
                 for j in range(n):
                     if selected_per_model[j]:
                         xj, yj = models_datasets[j]
@@ -1665,8 +1759,15 @@ class CoTrainingEnsemble_v2:
                             pool.round_robin_gpu(j), self._make_fit_spec(j, xj, yj, val_cpu))
 
                 results = pool.gather(list(retrain_jobs.values()))
+                retrain_wall_time = time.perf_counter() - retrain_start
                 for j, jid in retrain_jobs.items():
                     h[j] = self._rebuild_module(j, results[jid]["state_dict"])
+                    train_times[j] = results[jid].get("elapsed_seconds")
+
+                # Closed before the metrics below: those are instrumentation, not part of the
+                # co-training iteration itself.
+                iteration_time = time.perf_counter() - iteration_start
+                self.iteration_durations_seconds.append(iteration_time)
 
                 if metrics_enabled:
                     self._log_stage_metrics(
@@ -1675,6 +1776,11 @@ class CoTrainingEnsemble_v2:
                         val_label=val_label, score_callback=score_callback,
                         weight_callback=weight_callback,
                         weight_mode=weight_mode, metrics_file=metrics_file,
+                        conformal_times=conformal_times,
+                        train_times=train_times,
+                        conformal_time_total=conformal_wall_time,
+                        train_time_total=retrain_wall_time,
+                        iteration_time=iteration_time,
                     )
 
             if metrics_enabled:
@@ -1692,6 +1798,20 @@ class CoTrainingEnsemble_v2:
         finally:
             pool.shutdown()
 
+    @staticmethod
+    def _sum_durations(durations: list[float | None]) -> float | None:
+        """Sum the measured durations, ignoring the ``None`` (not-measured) entries.
+
+        Args:
+            durations: Per-model durations in seconds; ``None`` where nothing was measured.
+
+        Returns:
+            The sum of the measured entries, or ``None`` when none were measured (so the CSV
+            cell stays empty rather than reading a misleading ``0.0``).
+        """
+        measured = [d for d in durations if d is not None]
+        return sum(measured) if measured else None
+
     def _log_stage_metrics(
             self,
             stage: str,
@@ -1705,6 +1825,11 @@ class CoTrainingEnsemble_v2:
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float],
             weight_mode: str,
             metrics_file: str,
+            conformal_times: list[float | None] | None = None,
+            train_times: list[float | None] | None = None,
+            conformal_time_total: float | None = None,
+            train_time_total: float | None = None,
+            iteration_time: float | None = None,
     ) -> None:
         """
         Compute and append one row of per-stage metrics to ``metrics_file``.
@@ -1725,6 +1850,18 @@ class CoTrainingEnsemble_v2:
         same validation set produces the weights, so ``weighted_val_*`` is optimistic and
         only meaningful for tracking a stage-to-stage trend, not as a held-out estimate.
 
+        The last columns are wall-clock durations **in seconds**, measured by the caller:
+        ``conformal_time_{j}`` (this stage's ``crepes`` calibration + interval scoring for model
+        ``j``), ``conformal_time_total``, ``train_time_{j}`` (this stage's fit of model ``j``),
+        ``train_time_total`` and ``iteration_time_total``. Anything the stage did not do is left
+        empty (read back as ``NaN`` by ``pandas``): the ``initial`` row has no conformal scoring
+        and no iteration time — and no training time at all when the models were reloaded from
+        disk instead of trained; the ``final`` row is a pure re-evaluation, so every duration is
+        empty; and within an iteration a model that received no censored unit was not trained.
+        On the parallel path the models run concurrently, so the ``*_total`` columns are the
+        wall-clock of the whole phase and are therefore smaller than the sum of the per-model
+        columns (which are each worker's own compute time).
+
         Args:
             stage: label for the row ("initial", "iteration_<k>" or "final").
             h: the current best model per index.
@@ -1735,6 +1872,16 @@ class CoTrainingEnsemble_v2:
             weight_callback: score used to compute the reported ensemble weights.
             weight_mode: "min"/"max" passed to ``_compute_weights``.
             metrics_file: destination CSV; header written only when it does not yet exist.
+            conformal_times: per-model conformal-scoring duration in seconds, ``None`` for a model
+                that was not scored. ``None`` (the default) means the whole stage did no conformal
+                scoring.
+            train_times: per-model training duration in seconds, ``None`` for a model that was not
+                trained. ``None`` (the default) means the whole stage trained nothing.
+            conformal_time_total: overrides the sum of ``conformal_times`` (used by the parallel
+                path, where the wall-clock is not the sum).
+            train_time_total: overrides the sum of ``train_times`` (same reason).
+            iteration_time: total duration of the iteration in seconds; ``None`` for the
+                ``initial`` / ``final`` stages, which are not iterations.
         """
         test_label_flat = test_label.view(-1).float()
         val_label_flat = val_label.view(-1).float()
@@ -1786,6 +1933,16 @@ class CoTrainingEnsemble_v2:
         weighted_val_rmse = (((val_label_flat - weighted_val_pred) ** 2).mean().item()) ** 0.5
         weighted_val_score = score_callback(weighted_val_pred, val_label_flat)
 
+        # Durations (seconds). A missing list means "this stage did nothing of that kind"; the
+        # totals default to the sum of what was actually measured (None when nothing was), and
+        # the parallel path overrides them with its wall-clock.
+        conformal_times = list(conformal_times) if conformal_times is not None else [None] * n
+        train_times = list(train_times) if train_times is not None else [None] * n
+        if conformal_time_total is None:
+            conformal_time_total = self._sum_durations(conformal_times)
+        if train_time_total is None:
+            train_time_total = self._sum_durations(train_times)
+
         header = ["stage"]
         for j in range(n):
             header += [f"train_rmse_{j}", f"val_rmse_{j}", f"val_score_{j}",
@@ -1794,6 +1951,12 @@ class CoTrainingEnsemble_v2:
         header += ["avg_test_rmse", "avg_test_score", "weighted_test_rmse", "weighted_test_score"]
         for j in range(n):
             header += [f"weight_{j}"]
+        for j in range(n):
+            header += [f"conformal_time_{j}"]
+        header += ["conformal_time_total"]
+        for j in range(n):
+            header += [f"train_time_{j}"]
+        header += ["train_time_total", "iteration_time_total"]
 
         row = [stage]
         for j in range(n):
@@ -1802,6 +1965,10 @@ class CoTrainingEnsemble_v2:
         row += [avg_test_rmse, avg_test_score, weighted_test_rmse, weighted_test_score]
         for j in range(n):
             row += [weights[j]]
+        row += conformal_times
+        row += [conformal_time_total]
+        row += train_times
+        row += [train_time_total, iteration_time]
 
         # Append per call (crash-safe, no file-handle lifecycle), writing the header only
         # the first time the file is created — mirrors the append style of ``_log``.

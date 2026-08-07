@@ -181,6 +181,8 @@ def save_ensemble_outputs(
         test_features: torch.Tensor,
         test_targets: torch.Tensor,
         version_strs: list[str],
+        training_time_seconds: float | None = None,
+        avg_iteration_time_seconds: float | None = None,
 ) -> tuple[float, float]:
     """Save trained models, per-model + weighted prediction CSVs, and a summary scores CSV.
 
@@ -199,6 +201,11 @@ def save_ensemble_outputs(
         test_features: Test features.
         test_targets: Test targets.
         version_strs: Per-model architecture strings (for ``.pth`` file names).
+        training_time_seconds: Wall-clock duration of the whole training step, written as the
+            ``training_time_seconds`` column. ``None`` (default) leaves the cell empty.
+        avg_iteration_time_seconds: Mean wall-clock duration of one co-training iteration,
+            written as the ``avg_iteration_time_seconds`` column. ``None`` (default) leaves the
+            cell empty — v1 does not track per-iteration durations.
 
     Returns:
         ``(rmse_weighted, score_weighted)`` for the weighted-ensemble prediction.
@@ -240,7 +247,7 @@ def save_ensemble_outputs(
 
     # Summary scores table with dynamic per-model columns.
     columns: list[str] = []
-    row: list[float] = []
+    row: list[float | None] = []
     for i in range(n):
         columns += [f"test_rmse_h{i}", f"test_score_h{i}"]
         row += [per_model_rmse[i], per_model_score[i]]
@@ -249,6 +256,8 @@ def save_ensemble_outputs(
     for i in range(n):
         columns += [f"weight_h{i}"]
         row += [ensemble.weights[i]]
+    columns += ["training_time_seconds", "avg_iteration_time_seconds"]
+    row += [training_time_seconds, avg_iteration_time_seconds]
 
     scores = pd.DataFrame(columns=columns)
     scores.loc[0] = row

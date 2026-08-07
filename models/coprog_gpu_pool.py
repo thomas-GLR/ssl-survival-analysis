@@ -21,6 +21,7 @@ import os
 import queue as _queue
 import shutil
 import tempfile
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -175,9 +176,13 @@ def run_training_job(spec: TrainingSpec) -> dict[str, Any]:
     process and inline in the main process.
 
     :param spec: The job description.
-    :return: A dict possibly containing ``"sse"`` (if ``spec.eval_x`` was given) and
-        ``"state_dict"`` (CPU tensors, if ``spec.return_state`` was set).
+    :return: A dict always containing ``"elapsed_seconds"`` (this job's own wall-clock, which the
+        caller cannot measure when jobs run concurrently), and possibly ``"sse"`` (if
+        ``spec.eval_x`` was given) and ``"state_dict"`` (CPU tensors, if ``spec.return_state``
+        was set).
     """
+    job_start = time.perf_counter()
+
     model = spec.module_builder()
     model.load_state_dict(spec.initial_state_dict)
 
@@ -242,7 +247,7 @@ def run_training_job(spec: TrainingSpec) -> dict[str, Any]:
             checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
             model.load_state_dict(checkpoint["state_dict"])
 
-        result: dict[str, Any] = {}
+        result: dict[str, Any] = {"elapsed_seconds": time.perf_counter() - job_start}
         if spec.eval_x is not None and spec.eval_y is not None:
             result["sse"] = _summed_squared_error(model, spec.eval_x, spec.eval_y)
         if spec.return_state:
