@@ -6,6 +6,7 @@ import pandas as pd
 import torch
 
 from constants import necessary_keys_scania
+from scania.metrics import scania_score
 from shared.utils import ModelVersion
 from shared.utils import necessary_keys as shared_necessary_keys
 from shared.utils.config import extract_data_from_config, assert_params_contains_all_key
@@ -246,9 +247,16 @@ def _scania_score(
     predictions: np.ndarray,
     targets: np.ndarray
 ) -> float:
-    a1 = 13
-    a2 = 10
-    error = predictions - targets
-    pos_e = np.exp(-error[error < 0] / a1) - 1
-    neg_e = np.exp(error[error >= 0] / a2) - 1
-    return sum(pos_e) + sum(neg_e)
+    """Total Scania cost of a set of RUL predictions (lower is better).
+
+    Thin alias kept so the existing importers (:mod:`scania.utils.utils_coprog`) and call sites
+    stay untouched; the metric itself lives in :mod:`scania.metrics`.
+
+    Args:
+        predictions: Predicted RUL in time steps.
+        targets: True RUL in time steps.
+
+    Returns:
+        The summed Scania cost.
+    """
+    return scania_score(predictions, targets)

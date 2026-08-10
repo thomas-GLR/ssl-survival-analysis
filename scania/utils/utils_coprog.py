@@ -263,7 +263,8 @@ def train_model(
         val_data=val_features,
         val_label=val_targets,
         # Per-stage metrics tracking (initial / iteration_k / final). The score columns use
-        # the Scania score; the reported weights use RMSE + "min", matching calculate_weights
+        # the class-based Scania cost (scania.metrics.scania_score); the reported weights use
+        # RMSE + "min", matching calculate_weights
         # below. Runs in the main process, so it is safe for the parallel training path too.
         test_data=test_features,
         test_label=test_targets,
@@ -365,15 +366,16 @@ def _criteria_callback_for_coprog(preds: torch.Tensor, target: torch.Tensor) -> 
 
 
 def _score_callback_for_coprog(preds: torch.Tensor, target: torch.Tensor) -> float:
-    """Scania score (a1=13, a2=10) for a prediction/target tensor pair.
+    """Scania cost for a prediction/target tensor pair.
 
-    Wraps the numpy-based :func:`_scania_score` so it can be used as the ``score_callback``
-    for Coprog's per-stage metrics (the ``test_score`` columns), matching the score reported
-    by :func:`generate_and_save_model_prediction`.
+    Wraps the numpy-based :func:`scania.metrics.scania_score` so it can be used as the
+    ``score_callback`` for the per-stage metrics of Coprog and the co-training ensembles (the
+    ``val_score`` / ``test_score`` columns), matching the score reported by
+    :func:`generate_and_save_model_prediction`.
 
     :param preds: Predicted RUL, shape (N,).
     :param target: True RUL, shape (N,).
-    :return: The Scania score as a Python float.
+    :return: The summed Scania cost as a Python float (lower is better).
     """
     return _scania_score(
         preds.detach().cpu().numpy().flatten(),

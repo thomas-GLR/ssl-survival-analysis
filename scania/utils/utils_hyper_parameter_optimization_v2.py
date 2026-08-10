@@ -18,7 +18,8 @@ configuration reuses those in-memory tensors.
 Everything else (model construction, output saving, the RMSE/score callbacks) is reused from
 :mod:`scania.utils.utils_cotraining_common`, :mod:`scania.utils.utils_coprog` and
 :mod:`scania.utils.utils_scania`, so a configuration's artifacts are laid out exactly like a
-single ``run_train_scania`` run.
+single ``run_train_scania`` run. Every ``*_score`` column of the summary is the class-based
+Scania cost (:mod:`scania.metrics`); the ``*_rmse`` columns are unaffected by it.
 """
 
 import copy
