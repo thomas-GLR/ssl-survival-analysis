@@ -22,7 +22,7 @@ from scania.utils.utils_scania import (
     create_and_get_checkpoints_results_path,
     save_train_parameters,
 )
-from shared.utils import ModelVersion
+from shared.utils import ModelVersion, set_seed
 
 
 def train_model(
@@ -172,6 +172,8 @@ def train_model(
     Returns:
         ``(rmse_weighted, score_weighted)`` of the weighted-ensemble test prediction.
     """
+    set_seed(seed)
+
     assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,
@@ -359,6 +361,7 @@ def train_model(
         weight_mode="min",
         metrics_file=f"{results_path}/{model_version.value}-per-stage-scania.csv",
         log_file=log_file_path,
+        pool_seed=seed,
     )
 
     ensemble.calculate_weights(

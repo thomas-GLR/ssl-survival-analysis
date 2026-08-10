@@ -14,6 +14,7 @@ from models.Simple_LSTM import Simple_LSTM
 from models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
 from C_MAPSS.utils import utils_cmapss
 from models import CNN1D
+from shared.utils import set_seed
 
 # For PyTorch 2.6+
 # We indicate to PyTorch that these classes are "safe" when loading checkpoints
@@ -58,6 +59,8 @@ def train_model(
         fc_layer_dim: int | None=None,
         fc_dropout: float | None=None,
 ) -> tuple[float, float]:
+    set_seed(seed)
+
     utils_cmapss.assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,

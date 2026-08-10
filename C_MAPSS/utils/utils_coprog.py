@@ -13,6 +13,7 @@ from C_MAPSS.lightning_module import TransformerLstmModule
 from models import CNN1D, Simple_LSTM
 from C_MAPSS.utils import utils_cmapss
 from models import Coprog
+from shared.utils import set_seed
 
 
 def train_model(
@@ -57,6 +58,8 @@ def train_model(
     percent_of_censored_data: float=0.9,
     datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
+    set_seed(seed)
+
     utils_cmapss.assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,

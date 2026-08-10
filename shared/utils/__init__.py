@@ -3,6 +3,7 @@ from shared.utils.config import extract_data_from_config, assert_params_contains
 from shared.utils.necessary_keys import (get_necessary_dataset_keys,
                                           get_necessary_model_keys,
                                           get_necessary_training_keys)
+from shared.utils.seed import set_seed
 
 __all__ = [
     "ModelVersion",
@@ -11,4 +12,5 @@ __all__ = [
     "get_necessary_dataset_keys",
     "get_necessary_model_keys",
     "get_necessary_training_keys",
+    "set_seed",
 ]
