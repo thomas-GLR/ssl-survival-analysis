@@ -49,7 +49,7 @@ from scania.utils.utils_scania import (
     override_dataset_params_from_cache_manifest,
     save_train_parameters,
 )
-from shared.utils import ModelVersion
+from shared.utils import ModelVersion, set_seed
 from shared.utils.config import assert_params_contains_all_key, extract_data_from_config
 
 MODEL_VERSION = ModelVersion.CO_TRAINING_ENSEMBLE_V2
@@ -617,8 +617,7 @@ def _build_ensemble(
         **constructor_kwargs,
     )
 
-    if seed is not None:
-        torch.manual_seed(seed)
+    set_seed(seed)
 
     ensemble.setup_training_builder(
         module_builders=module_builders,

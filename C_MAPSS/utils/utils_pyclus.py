@@ -9,6 +9,7 @@ from sklearn.model_selection import ParameterGrid, StratifiedKFold
 from dataset.PyclusDataset import PyclusDataset
 from models import SslPCT
 from C_MAPSS.utils import utils_cmapss
+from shared.utils import set_seed
 
 
 def train_model(
@@ -40,6 +41,8 @@ def train_model(
         device: str | None = None,
         datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float| None, float| None]:
+    set_seed(seed)
+
     utils_cmapss.assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,

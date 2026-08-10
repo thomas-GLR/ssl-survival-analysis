@@ -19,6 +19,7 @@ from models.CoTrainingEnsemble import CoTrainingEnsemble, SelectionMode
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2 as CoTrainingEnsembleV2
 from models.TransformerFeatures import TransformerFeatures
 from models.TransformerTimeSequence import TransformerTimeSequence
+from shared.utils import set_seed
 
 
 def train_model(
@@ -77,6 +78,8 @@ def train_model(
         device: str | None = None,
         datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
+    set_seed(seed)
+
     match selection_mode_str:
         case SelectionMode.VOTING.value:
             selection_mode = SelectionMode.VOTING
@@ -453,6 +456,8 @@ def train_model_v2(
     width of a conformal prediction interval (``crepes``) at the ``confidence`` level instead
     of by the retraining "delta".
     """
+    set_seed(seed)
+
     if (len(batchs_size) != 4
             or len(patiences) != 4
             or len(shuffle_dataloaders) != 4
@@ -650,6 +655,7 @@ def train_model_v2(
             weight_mode="min",
             metrics_file=os.path.join(results_path, "metrics_per_stage.csv"),
             log_file=log_file_path,
+            pool_seed=seed,
         )
 
         # Ensemble weights are computed on the validation set, not the test set,

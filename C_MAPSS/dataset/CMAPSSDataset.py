@@ -555,7 +555,7 @@ class CMAPSSDataset(Dataset):
 
             pct_to_keep = self.percent_of_broken_data
             if pct_to_keep is None:
-                pct_to_keep = np.random.default_rng().random()
+                pct_to_keep = np.random.random()
 
             num_rows_to_keep = max(1, int(pct_to_keep * len(unit_row_positions)))
             keep_mask[unit_row_positions[num_rows_to_keep:]] = False

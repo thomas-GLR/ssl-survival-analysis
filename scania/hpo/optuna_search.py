@@ -51,6 +51,10 @@ from scania.lightning_module.BasicLightningModule import BasicLightningModule
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 
+# Seed shared by the Optuna sampler and the vehicle split, so that both the sequence of
+# suggested trials and the data every trial sees are reproducible across HPO runs.
+HPO_SEED = 42
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Model registry
 # ──────────────────────────────────────────────────────────────────────────────
@@ -186,6 +190,9 @@ def _build_datamodule_cached(
     # never used. num_workers=0 is deliberate: the datasets are fully in-memory
     # TensorDatasets, and worker subprocesses leak across trials (they eventually
     # crash with "can only test a child process").
+    # seed=HPO_SEED (not the ScaniaDataModule default of None): without it the vehicle split
+    # is drawn from an unseeded RNG and, worse, `seed: null` lands in the cache manifest, so a
+    # cache written from a *different* random split still validates on the next run.
     dm = ScaniaDataModule(
         data_dir=data_dir,
         batch_size=None,
@@ -194,6 +201,7 @@ def _build_datamodule_cached(
         cache_dir=sub_cache_dir,
         num_workers=0,
         pin_memory=False,
+        seed=HPO_SEED,
     )
     dm.setup()
 
@@ -387,7 +395,7 @@ def run_search(
     study_name = study_name or f"{model_name}_scania"
 
     # TPE + Hyperband: efficient for single-objective search on a limited budget.
-    sampler = optuna.samplers.TPESampler(seed=42)
+    sampler = optuna.samplers.TPESampler(seed=HPO_SEED)
     pruner = optuna.pruners.HyperbandPruner(
         min_resource=10,
         max_resource=max_epochs,

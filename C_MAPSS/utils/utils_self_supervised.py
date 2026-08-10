@@ -15,6 +15,7 @@ from C_MAPSS.lightning_module.BaselineModule import BaselineModule
 from C_MAPSS.lightning_module.MetricPretrainingModule import MetricPretrainingModule
 from dataset.SiamesedDataset import SiameseDataset
 from C_MAPSS.utils import utils_cmapss
+from shared.utils import set_seed
 
 
 def train_self_supervised(
@@ -63,6 +64,8 @@ def train_self_supervised(
         device: str | None=None,
         datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 ) -> tuple[float, float]:
+    set_seed(seed)
+
     utils_cmapss.assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,

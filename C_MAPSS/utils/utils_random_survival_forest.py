@@ -11,6 +11,7 @@ from sksurv.ensemble import RandomSurvivalForest
 
 from dataset.ScikitDataset import ScikitDataset
 from C_MAPSS.utils import utils_cmapss
+from shared.utils import set_seed
 
 
 def train_model(
@@ -41,6 +42,8 @@ def train_model(
         variance_warning_threshold: float = 0.05,  # Threshold for stability warning
         datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float| None, float| None]:
+    set_seed(seed)
+
     rsf = RandomSurvivalForest(
         n_jobs=-1,
         random_state=seed,

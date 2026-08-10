@@ -20,7 +20,7 @@ from scania.utils.utils_scania import (
     generate_and_save_model_prediction,
     _scania_score,
 )
-from shared.utils import ModelVersion
+from shared.utils import ModelVersion, set_seed
 
 
 def train_model(
@@ -60,6 +60,8 @@ def train_model(
     gpu_ids: list[int] | None = None,
     datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
+    set_seed(seed)
+
     assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,

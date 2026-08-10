@@ -13,6 +13,7 @@ from sksurv.ensemble import RandomSurvivalForest
 from dataset.ScikitDataset import ScikitDataset
 from scania.dataset import ScaniaDataModule
 from scania.utils.utils_scania import assert_data_is_valid, create_and_get_checkpoints_results_path
+from shared.utils import set_seed
 
 
 def train_model(
@@ -44,6 +45,8 @@ def train_model(
         variance_warning_threshold: float = 0.05,  # Threshold for stability warning
         datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ):
+    set_seed(seed)
+
     assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,

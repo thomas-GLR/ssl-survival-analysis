@@ -16,7 +16,7 @@ from scania.utils.utils_scania import (
     save_train_parameters,
     generate_and_save_model_prediction
 )
-from shared.utils import ModelVersion
+from shared.utils import ModelVersion, set_seed
 
 
 def train_model(
@@ -58,6 +58,7 @@ def train_model(
         force_load_from_cache: bool = False,
         datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 ) -> tuple[float, float]:
+    set_seed(seed)
 
     assert_data_is_valid(
         checkpoints_path=checkpoints_path,
