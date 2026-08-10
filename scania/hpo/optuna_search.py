@@ -12,7 +12,8 @@ Design (mirrors ``C_MAPSS/hpo/optuna_search.py`` but adapted to Scania):
     ``nn.Module``).
   - Single-objective only: minimise ``val_rmse`` with a TPE sampler and Hyperband
     pruning. ``val_score`` / ``test_rmse`` / ``test_score`` are recorded as trial
-    user-attrs for inspection but never optimised.
+    user-attrs for inspection but never optimised. The ``*_score`` attrs hold the
+    class-based Scania cost (:mod:`scania.metrics`), not an RMSE-like quantity.
   - Scania has no sub-datasets (unlike CMAPSS FD001-FD004), so there is a single
     study per model; ``input_size`` (feature count) is read from the data module
     at runtime rather than hard-coded.

@@ -12,6 +12,7 @@ from sksurv.ensemble import RandomSurvivalForest
 
 from dataset.ScikitDataset import ScikitDataset
 from scania.dataset import ScaniaDataModule
+from scania.metrics import scania_score
 from scania.utils.utils_scania import assert_data_is_valid, create_and_get_checkpoints_results_path
 from shared.utils import set_seed
 
@@ -294,12 +295,3 @@ def calculate_safe_cv_folds(
         return safe_folds
 
     return requested_folds
-
-
-def scania_score(predict: np.ndarray, label: np.ndarray) -> float:
-    a1 = 13
-    a2 = 10
-    error = predict - label
-    pos_e = np.exp(-error[error < 0] / a1) - 1
-    neg_e = np.exp(error[error >= 0] / a2) - 1
-    return sum(pos_e) + sum(neg_e)

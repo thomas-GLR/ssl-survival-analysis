@@ -1,18 +1,10 @@
-import numpy as np
 import torch
 import torch.nn as nn
 from lightning import LightningModule
 from torch.nn import functional as F
 from torchmetrics.functional import mean_squared_error
 
-
-def _cmapss_score(predict: np.ndarray, label: np.ndarray) -> float:
-    a1 = 13
-    a2 = 10
-    error = predict - label
-    pos_e = np.exp(-error[error < 0] / a1) - 1
-    neg_e = np.exp(error[error >= 0] / a2) - 1
-    return sum(pos_e) + sum(neg_e)
+from scania.metrics import scania_score
 
 
 class BasicLightningModule(LightningModule):
@@ -250,7 +242,7 @@ class BasicLightningModule(LightningModule):
 
         np_outputs, np_targets = outputs.cpu().numpy(), targets.cpu().numpy()
 
-        score = _cmapss_score(np_outputs, np_targets)
+        score = scania_score(np_outputs, np_targets)
 
         self.test_step_outputs.clear()
         self.test_step_targets.clear()
@@ -262,7 +254,7 @@ class BasicLightningModule(LightningModule):
         targets = torch.stack(self.validation_step_targets)
 
         rmse = mean_squared_error(outputs, targets, squared=False)
-        score = _cmapss_score(outputs.cpu().numpy().flatten(), targets.cpu().numpy().flatten())
+        score = scania_score(outputs.cpu().numpy().flatten(), targets.cpu().numpy().flatten())
 
         self.validation_step_outputs.clear()
         self.validation_step_targets.clear()

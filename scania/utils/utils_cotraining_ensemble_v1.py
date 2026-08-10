@@ -239,8 +239,9 @@ def train_model(
         add_ratio=add_ratio,
         val_data=val_features,
         val_label=val_targets,
-        # Per-stage metrics (initial / iteration_k / final). The score columns use the Scania
-        # score, while the reported weights use RMSE + "min" (matching calculate_weights below).
+        # Per-stage metrics (initial / iteration_k / final). The score columns use the
+        # class-based Scania cost (scania.metrics.scania_score), while the reported weights use
+        # RMSE + "min" (matching calculate_weights below).
         # Runs in the main process (safe for the parallel path).
         test_data=test_features,
         test_label=test_targets,

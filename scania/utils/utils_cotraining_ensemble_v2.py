@@ -352,8 +352,9 @@ def train_model(
         val_label=val_targets,
         calib_data=calib_features,
         calib_label=calib_targets,
-        # Per-stage metrics: the score columns use the Scania score, while the reported
-        # weights use RMSE + "min" (matching calculate_weights below).
+        # Per-stage metrics: the score columns use the class-based Scania cost
+        # (scania.metrics.scania_score), while the reported weights use RMSE + "min"
+        # (matching calculate_weights below) -- the cost is reported, never used for selection.
         test_data=test_features,
         test_label=test_targets,
         score_callback=_score_callback_for_coprog,
