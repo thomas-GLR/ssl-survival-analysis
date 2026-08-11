@@ -104,6 +104,7 @@ class ScaniaDataModule(LightningDataModule):
             counter_mode: str = "cumulative",
             include_histograms: bool = False,
             histogram_mode: str = "sum",
+            pad_mode: str = "edge",
             force_load_from_cache: bool = False,
     ):
         super().__init__()
@@ -117,6 +118,10 @@ class ScaniaDataModule(LightningDataModule):
         assert 0 < data_fraction <= 1.0, "data_fraction must be in (0, 1]"
         assert histogram_mode in ("sum", "zhist"), \
             f"Unsupported histogram_mode: {histogram_mode}"
+        # Only the window-padding convention for vehicles shorter than sequence_len; see
+        # ScaniaDataset.__init__. It changes nothing on disk, so a 'nan' run and an 'edge' run
+        # share the same cache and therefore the same vehicles.
+        assert pad_mode in ("edge", "nan"), f"Unsupported pad_mode: {pad_mode}"
 
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -138,6 +143,7 @@ class ScaniaDataModule(LightningDataModule):
         self.counter_mode = counter_mode
         self.include_histograms = include_histograms
         self.histogram_mode = histogram_mode
+        self.pad_mode = pad_mode
         self.force_load_from_cache = force_load_from_cache
 
         self._derive_feature_columns()
@@ -232,6 +238,7 @@ class ScaniaDataModule(LightningDataModule):
             "histogram_mode": self.histogram_mode,
             "raw_histogram_cols": self._raw_histogram_cols,
             "return_sequence_label": self.return_sequence_label,
+            "pad_mode": self.pad_mode,
             "seed": self.seed,
         }
 

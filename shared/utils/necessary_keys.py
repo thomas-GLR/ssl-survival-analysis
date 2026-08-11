@@ -29,6 +29,8 @@ def get_necessary_dataset_keys(model_version: ModelVersion, necessary_keys_modul
             return necessary_keys_module.NECESSARY_DATASET_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
             return necessary_keys_module.NECESSARY_DATASET_TRANSFORMER_TIME_SEQUENCE_KEYS
+        case ModelVersion.DYNAMIC_DEEPHIT:
+            return necessary_keys_module.NECESSARY_DATASET_DYNAMIC_DEEPHIT_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
@@ -59,6 +61,8 @@ def get_necessary_model_keys(model_version: ModelVersion, necessary_keys_module:
             return necessary_keys_module.NECESSARY_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
             return necessary_keys_module.NECESSARY_TRANSFORMER_TIME_SEQUENCE_KEYS
+        case ModelVersion.DYNAMIC_DEEPHIT:
+            return necessary_keys_module.NECESSARY_DYNAMIC_DEEPHIT_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
@@ -89,5 +93,7 @@ def get_necessary_training_keys(model_version: ModelVersion, necessary_keys_modu
             return necessary_keys_module.NECESSARY_TRAINING_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
             return necessary_keys_module.NECESSARY_TRAINING_TRANSFORMER_TIME_SEQUENCE_KEYS
+        case ModelVersion.DYNAMIC_DEEPHIT:
+            return necessary_keys_module.NECESSARY_TRAINING_DYNAMIC_DEEPHIT_KEYS
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")

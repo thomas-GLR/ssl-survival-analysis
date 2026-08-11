@@ -14,3 +14,4 @@ class ModelVersion(Enum):
     CO_TRAINING_ENSEMBLE_V2 = "co_training_ensemble_v2"
     TRANSFORMER_FEATURES = "transformer_features"
     TRANSFORMER_TIME_SEQUENCE = "transformer_time_sequence"
+    DYNAMIC_DEEPHIT = "dynamic_deephit"
