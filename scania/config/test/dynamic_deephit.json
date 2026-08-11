@@ -1,0 +1,42 @@
+{
+  "dataset_params": {
+    "seed": 42,
+    "data_fraction": 0.2,
+    "val_rate": 0.15,
+    "test_rate": 0.15,
+    "stratify": true,
+    "norm_type": "z-score",
+    "counter_mode": "both",
+    "include_histograms": false,
+    "histogram_mode": "zhist"
+  },
+  "training_params": {
+    "mb_size": 32,
+    "burn_in_mode": true,
+    "iteration_burn_in": 20,
+    "iteration": 50,
+    "keep_prob": 0.6,
+    "lr_train": 0.0001,
+    "alpha": 1.0,
+    "beta": 0.1,
+    "gamma": 1.0,
+    "eval_every": 25,
+    "num_category_bins": 12,
+    "use_gpu": true,
+    "c_index_time_quantiles": [0.5, 0.75, 0.9],
+    "c_index_max_vehicles": 500,
+    "inference_batch_size": 64
+  },
+  "model_params": {
+    "h_dim_RNN": 16,
+    "h_dim_FC": 16,
+    "num_layers_RNN": 1,
+    "num_layers_ATT": 1,
+    "num_layers_CS": 1,
+    "RNN_type": "LSTM",
+    "FC_active_fn": "relu",
+    "RNN_active_fn": "tanh",
+    "reg_W": 1e-5,
+    "reg_W_out": 0.0
+  }
+}

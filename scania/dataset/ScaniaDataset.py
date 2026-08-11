@@ -25,6 +25,14 @@ Scania specifics vs C_MAPSS:
   internally by ``ScaniaDataModule``, never exposed publicly), so evaluation
   sees exactly one window per vehicle -- its last, possibly truncated,
   readout -- instead of every sliding-window stride.
+- Vehicles with fewer readouts than ``sequence_len`` -- the *majority* of the
+  Scania fleet, whose median series is 43 readouts long -- are padded up to the
+  window length. ``pad_mode`` picks the convention (see ``_get_window``):
+  ``'edge'`` (the default, what every model in this repository except Dynamic
+  DeepHit expects) repeats the first real readout on the **left**, so the
+  window's last row is always the vehicle's newest readout; ``'nan'`` puts the
+  real readouts first and fills the tail with **NaN**, which is what an
+  RNN reading its own padding mask needs.
 """
 
 import numpy as np
@@ -332,6 +340,7 @@ class ScaniaDataset(Dataset):
             return_sequence_label: bool = False,
             return_id: bool = False,
             only_final: bool = False,
+            pad_mode: str = "edge",
             seed: int | None = None,
     ):
         """
@@ -340,8 +349,8 @@ class ScaniaDataset(Dataset):
             ``vehicle_id``, ``time_step``, the feature columns,
             ``length_of_study_time_step`` and ``is_censored``.
         :param sequence_len:
-            Length of the sliding time window (stride 1). Short vehicles are
-            left-edge-padded, same convention as CMAPSSDataset.
+            Length of the sliding time window (stride 1). Vehicles shorter than
+            this are padded up to it according to ``pad_mode``.
         :param feature_cols:
             Feature columns to use. Defaults to ``COUNTER_COLUMNS``.
         :param norm_type:
@@ -392,6 +401,16 @@ class ScaniaDataset(Dataset):
             stride. Mirrors CMAPSS's ``only_final``. This is an internal
             flag: ``ScaniaDataModule`` sets it (only for its test split); it
             is never part of the module's public config surface.
+        :param pad_mode:
+            How windows of vehicles with fewer than ``sequence_len`` readouts
+            are filled out. ``'edge'`` (default) repeats the first real readout
+            on the left, so the real rows end the window; ``'nan'`` left-aligns
+            the real rows and fills the tail with NaN. Only pick ``'nan'`` for a
+            model that detects and masks NaN steps itself -- Dynamic DeepHit
+            does (``ddh_torch.DynamicDeepHitTorch.forward`` reads NaN in feature
+            column 0 as padding), every other model in this repository would
+            propagate the NaN straight into its loss. Incompatible with
+            ``return_sequence_label``: the per-step labels stay right-aligned.
         :param seed:
             Seeds numpy for reproducibility.
         """
@@ -404,6 +423,12 @@ class ScaniaDataset(Dataset):
 
         assert norm_type in (None, "z-score"), f"Unsupported norm_type: {norm_type}"
         assert histogram_mode in ("sum", "zhist"), f"Unsupported histogram_mode: {histogram_mode}"
+        assert pad_mode in ("edge", "nan"), f"Unsupported pad_mode: {pad_mode}"
+        # In 'nan' mode the real readouts move to the FRONT of the window, while the per-step
+        # labels built by _gen_sequence stay left-edge-padded (i.e. right-aligned). Refusing the
+        # combination outright is cheaper than silently mis-pairing features and labels.
+        assert not (pad_mode == "nan" and return_sequence_label), \
+            "pad_mode='nan' is incompatible with return_sequence_label=True"
 
         self.df = data_df.copy()
         self.sequence_len = sequence_len
@@ -422,12 +447,14 @@ class ScaniaDataset(Dataset):
         self.return_sequence_label = return_sequence_label
         self.return_id = return_id
         self.only_final = only_final
+        self.pad_mode = pad_mode
 
         # Lazy windowing state populated by _gen_sequence(). Instead of a dense
         # (n_windows, seq_len, n_feat) array (which explodes to tens of GB once
         # histograms push n_feat to ~105), we keep the flat per-row feature
         # matrix once and the per-window start/length; each window is sliced (and
-        # edge-padded for short vehicles) on demand in _get_window/_build_windows.
+        # padded per pad_mode for short vehicles) on demand in
+        # _get_window/_build_windows.
         self._feat_flat: np.ndarray | None = None   # (rows, n_feat) float32
         self._win_start: np.ndarray | None = None   # (N,) int64
         self._win_count: np.ndarray | None = None   # (N,) int32
@@ -569,7 +596,9 @@ class ScaniaDataset(Dataset):
         The index math is identical to the previous eager implementation: sort
         once, find contiguous per-vehicle boundaries, take every long-vehicle
         stride whose first and last row share a vehicle, and give each short
-        vehicle a single left-edge-padded window. ``only_final`` still filters
+        vehicle a single padded window (``pad_mode`` decides how, at
+        materialization time -- this method only records the real length in
+        ``_win_count``). ``only_final`` still filters
         the long branch to each vehicle's final window. The small metadata
         arrays (``label_array`` / ``lower_bound_array`` / ``id_array`` /
         ``is_censored_array``) are built eagerly, long-then-short, so they are
@@ -683,16 +712,43 @@ class ScaniaDataset(Dataset):
     def _get_window(self, i: int) -> np.ndarray:
         """Return window ``i`` as a ``(seq_len, n_feat)`` float32 array.
 
-        Long-vehicle windows are a contiguous slice of ``_feat_flat``; short
-        vehicles (fewer real rows than ``seq_len``) are left-edge-padded, exactly
-        reproducing the previous eager windowing.
+        Long-vehicle windows are a contiguous slice of ``_feat_flat`` and are
+        identical under both padding modes. Short vehicles (fewer real rows than
+        ``seq_len``) are filled out according to ``pad_mode``, which decides
+        *where the real readouts sit* in the window:
+
+        ``'edge'`` (default) repeats the first real readout on the left::
+
+            [r0 r0 r0 | r0 r1 r2 r3]   real rows END the window
+
+        so the window's last row is always the vehicle's newest readout --
+        exactly reproducing the original eager windowing, and what every model
+        that reads ``x[:, -1]`` as "now" relies on.
+
+        ``'nan'`` left-aligns the real readouts and fills the tail with NaN::
+
+            [r0 r1 r2 r3 | nan nan nan]   real rows START the window
+
+        which is the layout an RNN with a padding mask expects (Dynamic
+        DeepHit's ``forward`` recovers the real length as
+        ``(~isnan(x[:, :, 0])).sum(1)`` and takes its "now" row from there). The
+        whole row is NaN, not just column 0, so nothing downstream can read a
+        pad step as data.
+
+        Either way the window's label/lower-bound/time-step metadata was taken
+        at the vehicle's true final row in ``_gen_sequence``, so the target is
+        unaffected by which end the padding lands on.
         """
         start = int(self._win_start[i])
         count = int(self._win_count[i])
         block = self._feat_flat[start: start + count]
-        if count < self.sequence_len:
-            block = np.pad(block, ((self.sequence_len - count, 0), (0, 0)), "edge")
-        return block
+        if count == self.sequence_len:
+            return block
+        if self.pad_mode == "nan":
+            pads = np.full(
+                (self.sequence_len - count, block.shape[1]), np.nan, dtype=block.dtype)
+            return np.concatenate([block, pads], axis=0)
+        return np.pad(block, ((self.sequence_len - count, 0), (0, 0)), "edge")
 
     def _build_windows(self, indices: np.ndarray) -> np.ndarray:
         """Materialize a ``(len(indices), seq_len, n_feat)`` float32 array.
@@ -700,7 +756,8 @@ class ScaniaDataset(Dataset):
         Used by the accessors that hand whole tensors to the co-training /
         self-supervised paradigms. Long windows are filled from a
         ``sliding_window_view`` in chunks so the transient copy stays small (it
-        does not double the output); short windows are filled individually.
+        does not double the output); short windows are filled individually
+        through :meth:`_get_window`, so they honour ``pad_mode``.
 
         :param indices: window indices to materialize (order preserved).
         :return: dense windows for exactly those indices.

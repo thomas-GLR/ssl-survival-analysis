@@ -26,6 +26,8 @@ from scania.utils.utils_random_survival_forest import train_model as train_model
 from scania.utils.utils_coprog import train_model as train_model_coprog
 from scania.utils.utils_cotraining_ensemble_v1 import train_model as train_model_cotraining_ensemble
 from scania.utils.utils_cotraining_ensemble_v2 import train_model as train_model_cotraining_ensemble_v2
+from scania.utils.utils_dynamic_deephit import import_dynamic_deephit
+from scania.utils.utils_dynamic_deephit import train_model as train_model_dynamic_deephit
 from scania.utils.utils_hyper_parameter_optimization_v2 import (
     HPO_CONFIG_FILE,
     build_configurations,
@@ -47,6 +49,8 @@ __all__ = [
     "train_model_coprog",
     "train_model_cotraining_ensemble",
     "train_model_cotraining_ensemble_v2",
+    "train_model_dynamic_deephit",
+    "import_dynamic_deephit",
     "generate_and_save_model_prediction",
     "run_hyper_parameter_optimization",
     "build_configurations",

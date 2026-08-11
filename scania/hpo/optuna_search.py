@@ -466,7 +466,12 @@ def summary_table(study: optuna.Study) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def save_study_results(study: optuna.Study, model_name: str, output_dir: str) -> None:
+def save_study_results(
+    study: optuna.Study,
+    model_name: str,
+    output_dir: str,
+    extra_user_attrs: Optional[list[str]] = None,
+) -> None:
     """Save all completed trials and the best params of a study to ``output_dir``.
 
     Files written:
@@ -476,6 +481,9 @@ def save_study_results(study: optuna.Study, model_name: str, output_dir: str) ->
     :param study: a completed Optuna study.
     :param model_name: registered model name (used in the filenames).
     :param output_dir: directory to write the result files to.
+    :param extra_user_attrs: names of additional trial user-attrs to add as columns, after the four
+        metric columns. Missing attrs become NaN, so a study that did not record them still writes.
+        Used by the Dynamic DeepHit search for ``n_time_bins`` and the resolved head layer lists.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -492,6 +500,8 @@ def save_study_results(study: optuna.Study, model_name: str, output_dir: str) ->
         row["val_score"] = t.user_attrs.get("val_score", float("nan"))
         row["test_rmse"] = t.user_attrs.get("test_rmse", float("nan"))
         row["test_score"] = t.user_attrs.get("test_score", float("nan"))
+        for attr in extra_user_attrs or []:
+            row[attr] = t.user_attrs.get(attr, float("nan"))
         rows.append(row)
 
     trials_path = os.path.join(output_dir, f"{model_name}_trials.csv")
