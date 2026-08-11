@@ -11,6 +11,7 @@ from torch import nn
 from constants import necessary_keys_scania
 from models import CNN1D, Simple_LSTM, TransformerFeatures, TransformerTimeSequence
 from models import Coprog
+from scania.challenge import run_challenge_evaluation
 from scania.dataset import ScaniaDataModule
 from scania.lightning_module import BasicLightningModule
 from scania.utils.utils_scania import (
@@ -353,6 +354,28 @@ def train_model(
 
     # Save the results
     scores.to_csv(f'{results_path}/{model_version.value}-scania.csv', index=False)
+
+    # Additionally score every predictor on the official Scania Component X held-out sets (test
+    # and validation). Never raises: the run's own results are already written by the time this
+    # runs.
+    challenge_predict_fn = lambda features: {
+        "weighted": coprog.predict(features),
+        "h1": coprog.prediction_for_first_model(features),
+        "h2": coprog.prediction_for_second_model(features),
+    }
+    run_challenge_evaluation(
+        data_module=scania_data_module,
+        predict_fn=challenge_predict_fn,
+        model_version=model_version.value,
+        results_path=results_path,
+    )
+    run_challenge_evaluation(
+        data_module=scania_data_module,
+        predict_fn=challenge_predict_fn,
+        model_version=model_version.value,
+        results_path=results_path,
+        split="validation",
+    )
 
     return rmse_weighted, score_weighted
 

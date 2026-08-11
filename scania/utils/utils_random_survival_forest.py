@@ -11,10 +11,11 @@ from sklearn.model_selection import GridSearchCV, StratifiedKFold, cross_val_sco
 from sksurv.ensemble import RandomSurvivalForest
 
 from dataset.ScikitDataset import ScikitDataset
+from scania.challenge import run_challenge_evaluation_rowwise
 from scania.dataset import ScaniaDataModule
 from scania.metrics import scania_score
 from scania.utils.utils_scania import assert_data_is_valid, create_and_get_checkpoints_results_path
-from shared.utils import set_seed
+from shared.utils import ModelVersion, set_seed
 
 
 def train_model(
@@ -169,12 +170,7 @@ def train_model(
         best_rsf.fit(train_X, train_Y)
 
     # --- Predictions and evaluations ---
-    survival_funcs = best_rsf.predict_survival_function(test_X)
-    predicted_total_times = []
-    for fn in survival_funcs:
-        predicted_total_times.append(np.trapezoid(fn.y, fn.x))
-
-    predicted_ruls = np.array(predicted_total_times) - test_Y['Time']
+    predicted_ruls = _predict_rul(best_rsf, test_X, test_Y['Time'])
 
     rmse = float(np.sqrt(mean_squared_error(test_dataset.rul, predicted_ruls)))
     score = float(scania_score(predicted_ruls, test_dataset.rul))
@@ -203,7 +199,57 @@ def train_model(
         with open(summary_file_path, "w", encoding="utf-8") as f:
             json.dump(run_summary, f, indent=4)
 
+    # `reproduce_result` passes a ModelVersion here despite the `str` annotation, and it is a
+    # plain Enum, so formatting it directly yields "ModelVersion.RSF". Take the value so the
+    # challenge files are named like every other model's ("rsf-challenge-scania.csv").
+    model_version_name = (
+        model_version.value if isinstance(model_version, ModelVersion) else model_version)
+
+    # Additionally score the forest on the official Scania Component X held-out sets (test and
+    # validation), one row per vehicle. Never raises: the run's own results are already written by
+    # the time this runs.
+    challenge_predict_rul_fn = lambda challenge: _predict_rul(
+        best_rsf, challenge.X, challenge.Y['Time'])
+    run_challenge_evaluation_rowwise(
+        data_module=scania_data_module,
+        predict_rul_fn=challenge_predict_rul_fn,
+        model_version=model_version_name,
+        results_path=final_results_path,
+    )
+    run_challenge_evaluation_rowwise(
+        data_module=scania_data_module,
+        predict_rul_fn=challenge_predict_rul_fn,
+        model_version=model_version_name,
+        results_path=final_results_path,
+        split="validation",
+    )
+
     return rmse, score
+
+
+def _predict_rul(
+        model: RandomSurvivalForest,
+        features: ndarray,
+        elapsed_times: ndarray,
+) -> ndarray:
+    """Predict a remaining useful life per row from a fitted Random Survival Forest.
+
+    RSF models the survival function, not the RUL: the area under a row's predicted survival curve
+    is its expected **total** lifetime, so the remaining life is that minus the time already
+    observed.
+
+    Args:
+        model: A fitted ``RandomSurvivalForest``.
+        features: ``(n_rows, n_features)`` feature matrix.
+        elapsed_times: ``(n_rows,)`` observed time of each row (the survival ``Time`` field).
+
+    Returns:
+        The predicted RUL of every row, in time steps.
+    """
+    survival_funcs = model.predict_survival_function(features)
+    predicted_total_times = [np.trapezoid(fn.y, fn.x) for fn in survival_funcs]
+
+    return np.array(predicted_total_times) - elapsed_times
 
 
 def select_best_params(

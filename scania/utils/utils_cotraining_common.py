@@ -33,6 +33,8 @@ from lightning import LightningModule
 from torch import nn
 
 from constants import necessary_keys_scania
+from scania.challenge import run_challenge_evaluation
+from scania.dataset import ScaniaDataModule
 from scania.lightning_module import BasicLightningModule
 from scania.utils.utils_coprog import _build_scania_module, _creating_model
 from scania.utils.utils_scania import generate_and_save_model_prediction
@@ -509,6 +511,7 @@ def save_ensemble_outputs(
         model_specs: list[dict] | None = None,
         training_time_seconds: float | None = None,
         avg_iteration_time_seconds: float | None = None,
+        data_module: ScaniaDataModule | None = None,
 ) -> tuple[float, float]:
     """Save trained models, per-model + weighted prediction CSVs, and a summary scores CSV.
 
@@ -537,6 +540,11 @@ def save_ensemble_outputs(
         avg_iteration_time_seconds: Mean wall-clock duration of one co-training iteration,
             written as the ``avg_iteration_time_seconds`` column. ``None`` (default) leaves the
             cell empty — v1 does not track per-iteration durations.
+        data_module: The run's ``ScaniaDataModule``. When given, the ensemble is additionally
+            scored on the official Scania Component X held-out set (see
+            :mod:`scania.challenge`), which writes ``<mv>-challenge-scania.csv`` and one
+            ``predictions_<mv>_challenge_<name>_scania.csv`` per predictor. ``None`` (default)
+            skips that step.
 
     Returns:
         ``(rmse_weighted, score_weighted)`` for the weighted-ensemble prediction.
@@ -605,5 +613,28 @@ def save_ensemble_outputs(
     scores = pd.DataFrame(columns=columns)
     scores.loc[0] = row
     scores.to_csv(f"{results_path}/{model_version.value}-scania.csv", index=False)
+
+    # Additionally score every predictor on the official Scania Component X held-out sets (test
+    # and validation). One forward pass over the challenge windows serves all n + 1 predictors.
+    # Never raises: the run's own results are already written by the time this runs.
+    if data_module is not None:
+        challenge_predict_fn = lambda features: {
+            "weighted": ensemble.predict(features),
+            **{f"h{i}": prediction
+               for i, prediction in enumerate(ensemble.predict_per_model(features))},
+        }
+        run_challenge_evaluation(
+            data_module=data_module,
+            predict_fn=challenge_predict_fn,
+            model_version=model_version.value,
+            results_path=results_path,
+        )
+        run_challenge_evaluation(
+            data_module=data_module,
+            predict_fn=challenge_predict_fn,
+            model_version=model_version.value,
+            results_path=results_path,
+            split="validation",
+        )
 
     return rmse_weighted, score_weighted

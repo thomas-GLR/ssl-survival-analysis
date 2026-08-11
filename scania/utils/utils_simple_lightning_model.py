@@ -8,6 +8,7 @@ from lightning.pytorch import callbacks
 
 from models import TransformerEncoder_LSTM_1, Simple_LSTM, CNN1D, TransformerFeatures
 from models.TransformerTimeSequence import TransformerTimeSequence
+from scania.challenge import run_challenge_evaluation
 from scania.dataset import ScaniaDataModule
 from scania.lightning_module.BasicLightningModule import BasicLightningModule
 from scania.utils.utils_scania import (
@@ -316,6 +317,26 @@ def train_model(
     predictions = torch.cat([preds for preds, _ in outputs])
     targets = torch.cat([y for _, y in outputs])
 
+    # Additionally score the trained model on the official Scania Component X held-out sets (test
+    # and validation). Never raises: the run's own results are already written by the time this
+    # runs.
+    challenge_predict_fn = lambda features: {
+        "test": _predict_challenge(lightning_module_with_trained_model, features, batch_size),
+    }
+    run_challenge_evaluation(
+        data_module=scania_data_module,
+        predict_fn=challenge_predict_fn,
+        model_version=model_version.value,
+        results_path=results_path,
+    )
+    run_challenge_evaluation(
+        data_module=scania_data_module,
+        predict_fn=challenge_predict_fn,
+        model_version=model_version.value,
+        results_path=results_path,
+        split="validation",
+    )
+
     return generate_and_save_model_prediction(
         predictions=predictions,
         targets=targets,
@@ -323,3 +344,31 @@ def train_model(
         prediction_type="test",
         results_path=results_path,
     )
+
+
+def _predict_challenge(
+        lightning_module: BasicLightningModule,
+        features: torch.Tensor,
+        batch_size: int,
+) -> torch.Tensor:
+    """Predict RUL for the challenge windows in batches, on the module's own device.
+
+    ``BasicLightningModule.forward`` de-normalizes, so the returned values are already in real RUL
+    units. Batched because the held-out set is one window per vehicle for ~5000 vehicles and the
+    module may sit on a GPU with little headroom left after training.
+
+    Args:
+        lightning_module: The trained, ``eval()``-ed module.
+        features: ``(N, sequence_len, n_features)`` challenge windows, on CPU.
+        batch_size: Inference batch size.
+
+    Returns:
+        A ``(N,)`` CPU tensor of de-normalized RUL predictions.
+    """
+    device = next(lightning_module.parameters()).device
+    predictions = []
+    with torch.no_grad():
+        for start in range(0, len(features), batch_size):
+            chunk = features[start:start + batch_size].to(device)
+            predictions.append(lightning_module(chunk).detach().cpu())
+    return torch.cat(predictions).view(-1)

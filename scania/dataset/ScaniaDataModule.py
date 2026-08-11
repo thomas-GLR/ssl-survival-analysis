@@ -1,10 +1,15 @@
 """
 LightningDataModule for the Scania Component X dataset.
 
-Uses only the training files (``train_operational_readouts.csv`` +
-``train_tte.csv``) and produces train/val/test splits *by vehicle* out of them
-(the standalone ``validation_*`` / ``test_*`` files and ``train_specifications``
-are intentionally ignored).
+The train/val/test splits are produced *by vehicle* out of the training files only
+(``train_operational_readouts.csv`` + ``train_tte.csv``); the ``validation_*`` files and
+``train_specifications`` are intentionally ignored, and so is ``test_tte``-style information
+(there is none -- the held-out files ship failure *classes*, not a time-to-event).
+
+``build_challenge_dataset()`` is the one exception: it reads the official held-out
+``test_operational_readouts.csv`` through the same feature engineering and the same train-fitted
+normalization, so a trained run can be scored on the real Scania Component X test set. It is not
+part of the split matrix and is never cached.
 
 Pipeline (see the project plan for the rationale):
     1. read the two train files, keep vehicle_id + time_step + counter columns
@@ -67,6 +72,14 @@ READOUTS_FILE = "train_operational_readouts.csv"
 TTE_FILE = "train_tte.csv"
 MANIFEST_FILE = "manifest.json"
 BASE_SPLITS = ("train", "val", "test")
+
+# The official Scania Component X held-out readouts. Not part of the train/val/test split above --
+# see :meth:`ScaniaDataModule.build_challenge_dataset`.
+CHALLENGE_READOUTS_FILE = "test_operational_readouts.csv"
+# The official Scania Component X held-out validation readouts -- a second, disjoint held-out
+# population, scored the same way as CHALLENGE_READOUTS_FILE. See
+# :meth:`ScaniaDataModule.build_validation_challenge_dataset`.
+VALIDATION_CHALLENGE_READOUTS_FILE = "validation_operational_readouts.csv"
 
 
 class ScaniaDataModule(LightningDataModule):
@@ -133,6 +146,11 @@ class ScaniaDataModule(LightningDataModule):
         self.val_set: ScaniaDataset | None = None
         self.test_set: ScaniaDataset | None = None
         self.calib_set: ScaniaDataset | None = None
+        # Built lazily (and once) by build_challenge_dataset(); not part of the split matrix.
+        self.challenge_set: ScaniaDataset | None = None
+        # Built lazily (and once) by build_validation_challenge_dataset(); not part of the split
+        # matrix either, and independent of challenge_set (different held-out population).
+        self.validation_challenge_set: ScaniaDataset | None = None
         self.norm_params: np.ndarray | None = None
         self.hist_norm_params: dict[str, float] | None = None
         self.zhist_norm_params: dict | None = None
@@ -217,22 +235,45 @@ class ScaniaDataModule(LightningDataModule):
             "seed": self.seed,
         }
 
-    def _preprocess_and_split(self) -> None:
-        start = time.time()
+    def _read_readouts(self, file_name: str) -> pd.DataFrame:
+        """Read one operational-readouts CSV, restricted to the columns this config needs.
 
-        # Read the raw counter columns plus the histogram columns when enabled;
-        # "both" mode's "_delta" feature columns are derived below, they do not
-        # exist in the CSV.
-        base_cols = self._base_counter_cols
-        raw_cols = base_cols + self._raw_histogram_cols
+        Only the raw counter columns (plus the histogram bins when ``include_histograms`` is on)
+        are read; ``counter_mode="both"``'s ``_delta`` feature columns do not exist in the CSV and
+        are derived by :meth:`_engineer_features`. Rows are returned sorted by
+        ``(vehicle_id, time_step)``, which every downstream step assumes.
+
+        Args:
+            file_name: File name inside ``self.data_dir`` (``READOUTS_FILE``,
+                ``CHALLENGE_READOUTS_FILE`` or ``VALIDATION_CHALLENGE_READOUTS_FILE``).
+
+        Returns:
+            The sorted readouts frame with a fresh ``RangeIndex``.
+        """
+        raw_cols = self._base_counter_cols + self._raw_histogram_cols
         usecols = [VEHICLE_ID, TIME_STEP] + raw_cols
-        readouts = pd.read_csv(os.path.join(self.data_dir, READOUTS_FILE), usecols=usecols)
-        tte = pd.read_csv(
-            os.path.join(self.data_dir, TTE_FILE),
-            usecols=[VEHICLE_ID, LENGTH_OF_STUDY_TIME_STEP, IN_STUDY_REPAIR],
-        )
+        readouts = pd.read_csv(os.path.join(self.data_dir, file_name), usecols=usecols)
+        return readouts.sort_values([VEHICLE_ID, TIME_STEP]).reset_index(drop=True)
 
-        readouts = readouts.sort_values([VEHICLE_ID, TIME_STEP]).reset_index(drop=True)
+    def _engineer_features(self, readouts: pd.DataFrame) -> pd.DataFrame:
+        """Fill the raw readouts and derive the counter features implied by ``counter_mode``.
+
+        Steps 2 and 3 of the pipeline described in the module docstring. Shared by
+        :meth:`_preprocess_and_split` and :meth:`build_challenge_dataset` on purpose: the official
+        held-out readouts must be transformed exactly like the training ones, and a single
+        implementation is what makes that true by construction rather than by inspection.
+
+        Expects the frame to be sorted by ``(vehicle_id, time_step)`` (see :meth:`_read_readouts`)
+        -- ``diff()`` and the ffill/bfill are order-sensitive.
+
+        Args:
+            readouts: Raw readouts holding ``vehicle_id``, ``time_step`` and the raw counter (plus
+                optional histogram bin) columns. Modified in place and returned.
+
+        Returns:
+            The same frame, NaN-filled and carrying the counter feature representation.
+        """
+        raw_cols = self._base_counter_cols + self._raw_histogram_cols
 
         # 2. per-vehicle NaN fill of the raw cumulative counters and histograms
         readouts[raw_cols] = readouts.groupby(VEHICLE_ID)[raw_cols].ffill()
@@ -249,6 +290,7 @@ class ScaniaDataModule(LightningDataModule):
         #    The raw counters are cumulative; the *cumulative* level is the
         #    monotonic aging signal most predictive of RUL. diff() yields NaN
         #    for the first row of each vehicle -> set to 0.
+        base_cols = self._base_counter_cols
         if self.counter_mode == "cumulative":
             # Keep the cumulative counters as-is (no differencing).
             pass
@@ -259,6 +301,144 @@ class ScaniaDataModule(LightningDataModule):
             # Keep the cumulative counters AND append the per-step deltas as new columns.
             delta_cols = [f"{c}_delta" for c in base_cols]
             readouts[delta_cols] = readouts.groupby(VEHICLE_ID)[base_cols].diff().fillna(0.0)
+
+        return readouts
+
+    def build_challenge_dataset(self) -> ScaniaDataset:
+        """Build the official Scania Component X held-out test set, ready for inference.
+
+        Reads ``test_operational_readouts.csv``; see :meth:`_build_challenge_dataset` for how the
+        held-out readouts are turned into a feature-aligned ``ScaniaDataset``. The result is
+        memoized on ``self.challenge_set``: repeated calls within a run (one per model of an
+        ensemble, say) re-use the same windows.
+
+        Returns:
+            A ``ScaniaDataset`` of one window per held-out vehicle, feature-aligned with the
+            training splits.
+
+        Raises:
+            RuntimeError: If :meth:`setup` has not run yet, or if normalization is enabled but no
+                fitted params are available.
+            FileNotFoundError: If ``test_operational_readouts.csv`` is not in ``data_dir``.
+        """
+        if self.challenge_set is not None:
+            return self.challenge_set
+
+        self.challenge_set = self._build_challenge_dataset(
+            CHALLENGE_READOUTS_FILE, "challenge test set")
+        return self.challenge_set
+
+    def build_validation_challenge_dataset(self) -> ScaniaDataset:
+        """Build the official Scania Component X held-out validation set, ready for inference.
+
+        Reads ``validation_operational_readouts.csv`` -- a second, disjoint held-out population
+        from :meth:`build_challenge_dataset`'s ``test_operational_readouts.csv``, scored the same
+        way but against ``validation_labels.csv``. See :meth:`_build_challenge_dataset` for how the
+        held-out readouts are turned into a feature-aligned ``ScaniaDataset``. The result is
+        memoized on ``self.validation_challenge_set``, independent of ``self.challenge_set``.
+
+        Returns:
+            A ``ScaniaDataset`` of one window per held-out validation vehicle, feature-aligned with
+            the training splits.
+
+        Raises:
+            RuntimeError: If :meth:`setup` has not run yet, or if normalization is enabled but no
+                fitted params are available.
+            FileNotFoundError: If ``validation_operational_readouts.csv`` is not in ``data_dir``.
+        """
+        if self.validation_challenge_set is not None:
+            return self.validation_challenge_set
+
+        self.validation_challenge_set = self._build_challenge_dataset(
+            VALIDATION_CHALLENGE_READOUTS_FILE, "challenge validation set")
+        return self.validation_challenge_set
+
+    def _build_challenge_dataset(self, readouts_file: str, log_label: str) -> ScaniaDataset:
+        """Build a held-out ``ScaniaDataset`` from an official Scania readouts file.
+
+        Runs ``readouts_file`` through *this run's* feature engineering and *this run's*
+        train-fitted normalization, so the resulting windows live in the same space as the ones
+        the model was trained on. ``only_final=True`` yields exactly one window per vehicle -- the
+        challenge label describes the vehicle's state at the end of its readout series. Vehicles
+        with fewer than ``sequence_len`` readouts (about two thirds of them) are left-edge-padded
+        by ``ScaniaDataset``, as everywhere else.
+
+        The normalization params come from ``self.norm_params`` / ``hist_norm_params`` /
+        ``zhist_norm_params``, which are fitted on the training split by
+        :meth:`_preprocess_and_split` and restored from ``manifest.json`` by
+        :meth:`_load_from_cache` -- so this works identically with and without
+        ``force_load_from_cache``.
+
+        ``ScaniaDataset`` needs ``length_of_study_time_step`` and ``is_censored`` to compute its
+        RUL target, but the held-out files carry no time-to-event: the ground truth is a failure
+        class in the matching labels file. Both columns are therefore **synthesized placeholders**
+        (``length_of_study_time_step`` = the vehicle's last ``time_step``, ``is_censored = 0``) and
+        the resulting ``label_array`` is meaningless and must never be scored. ``is_censored = 0``
+        is what keeps every vehicle visible to the accessors, which filter on that flag.
+
+        Args:
+            readouts_file: File name inside ``self.data_dir`` (``CHALLENGE_READOUTS_FILE`` or
+                ``VALIDATION_CHALLENGE_READOUTS_FILE``).
+            log_label: Human-readable label for the print statement (e.g. "challenge test set").
+
+        Returns:
+            A ``ScaniaDataset`` of one window per held-out vehicle in ``readouts_file``,
+            feature-aligned with the training splits.
+
+        Raises:
+            RuntimeError: If :meth:`setup` has not run yet, or if normalization is enabled but no
+                fitted params are available.
+            FileNotFoundError: If ``readouts_file`` is not in ``data_dir``.
+        """
+        if self.train_set is None:
+            raise RuntimeError(
+                f"build for {log_label!r} needs the training splits: call setup() first, so the "
+                "normalization params fitted on the train split are available.")
+        if self.norm_type is not None and self.norm_params is None:
+            raise RuntimeError(
+                f"norm_type={self.norm_type!r} but no fitted norm_params are available; the "
+                f"{log_label} cannot be normalized the way the models were trained.")
+
+        readouts_path = os.path.join(self.data_dir, readouts_file)
+        if not os.path.exists(readouts_path):
+            raise FileNotFoundError(
+                f"{readouts_path} does not exist; the official Scania held-out readouts are "
+                f"required to evaluate a run on the {log_label}.")
+
+        start = time.time()
+        readouts = self._engineer_features(self._read_readouts(readouts_file))
+
+        # Placeholder time-to-event columns -- see the docstring. The last readout of every
+        # vehicle gets rul = 0; nothing reads it.
+        readouts[LENGTH_OF_STUDY_TIME_STEP] = readouts.groupby(VEHICLE_ID)[TIME_STEP].transform("max")
+        readouts[IS_CENSORED] = 0
+
+        dataset = ScaniaDataset(
+            readouts,
+            norm_type=self.norm_type,
+            norm_params=self.norm_params,
+            hist_norm_params=self.hist_norm_params,
+            zhist_norm_params=self.zhist_norm_params,
+            only_final=True,
+            **self._dataset_kwargs(),
+        )
+
+        print(f"[Scania] {log_label.capitalize()} built in {time.time() - start:.1f}s | "
+              f"vehicles = {len(dataset)}")
+
+        return dataset
+
+    def _preprocess_and_split(self) -> None:
+        start = time.time()
+
+        readouts = self._read_readouts(READOUTS_FILE)
+        tte = pd.read_csv(
+            os.path.join(self.data_dir, TTE_FILE),
+            usecols=[VEHICLE_ID, LENGTH_OF_STUDY_TIME_STEP, IN_STUDY_REPAIR],
+        )
+
+        # 2. + 3. NaN fill and counter feature engineering (shared with the challenge set).
+        readouts = self._engineer_features(readouts)
 
         # 4. merge TTE and derive the censoring flag
         readouts = readouts.merge(tte, on=VEHICLE_ID, how="inner")
