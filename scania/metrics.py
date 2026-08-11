@@ -19,6 +19,15 @@ val/test dataloaders go through ``ScaniaDataset.get_data_loader_without_censored
 co-training tensors come from ``get_censored_split_tensors``); :func:`scania_score` additionally
 drops any NaN pair defensively, since a censored row carries ``rul = NaN``.
 
+Two entry points exist because the ground truth comes in two shapes. :func:`scania_score` takes a
+true **RUL** and bins it -- that is the internal val/test path, where the split is carved out of
+the training vehicles and the time-to-event is known. :func:`scania_cost_from_classes` and
+:func:`scania_classification_metrics` take a true **class**, which is what the official held-out
+files (``test_labels.csv``) ship; they back the challenge evaluation in :mod:`scania.challenge`.
+``rul_to_class`` is verified to be the official binning: applied to
+``length_of_study_time_step - max(time_step)`` with censored vehicles forced to class 0, it
+reproduces ``train_label.csv`` for all 23550 training vehicles.
+
 The class definition and the cost matrix are shared with the ordinal classification pipeline on
 the ``classification-problem`` branch (``models/classification/ordinal_metrics.py`` and
 ``scania/dataset/ScaniaClassificationDataset.py``).
@@ -31,10 +40,17 @@ import. ``scania/__init__.py`` is empty, so ``scania.metrics`` is safe to import
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import accuracy_score, f1_score
 
 # Number of ordered failure-urgency classes. Kept in sync with the cost matrix below, which
 # must stay square.
 NUM_CLASSES = 5
+
+# The full class vocabulary, passed explicitly to the scikit-learn metrics. It matters: the
+# official test set is ~97% class 0, so a regression model routinely predicts only a subset of the
+# classes, and without ``labels=`` the macro average would be taken over a varying number of
+# classes and stop being comparable between runs.
+CLASS_LABELS = list(range(NUM_CLASSES))
 
 # Left-open, right-closed bins on the remaining useful life t (in time steps):
 # t > 48 -> 0 ; 24 < t <= 48 -> 1 ; 12 < t <= 24 -> 2 ; 6 < t <= 12 -> 3 ; t <= 6 -> 4.
@@ -80,26 +96,31 @@ def rul_to_class(rul: np.ndarray) -> np.ndarray:
     return classes.astype(np.float64).to_numpy()
 
 
-def scania_score(predictions: np.ndarray, targets: np.ndarray) -> float:
-    """Total Scania cost of a set of RUL predictions (lower is better).
+def scania_cost_from_classes(
+        predicted_classes: np.ndarray,
+        target_classes: np.ndarray,
+) -> float:
+    """Total Scania cost of a set of already-binned failure-urgency classes (lower is better).
 
-    Converts both sides to failure-urgency classes with :func:`rul_to_class` and sums
-    ``SCANIA_COST_MATRIX[actual_class, predicted_class]`` over every sample, i.e. the
-    ``Total_cost = Cost_n_m * No instances`` of the Scania Component X paper.
+    Sums ``SCANIA_COST_MATRIX[actual_class, predicted_class]`` over every sample, i.e. the
+    ``Total_cost = Cost_n_m * No instances`` of the Scania Component X paper. This is the core of
+    :func:`scania_score`, split out because the official held-out set
+    (``test_labels.csv``) ships class labels directly rather than an RUL to bin.
 
     Args:
-        predictions: Predicted RUL in time steps, any shape.
-        targets: True RUL in time steps, same number of elements as ``predictions``.
+        predicted_classes: Predicted class labels in ``[0, NUM_CLASSES)``, any shape. ``NaN``
+            entries are dropped as unusable.
+        target_classes: Actual class labels, same number of elements as ``predicted_classes``.
 
     Returns:
         The summed cost. ``0.0`` if no usable sample remains (empty input, or every pair
         containing a ``NaN``).
 
     Raises:
-        ValueError: If ``predictions`` and ``targets`` do not hold the same number of elements.
+        ValueError: If the two arrays do not hold the same number of elements.
     """
-    predicted_classes = rul_to_class(predictions)
-    target_classes = rul_to_class(targets)
+    predicted_classes = np.asarray(predicted_classes, dtype=np.float64).reshape(-1)
+    target_classes = np.asarray(target_classes, dtype=np.float64).reshape(-1)
 
     if predicted_classes.size != target_classes.size:
         raise ValueError(
@@ -118,3 +139,71 @@ def scania_score(predictions: np.ndarray, targets: np.ndarray) -> float:
     columns = predicted_classes[usable].astype(np.int64)
 
     return float(SCANIA_COST_MATRIX[rows, columns].sum())
+
+
+def scania_score(predictions: np.ndarray, targets: np.ndarray) -> float:
+    """Total Scania cost of a set of RUL predictions (lower is better).
+
+    Converts both sides to failure-urgency classes with :func:`rul_to_class` and charges them
+    through :func:`scania_cost_from_classes`.
+
+    Args:
+        predictions: Predicted RUL in time steps, any shape.
+        targets: True RUL in time steps, same number of elements as ``predictions``.
+
+    Returns:
+        The summed cost. ``0.0`` if no usable sample remains (empty input, or every pair
+        containing a ``NaN``).
+
+    Raises:
+        ValueError: If ``predictions`` and ``targets`` do not hold the same number of elements.
+    """
+    return scania_cost_from_classes(rul_to_class(predictions), rul_to_class(targets))
+
+
+def scania_classification_metrics(
+        predicted_classes: np.ndarray,
+        target_classes: np.ndarray,
+) -> dict[str, float]:
+    """Accuracy, macro-F1 and Scania cost for a set of failure-urgency class predictions.
+
+    The three metrics the Scania Component X challenge is judged on, computed over the full
+    :data:`CLASS_LABELS` vocabulary so the macro average stays comparable between runs. Samples
+    whose predicted or actual class is ``NaN`` are dropped, mirroring
+    :func:`scania_cost_from_classes`.
+
+    Args:
+        predicted_classes: Predicted class labels in ``[0, NUM_CLASSES)``, any shape.
+        target_classes: Actual class labels, same number of elements as ``predicted_classes``.
+
+    Returns:
+        ``{"n_samples", "accuracy", "f1_macro", "scania_score"}``. The metrics are ``0.0`` when no
+        usable sample remains.
+
+    Raises:
+        ValueError: If the two arrays do not hold the same number of elements.
+    """
+    predicted_classes = np.asarray(predicted_classes, dtype=np.float64).reshape(-1)
+    target_classes = np.asarray(target_classes, dtype=np.float64).reshape(-1)
+
+    if predicted_classes.size != target_classes.size:
+        raise ValueError(
+            f"predictions and targets must have the same number of elements, got "
+            f"{predicted_classes.size} and {target_classes.size}."
+        )
+
+    usable = ~(np.isnan(predicted_classes) | np.isnan(target_classes))
+    if not usable.any():
+        return {"n_samples": 0.0, "accuracy": 0.0, "f1_macro": 0.0, "scania_score": 0.0}
+
+    predicted = predicted_classes[usable].astype(np.int64)
+    actual = target_classes[usable].astype(np.int64)
+
+    return {
+        "n_samples": float(usable.sum()),
+        "accuracy": float(accuracy_score(actual, predicted)),
+        "f1_macro": float(
+            f1_score(actual, predicted, average="macro", labels=CLASS_LABELS, zero_division=0)
+        ),
+        "scania_score": scania_cost_from_classes(predicted, actual),
+    }

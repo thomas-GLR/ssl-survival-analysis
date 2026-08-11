@@ -385,4 +385,5 @@ def train_model(
         model_specs=meta["model_specs"],
         training_time_seconds=ensemble.training_duration_seconds,
         avg_iteration_time_seconds=ensemble.average_iteration_duration_seconds,
+        data_module=scania_data_module,
     )

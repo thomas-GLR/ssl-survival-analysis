@@ -316,6 +316,7 @@ def run_hyper_parameter_optimization(
                 batch_size=batch_size,
                 number_of_models=number_of_models,
                 data=data,
+                data_module=data_module,
                 initial_models=initial_models,
                 initial_datasets=initial_datasets,
                 seed=seed,
@@ -791,6 +792,7 @@ def _run_one_configuration(
         batch_size: int,
         number_of_models: int,
         data: dict[str, torch.Tensor | None],
+        data_module: ScaniaDataModule,
         initial_models: list[LightningModule],
         initial_datasets: list[tuple[torch.Tensor, torch.Tensor]],
         seed: int | None,
@@ -818,6 +820,8 @@ def _run_one_configuration(
         batch_size: Training batch size.
         number_of_models: Number of models in the ensemble.
         data: The tensors from :func:`_collect_tensors`.
+        data_module: The shared data module, so every configuration is also scored on the official
+            Scania held-out set.
         initial_models: The shared initial models (deep-copied before use).
         initial_datasets: The shared per-model datasets (deep-copied before use).
         seed: Seed for the initial-weight snapshot and for the censored-pool RNG.
@@ -912,6 +916,7 @@ def _run_one_configuration(
             # pretrained models, so the duration covers the co-training iterations only.
             training_time_seconds=ensemble.training_duration_seconds,
             avg_iteration_time_seconds=ensemble.average_iteration_duration_seconds,
+            data_module=data_module,
         )
 
 

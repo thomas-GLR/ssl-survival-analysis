@@ -274,4 +274,5 @@ def train_model(
         model_specs=meta["model_specs"],
         # v1 keeps no per-iteration bookkeeping, so only the total is reported.
         training_time_seconds=training_time_seconds,
+        data_module=scania_data_module,
     )

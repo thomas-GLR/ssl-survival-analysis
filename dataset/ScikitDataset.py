@@ -118,6 +118,32 @@ class ScikitDataset:
         return train, test, valid
 
     @staticmethod
+    def from_scania_challenge(challenge_dataset, feature_cols: list[str]) -> "ScikitDataset":
+        """Build the RSF view of the official Scania held-out set: one row per vehicle.
+
+        The companion of ``ScaniaDataModule.build_challenge_dataset`` for the row-wise models.
+        Only each vehicle's **last** readout is kept, because the challenge label describes the
+        vehicle's state at the end of its readout series -- the row-wise equivalent of the
+        ``only_final=True`` the window models use.
+
+        The ``Y`` / ``rul`` fields are built from the placeholder time-to-event columns
+        ``build_challenge_dataset`` synthesizes and are meaningless here; only ``X``, ``ids`` and
+        ``Y["Time"]`` (the elapsed observed time, which RSF subtracts from its predicted total
+        lifetime) are usable.
+
+        :param challenge_dataset: The ``ScaniaDataset`` returned by ``build_challenge_dataset``.
+        :param feature_cols: Feature columns to use as ``X``.
+        :return: A ``ScikitDataset`` holding one row per held-out vehicle.
+        """
+        from constants.scania_component_x_columns import VEHICLE_ID, TIME_STEP
+        from scania.dataset.ScaniaDataset import IS_CENSORED, RUL_LOWER_BOUND
+
+        return ScikitDataset._scania_split_to_scikit(
+            challenge_dataset, feature_cols, IS_CENSORED, TIME_STEP, VEHICLE_ID,
+            RUL_LOWER_BOUND, keep_uncensored_only=False, keep_last_row_per_vehicle=True,
+        )
+
+    @staticmethod
     def _scania_split_to_scikit(
             scania_dataset,
             feature_cols: list[str],
@@ -126,6 +152,7 @@ class ScikitDataset:
             id_col: str,
             rul_col: str,
             keep_uncensored_only: bool,
+            keep_last_row_per_vehicle: bool = False,
     ) -> "ScikitDataset":
         """Turn one pre-processed ScaniaDataset split into a ScikitDataset.
 
@@ -139,11 +166,15 @@ class ScikitDataset:
         :param id_col: Name of the per-individual id column.
         :param rul_col: Name of the column holding the true RUL / survival lower bound.
         :param keep_uncensored_only: If True, drop censored rows (test evaluation).
+        :param keep_last_row_per_vehicle: If True, keep only each vehicle's latest readout
+            (challenge evaluation, where there is one label per vehicle).
         :return: A ``ScikitDataset`` with ``X``, structured ``Y``, ``ids`` and ``rul``.
         """
         df = scania_dataset.df.copy()
         if keep_uncensored_only:
             df = df[df[is_censored_col] == 0].reset_index(drop=True)
+        if keep_last_row_per_vehicle:
+            df = df.loc[df.groupby(id_col)[time_col].idxmax()].reset_index(drop=True)
 
         X = df[feature_cols].to_numpy(dtype=object)  # parity with from_cmapss
         status = (df[is_censored_col] == 0).to_numpy()  # True = event (failure) observed
