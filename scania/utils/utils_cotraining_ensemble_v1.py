@@ -271,6 +271,7 @@ def train_model(
         test_features=test_features,
         test_targets=test_targets,
         version_strs=meta["version_strs"],
+        model_specs=meta["model_specs"],
         # v1 keeps no per-iteration bookkeeping, so only the total is reported.
         training_time_seconds=training_time_seconds,
     )

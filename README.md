@@ -592,6 +592,37 @@ Same as v1, but with the `co_training_ensemble_v2` prefix:
 and, under `--checkpoints-path`, one trained model per base model, named
 `co_training_ensemble_v2_<version>_<i>.pth`.
 
+##### Reloading a trained ensemble
+
+Each `.pth` is a **Lightning checkpoint** (`state_dict` + `hyper_parameters` +
+an architecture spec), not a pickled module, so a finished run can be re-tested
+without retraining. The whole ensemble comes back in one call:
+
+```python
+from scania.utils import load_ensemble_for_inference
+
+ensemble = load_ensemble_for_inference("checkpoints/model-co_training_ensemble_v2-scania-<datetime>")
+predictions = ensemble.predict(test_features)      # real RUL units
+per_model = ensemble.predict_per_model(test_features)
+```
+
+The architectures are rebuilt from the spec embedded in each checkpoint and the
+ensemble weights are restored, so `predict` reproduces the run's saved
+predictions. Related helpers: `load_module_checkpoint` (one model),
+`load_ensemble_modules` (the modules + weights, no ensemble),
+`read_checkpoint_spec`.
+
+`BasicLightningModule.load_from_checkpoint(path, model=...)` also works
+directly, but needs the architecture passed in — `save_hyperparameters(ignore=['model'])`
+deliberately keeps the `nn.Module` out of the hyperparameters.
+
+Checkpoints written **before** this format was introduced are pickled module
+objects. `load_module_checkpoint` and `load_ensemble_modules` still read them,
+but they carry no architecture spec and no ensemble weights, so pass
+`results_csv_path=".../co_training_ensemble_v2-scania.csv"` to
+`load_ensemble_for_inference` to recover the weights from its `weight_h*`
+columns. See `run_model_scania_test.ipynb` for a full re-test.
+
 ##### Timing columns of the per-stage file
 
 The per-stage file ends with a block of wall-clock durations **in seconds**, one
