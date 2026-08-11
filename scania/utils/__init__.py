@@ -13,6 +13,14 @@ from scania.utils.utils_scania import (
     save_train_parameters,
     generate_and_save_model_prediction
 )
+from scania.utils.utils_cotraining_common import (
+    load_ensemble_for_inference,
+    load_ensemble_modules,
+    load_module_checkpoint,
+    read_checkpoint_spec,
+    read_ensemble_weights_from_results,
+    save_module_checkpoint,
+)
 from scania.utils.utils_simple_lightning_model import train_model as train_model_lightning
 from scania.utils.utils_random_survival_forest import train_model as train_model_random_survival
 from scania.utils.utils_coprog import train_model as train_model_coprog
@@ -46,4 +54,10 @@ __all__ = [
     "override_dataset_params_from_cache_manifest",
     "resolve_cache_dir",
     "LOADER_ONLY_DATASET_KEYS",
+    "save_module_checkpoint",
+    "load_module_checkpoint",
+    "load_ensemble_modules",
+    "load_ensemble_for_inference",
+    "read_checkpoint_spec",
+    "read_ensemble_weights_from_results",
 ]
