@@ -314,6 +314,16 @@ class ConformalScoreSpec:
     :param unit_lower_bounds: Optional per-unit survival lower bounds (list of CPU tensors,
         one per ``unit_ids``, aligned row-for-row with each ``unit_x`` entry). Used for the
         censoring clip when ``use_monotone_projection`` is set; ``None`` skips the clip.
+    :param difficulty_estimator_k: Number of nearest neighbors (``k=`` passed to
+        ``DifficultyEstimator.fit``). ``DifficultyEstimator`` is always used regardless of the
+        flags below.
+    :param use_mondrian_categorizer: When ``True``, a ``MondrianCategorizer`` (fit on
+        ``train_x`` using the ``DifficultyEstimator``'s scores) is passed as ``mc=`` to
+        ``WrapRegressor.calibrate``, on top of the normalized conformal regressor.
+    :param mondrian_no_bins: Number of Mondrian categories (``no_bins=`` passed to
+        ``MondrianCategorizer.fit``). Only used when ``use_mondrian_categorizer`` is ``True``.
+    :param use_cps: When ``True``, ``WrapRegressor.calibrate`` fits a
+        ``ConformalPredictiveSystem`` instead of a ``ConformalRegressor`` (``cps=True``).
     :param accelerator: ``Trainer``-style accelerator for placing the model (``"gpu"`` in workers).
     :param devices: Device selector (``1`` / ``[gpu_id]`` / ``None``); only ``"cuda"`` vs
         ``"cpu"`` placement is used here.
@@ -330,6 +340,10 @@ class ConformalScoreSpec:
     confidence: float
     use_monotone_projection: bool = False
     unit_lower_bounds: list[torch.Tensor] | None = None
+    difficulty_estimator_k: int = 25
+    use_mondrian_categorizer: bool = False
+    mondrian_no_bins: int = 10
+    use_cps: bool = False
     accelerator: str = "auto"
     devices: Any = None
 
@@ -466,7 +480,10 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
 
     Builds the trained model, wraps it in a normalized conformal regressor
     (``DifficultyEstimator`` fitted on ``spec.train_x`` with the model's own training
-    residuals, calibrated on the validation set), predicts each unit's per-window
+    residuals and ``spec.difficulty_estimator_k`` neighbors, optionally combined with a
+    ``MondrianCategorizer`` when ``spec.use_mondrian_categorizer`` is set, calibrated on the
+    validation set as a ``ConformalPredictiveSystem`` when ``spec.use_cps`` is set or a
+    ``ConformalRegressor`` otherwise), predicts each unit's per-window
     pseudo-labels, and computes the prediction interval of
     each unit's last window in one batched ``predict_int`` call. When
     ``spec.use_monotone_projection`` is set, each unit's pseudo-labels are additionally passed
@@ -486,7 +503,7 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
         jobs run concurrently.
     """
     from crepes import WrapRegressor
-    from crepes.extras import DifficultyEstimator
+    from crepes.extras import DifficultyEstimator, MondrianCategorizer
 
     job_start = time.perf_counter()
 
@@ -504,12 +521,20 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
     # based on the model's own residuals in the neighborhood (not just training-data density).
     residuals = spec.train_y.view(-1).cpu().numpy().astype(np.float32) - adapter.predict(_flatten(train_x))
     de = DifficultyEstimator()
-    de.fit(X=_flatten(train_x), residuals=residuals)
+    de.fit(X=_flatten(train_x), residuals=residuals, k=spec.difficulty_estimator_k)
+
+    mc = None
+    if spec.use_mondrian_categorizer:
+        mc = MondrianCategorizer()
+        mc.fit(X=_flatten(train_x), de=de, no_bins=spec.mondrian_no_bins)
+
     wrapper = WrapRegressor(adapter)
     wrapper.calibrate(
         X=_flatten(spec.val_x),
         y=spec.val_y.view(-1).detach().cpu().numpy().astype(np.float32),
         de=de,
+        mc=mc,
+        cps=spec.use_cps,
     )
 
     # Per-unit pseudo-labels + last windows.

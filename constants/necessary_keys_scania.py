@@ -259,8 +259,13 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
 # are swept too, so unlike NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS they live here and
 # not in the fixed training block.
 NECESSARY_HPO_CO_TRAINING_ENSEMBLE_V2_HYPER_PARAMETER_KEYS = [
+    "use_average_window_confidence",
+    # None disables the filter; a float value is the width cutoff.
+    "confidence_width_threshold",
     "use_monotone_projection",
     "monotone_residual_weight",
+    # Only read when use_monotone_projection is True.
+    "disable_isotonic_regression",
     "use_fine_tuning",
     "fine_tune_lr_factor",
     "fine_tune_max_epochs",
@@ -275,6 +280,11 @@ NECESSARY_HPO_CO_TRAINING_ENSEMBLE_V2_HYPER_PARAMETER_KEYS = [
     "cotraining_survival_loss_lambda",
     "suspension_pool_size",
     "add_ratio",
+    "use_mondrian_categorizer",
+    # Only read when use_mondrian_categorizer is True.
+    "mondrian_no_bins",
+    "use_cps",
+    "difficulty_estimator_k",
 ]
 
 # Held constant across every configuration of the sweep. train_with_censored_data is optional
