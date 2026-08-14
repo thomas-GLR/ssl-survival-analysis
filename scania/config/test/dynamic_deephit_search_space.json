@@ -1,0 +1,20 @@
+{
+  "mb_size": {"type": "categorical", "choices": [16, 32]},
+  "iteration_burn_in": {"type": "int", "low": 5, "high": 20},
+  "iteration": {"type": "int", "low": 20, "high": 60},
+  "keep_prob": {"type": "float", "low": 0.3, "high": 1.0},
+  "lr_train": {"type": "float", "low": 1e-5, "high": 1e-2, "log": true},
+  "alpha": {"type": "float", "low": 0.0, "high": 2.0},
+  "beta": {"type": "float", "low": 0.0, "high": 2.0},
+  "gamma": {"type": "float", "low": 0.0, "high": 2.0},
+  "reg_W": {"type": "float", "low": 1e-6, "high": 1e-2, "log": true},
+  "reg_W_out": {"type": "float", "low": 1e-6, "high": 1e-2, "log": true},
+  "FC_active_fn": {"type": "categorical", "choices": ["relu", "tanh"]},
+  "RNN_active_fn": {"type": "categorical", "choices": ["relu", "tanh"]},
+  "h_dim_RNN": {"type": "categorical", "choices": [8, 16]},
+  "h_dim_FC": {"type": "categorical", "choices": [8, 16]},
+  "num_layers_RNN": {"type": "int", "low": 1, "high": 2},
+  "num_layers_ATT": {"type": "int", "low": 1, "high": 2},
+  "num_layers_CS": {"type": "int", "low": 1, "high": 2},
+  "RNN_type": {"type": "categorical", "choices": ["LSTM", "GRU"]}
+}

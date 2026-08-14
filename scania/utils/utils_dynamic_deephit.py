@@ -29,17 +29,22 @@ Nothing under ``dynamic_deephit/`` is modified. ``dynamic_deephit/main.py`` and
 import time, the latter is a known-broken CysFib variant per its own docstring) and are never
 imported; only the pure building blocks are (:func:`import_dynamic_deephit`).
 
-Optuna is out of scope for this rewrite: ``scania/hpo/optuna_search_dynamic_deephit.py`` imports
-several of this file's helpers by name (``split_to_ddh_arrays``, ``build_time_bin_edges``,
-``as_object_array``, ``evaluate_split``, ``import_dynamic_deephit``) for the now-removed PyTorch
-integration and is left broken until a follow-up rewrites it against this API.
+``scania/hpo/optuna_search_dynamic_deephit.py`` runs Optuna HPO against this module, optimizing the
+validation C-index (:func:`_validation_c_index`) that would otherwise only be used internally for
+checkpoint selection. It imports :func:`_build_run_context`, :func:`_build_network_settings` and
+:func:`_fit` -- the same three building blocks :func:`train_model` itself is assembled from -- so
+that an Optuna trial can reuse the (searched-hyperparameter-independent) data/mask/time-bin setup
+across every trial while only rebuilding a fresh model and re-running :func:`_fit` per trial.
+:func:`_fit` never imports Optuna itself: pruning is layered in purely through its optional
+``on_eval`` callback, keeping this module framework-agnostic.
 """
 
 import os
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -320,6 +325,192 @@ def _extract_vehicle_arrays(dataset: ScaniaDataset) -> dict[str, np.ndarray]:
     }
 
 
+@dataclass
+class RunContext:
+    """Everything about a Dynamic DeepHit run that is independent of the searched hyperparameters.
+
+    None of ``mb_size``, ``iteration_burn_in``, ``iteration``, ``keep_prob``, ``lr_train``,
+    ``alpha``, ``beta``, ``gamma``, ``reg_W``, ``reg_W_out``, ``FC_active_fn``, ``RNN_active_fn``,
+    ``h_dim_RNN``, ``h_dim_FC``, ``num_layers_RNN``, ``num_layers_ATT``, ``num_layers_CS`` or
+    ``RNN_type`` affects the data module, the per-split arrays, the time-bin discretization or the
+    training-split masks -- so a single ``RunContext`` is built once and reused, unchanged, across
+    every :func:`train_model` call and every Optuna trial in ``scania/hpo/optuna_search_dynamic_deephit.py``.
+
+    Attributes:
+        scania_data_module: The set-up ``ScaniaDataModule``.
+        dataset_kwargs: The resolved keyword arguments :func:`_build_data_module` was called with
+            (including the computed ``max_length``), kept around for :func:`save_train_parameters`.
+        train_arrays: Train split arrays from :func:`_extract_vehicle_arrays`, plus ``x``/``x_mi``/
+            ``meas_time_bin``/``event_time_bin``.
+        val_arrays: Same, for the validation split.
+        test_arrays: Same, for the test split.
+        train_masks: ``(mask1, mask2, mask3)`` from :func:`_build_masks`, built from the train split.
+        edges: Time-bin edges from :func:`_build_time_bin_edges`.
+        num_category: Number of realized time bins (``len(edges) - 1``).
+        input_dims: The model's ``input_dims`` dict (``x_dim``, ``x_dim_cont``, ``x_dim_bin``,
+            ``num_Event``, ``num_Category``, ``max_length``).
+    """
+
+    scania_data_module: ScaniaDataModule
+    dataset_kwargs: dict[str, Any]
+    train_arrays: dict[str, np.ndarray]
+    val_arrays: dict[str, np.ndarray]
+    test_arrays: dict[str, np.ndarray]
+    train_masks: tuple[np.ndarray, np.ndarray, np.ndarray]
+    edges: np.ndarray
+    num_category: int
+    input_dims: dict[str, int]
+
+
+def _build_run_context(
+        dataset_kwargs: dict[str, Any],
+        num_category_bins: int,
+        import_data_module: Any,
+) -> RunContext:
+    """Build everything a Dynamic DeepHit run needs that does not depend on the searched
+    training/model hyperparameters (see :class:`RunContext`).
+
+    Args:
+        dataset_kwargs: Keyword arguments for :func:`_build_data_module` -- ``dataset_root``,
+            ``seed``, ``data_fraction``, ``val_rate``, ``test_rate``, ``stratify``, ``norm_type``,
+            ``counter_mode``, ``include_histograms``, ``histogram_mode``, ``cache_dir``,
+            ``force_load_from_cache`` -- without ``max_length``, which is computed here.
+        num_category_bins: Target number of absolute-time discretization bins.
+        import_data_module: The vendored ``dynamic_deephit.import_data`` module (mask builders).
+
+    Returns:
+        A populated :class:`RunContext`.
+    """
+    max_length = _compute_max_length(dataset_kwargs["dataset_root"])
+    print(f"{_LOG_PREFIX} sequence_len (=max vehicle length) = {max_length}")
+
+    dataset_kwargs = {**dataset_kwargs, "max_length": max_length}
+    print("Creating data module with the following parameters :")
+    print(dataset_kwargs)
+    scania_data_module = _build_data_module(**dataset_kwargs)
+
+    # ``force_load_from_cache`` adopts every split-defining param from the cache manifest,
+    # including ``sequence_len`` (see ``ScaniaDataModule._apply_cached_config``), silently
+    # overwriting ``scania_data_module.sequence_len`` out from under the freshly-computed
+    # ``max_length`` above whenever the cache was built for a different model. Continuing would
+    # build the model's TF graph for ``max_length`` while every window actually has
+    # ``scania_data_module.sequence_len`` steps -- and, worse, would silently break "one window ==
+    # one vehicle's full history", the invariant this whole integration depends on (see the module
+    # docstring). Fail loudly instead of training on truncated windows.
+    if scania_data_module.sequence_len != max_length:
+        raise ValueError(
+            f"{_LOG_PREFIX} --force-load-from-cache pinned sequence_len to "
+            f"{scania_data_module.sequence_len} (from the cache manifest at "
+            f"{dataset_kwargs['cache_dir']}), but Dynamic DeepHit needs sequence_len == the longest "
+            f"vehicle's row count ({max_length}) for its one-window-per-vehicle-history design. This "
+            f"cache was built for a different model's sequence_len and cannot be shared with Dynamic "
+            f"DeepHit. Point --dataset-cache-dir at a cache built for this model (run once without "
+            f"--force-load-from-cache to create it), or drop --force-load-from-cache for this run."
+        )
+
+    train_arrays = _extract_vehicle_arrays(scania_data_module.get_full_dataset("train"))
+    val_arrays = _extract_vehicle_arrays(scania_data_module.get_full_dataset("val"))
+    test_arrays = _extract_vehicle_arrays(scania_data_module.get_full_dataset("test"))
+
+    edges = _build_time_bin_edges(
+        train_arrays["meas_time_abs"], train_arrays["event_time_abs"],
+        val_arrays["meas_time_abs"], val_arrays["event_time_abs"],
+        num_bins=num_category_bins,
+    )
+    num_category = len(edges) - 1
+    print(f"{_LOG_PREFIX} {num_category} time bins, edges [{edges[0]:.2f}, {edges[-1]:.2f}]")
+
+    for split_arrays in (train_arrays, val_arrays, test_arrays):
+        split_arrays["x"], split_arrays["x_mi"] = _windows_to_x_and_missing(split_arrays["windows"])
+        split_arrays["meas_time_bin"] = _digitize(split_arrays["meas_time_abs"], edges)
+        split_arrays["event_time_bin"] = _digitize(split_arrays["event_time_abs"], edges)
+
+    n_features = train_arrays["x"].shape[-1] - 1
+    input_dims = {
+        "x_dim": n_features + 1,
+        "x_dim_cont": n_features,
+        "x_dim_bin": 0,
+        "num_Event": 1,
+        "num_Category": num_category,
+        "max_length": max_length,
+    }
+
+    train_masks = _build_masks(
+        train_arrays["meas_time_bin"], train_arrays["event_time_bin"],
+        train_arrays["event_indicator"], num_category, import_data_module,
+    )
+
+    return RunContext(
+        scania_data_module=scania_data_module,
+        dataset_kwargs=dataset_kwargs,
+        train_arrays=train_arrays,
+        val_arrays=val_arrays,
+        test_arrays=test_arrays,
+        train_masks=train_masks,
+        edges=edges,
+        num_category=num_category,
+        input_dims=input_dims,
+    )
+
+
+def _build_network_settings(
+        tf_module: Any,
+        h_dim_RNN: int,
+        h_dim_FC: int,
+        num_layers_RNN: int,
+        num_layers_ATT: int,
+        num_layers_CS: int,
+        RNN_type: str,
+        FC_active_fn: str,
+        RNN_active_fn: str,
+        reg_W: float,
+        reg_W_out: float,
+) -> dict[str, Any]:
+    """Validate and resolve ``model_params`` into the ``network_settings`` dict
+    ``Model_Longitudinal_Attention`` expects.
+
+    ``FC_active_fn``/``RNN_active_fn`` arrive as plain strings (config-JSON-friendly, and what
+    Optuna's categorical search suggests); the model class expects actual TF function references
+    (see the module docstring), so the string -> function mapping happens here, once, shared by
+    :func:`train_model` and every Optuna trial.
+
+    Args:
+        tf_module: The imported ``tensorflow`` module.
+        h_dim_RNN: RNN hidden size.
+        h_dim_FC: Hidden width of the attention and cause-specific FC networks.
+        num_layers_RNN: Number of stacked RNN layers.
+        num_layers_ATT: Number of hidden layers in the attention network.
+        num_layers_CS: Number of hidden layers in the cause-specific network.
+        RNN_type: ``'LSTM'`` or ``'GRU'``.
+        FC_active_fn: ``'relu'`` or ``'tanh'`` -- activation of the FC networks.
+        RNN_active_fn: ``'relu'`` or ``'tanh'`` -- activation of the RNN cells.
+        reg_W: L1 regularization on the cause-specific FC layers.
+        reg_W_out: L1 regularization on the output layer.
+
+    Returns:
+        The ``network_settings`` dict, with activations resolved to ``tf_module`` functions and
+        ``initial_W`` added.
+    """
+    assert RNN_type in ("LSTM", "GRU"), f"Unsupported RNN_type: {RNN_type}"
+    assert FC_active_fn in _ACTIVATION_NAMES, f"Unsupported FC_active_fn: {FC_active_fn}"
+    assert RNN_active_fn in _ACTIVATION_NAMES, f"Unsupported RNN_active_fn: {RNN_active_fn}"
+
+    activation_functions = {"relu": tf_module.nn.relu, "tanh": tf_module.nn.tanh}
+    return {
+        "h_dim_RNN": h_dim_RNN,
+        "h_dim_FC": h_dim_FC,
+        "num_layers_RNN": num_layers_RNN,
+        "num_layers_ATT": num_layers_ATT,
+        "num_layers_CS": num_layers_CS,
+        "RNN_type": RNN_type,
+        "FC_active_fn": activation_functions[FC_active_fn],
+        "RNN_active_fn": activation_functions[RNN_active_fn],
+        "initial_W": tf_module.keras.initializers.GlorotUniform(),
+        "reg_W": reg_W,
+        "reg_W_out": reg_W_out,
+    }
+
+
 def _predict_pmf(model: Any, x: np.ndarray, x_mi: np.ndarray, batch_size: int) -> np.ndarray:
     """Run the model's forward pass in chunks.
 
@@ -440,6 +631,133 @@ def _validation_c_index(
     return float(np.mean(scores)) if scores else float("nan")
 
 
+def _fit(
+        model: Any,
+        checkpoint: Any | None,
+        checkpoint_prefix: str | None,
+        context: RunContext,
+        mb_size: int,
+        burn_in_mode: bool,
+        iteration_burn_in: int,
+        iteration: int,
+        keep_prob: float,
+        lr_train: float,
+        alpha: float,
+        beta: float,
+        gamma: float,
+        eval_every: int,
+        c_index_time_quantiles: list[float],
+        c_index_max_vehicles: int,
+        seed: int | None,
+        utils_helper_module: Any,
+        utils_eval_module: Any,
+        inference_batch_size: int,
+        on_eval: Callable[[int, float], None] | None = None,
+) -> tuple[float, float]:
+    """Run Dynamic DeepHit's burn-in + main training loop, tracking the best validation C-index.
+
+    There is no early stopping: the full ``iteration`` budget always runs, matching
+    ``dynamic_deephit/main.py``. Every ``eval_every`` main-phase iterations, :func:`_validation_c_index`
+    is computed and the checkpoint is overwritten whenever it improves.
+
+    ``checkpoint``/``checkpoint_prefix`` are optional so this function serves both call sites:
+    :func:`train_model` passes a real ``tf.train.Checkpoint`` (its final scoring needs the
+    best-by-C-index weights restored), while an Optuna trial (``scania/hpo/optuna_search_dynamic_deephit.py``)
+    passes ``None`` for both to skip all disk I/O -- a trial only needs the scalar ``best_c_index``.
+
+    ``on_eval``, if given, is called with ``(step, c_index)`` at every ``eval_every`` checkpoint. This
+    is how Optuna pruning (``trial.report``/``should_prune``/``raise TrialPruned()``) is layered in
+    from the HPO module without this module importing Optuna itself.
+
+    Args:
+        model: The (freshly constructed, untrained) ``Model_Longitudinal_Attention``.
+        checkpoint: A ``tf.train.Checkpoint`` wrapping ``model``, or ``None`` to skip checkpointing.
+        checkpoint_prefix: Path prefix to write/restore the checkpoint at. Required iff ``checkpoint``
+            is not ``None``.
+        context: The run's :class:`RunContext` (train/val arrays, masks, edges).
+        mb_size: Minibatch size for both training phases.
+        burn_in_mode: Whether to run the burn-in phase (RNN-reconstruction loss only) first.
+        iteration_burn_in: Number of burn-in minibatch steps.
+        iteration: Number of main-phase minibatch steps.
+        keep_prob: Dropout keep probability.
+        lr_train: Learning rate for both phases.
+        alpha: Weight of the log-likelihood loss.
+        beta: Weight of the ranking loss.
+        gamma: Weight of the RNN-prediction (longitudinal reconstruction) loss.
+        eval_every: Validate (and possibly checkpoint) every this many main-phase iterations.
+        c_index_time_quantiles: Quantiles of the validation event-time distribution at which the
+            checkpoint-selection C-index is computed.
+        c_index_max_vehicles: Cap on validation vehicles used for the (quadratic) C-index.
+        seed: Seed for the C-index validation subsample.
+        utils_helper_module: The vendored ``dynamic_deephit.utils_helper`` module (minibatch sampler).
+        utils_eval_module: The vendored ``dynamic_deephit.utils_eval`` module (``c_index``).
+        inference_batch_size: Chunk size for every forward-pass-only evaluation.
+        on_eval: Optional callback invoked with ``(step, c_index)`` at every ``eval_every`` checkpoint.
+
+    Returns:
+        ``(best_c_index, training_time_seconds)``.
+    """
+    train_arrays = context.train_arrays
+    val_arrays = context.val_arrays
+    train_mask1, train_mask2, train_mask3 = context.train_masks
+
+    training_start = time.perf_counter()
+
+    if burn_in_mode:
+        print(f"{_LOG_PREFIX} burn-in training ({iteration_burn_in} iterations)...")
+        for step in tqdm(range(iteration_burn_in)):
+            # mask1/mask2/mask3 are unused by train_burn_in (RNN-reconstruction loss only) but
+            # f_get_minibatch always returns all seven arrays, so they still have to be passed in.
+            x_mb, x_mi_mb, k_mb, t_mb, _, _, _ = utils_helper_module.f_get_minibatch(
+                mb_size, train_arrays["x"], train_arrays["x_mi"],
+                train_arrays["event_indicator"][:, np.newaxis],
+                train_arrays["event_time_bin"][:, np.newaxis],
+                train_mask1, train_mask2, train_mask3,
+            )
+            _, loss = model.train_burn_in((x_mb, k_mb, t_mb), x_mi_mb, keep_prob, lr_train)
+            if (step + 1) % 1000 == 0:
+                print(f"{_LOG_PREFIX} burn-in itr {step + 1:6d} | loss {loss:.4f}")
+
+    if checkpoint is not None:
+        checkpoint.write(checkpoint_prefix)  # baseline, so a checkpoint always exists
+    best_c_index = float("-inf")
+
+    print(f"{_LOG_PREFIX} main training ({iteration} iterations)...")
+    for step in tqdm(range(iteration)):
+        x_mb, x_mi_mb, k_mb, t_mb, m1_mb, m2_mb, m3_mb = utils_helper_module.f_get_minibatch(
+            mb_size, train_arrays["x"], train_arrays["x_mi"],
+            train_arrays["event_indicator"][:, np.newaxis],
+            train_arrays["event_time_bin"][:, np.newaxis],
+            train_mask1, train_mask2, train_mask3,
+        )
+        _, loss = model.train(
+            (x_mb, k_mb, t_mb), (m1_mb, m2_mb, m3_mb), x_mi_mb, (alpha, beta, gamma),
+            keep_prob, lr_train)
+
+        if (step + 1) % 1000 == 0:
+            print(f"{_LOG_PREFIX} itr {step + 1:6d} | loss {loss:.4f}")
+
+        if (step + 1) % eval_every == 0:
+            c_index = _validation_c_index(
+                model, val_arrays, context.edges, c_index_time_quantiles, c_index_max_vehicles, seed,
+                utils_eval_module, inference_batch_size)
+            print(f"{_LOG_PREFIX} itr {step + 1:6d} | val C-index {c_index:.4f}")
+            if c_index > best_c_index:
+                best_c_index = c_index
+                if checkpoint is not None:
+                    checkpoint.write(checkpoint_prefix)
+                print(f"{_LOG_PREFIX} updated... best val C-index = {best_c_index:.4f}")
+            if on_eval is not None:
+                on_eval(step + 1, c_index)
+
+    training_time_seconds = time.perf_counter() - training_start
+
+    if checkpoint is not None:
+        checkpoint.restore(checkpoint_prefix).expect_partial()
+
+    return best_c_index, training_time_seconds
+
+
 def train_model(
         checkpoints_path: str,
         results_path: str,
@@ -551,16 +869,12 @@ def train_model(
         results_path=results_path,
         dataset_root=dataset_root,
     )
-    assert RNN_type in ("LSTM", "GRU"), f"Unsupported RNN_type: {RNN_type}"
-    assert FC_active_fn in _ACTIVATION_NAMES, f"Unsupported FC_active_fn: {FC_active_fn}"
-    assert RNN_active_fn in _ACTIVATION_NAMES, f"Unsupported RNN_active_fn: {RNN_active_fn}"
 
     model_class, import_data, utils_helper, utils_eval = import_dynamic_deephit()
 
     import tensorflow as tf
     tf.random.set_seed(seed)
     _configure_gpu(tf, use_gpu)
-    activation_functions = {"relu": tf.nn.relu, "tanh": tf.nn.tanh}
 
     checkpoints_path, results_path = create_and_get_checkpoints_results_path(
         model_version=model_version.value,
@@ -569,12 +883,8 @@ def train_model(
         results_path=results_path,
     )
 
-    max_length = _compute_max_length(dataset_root)
-    print(f"{_LOG_PREFIX} sequence_len (=max vehicle length) = {max_length}")
-
     dataset_kwargs = {
         "dataset_root": dataset_root,
-        "max_length": max_length,
         "seed": seed,
         "data_fraction": data_fraction,
         "val_rate": val_rate,
@@ -587,68 +897,21 @@ def train_model(
         "cache_dir": cache_dir,
         "force_load_from_cache": force_load_from_cache,
     }
-    print("Creating data module with the following parameters :")
-    print(dataset_kwargs)
-    scania_data_module = _build_data_module(**dataset_kwargs)
+    context = _build_run_context(dataset_kwargs, num_category_bins, import_data)
 
-    # ``force_load_from_cache`` adopts every split-defining param from the cache manifest,
-    # including ``sequence_len`` (see ``ScaniaDataModule._apply_cached_config``), silently
-    # overwriting ``scania_data_module.sequence_len`` out from under the freshly-computed
-    # ``max_length`` above whenever the cache was built for a different model. Continuing would
-    # build the model's TF graph for ``max_length`` while every window actually has
-    # ``scania_data_module.sequence_len`` steps -- and, worse, would silently break "one window ==
-    # one vehicle's full history", the invariant this whole integration depends on (see the module
-    # docstring). Fail loudly instead of training on truncated windows.
-    if scania_data_module.sequence_len != max_length:
-        raise ValueError(
-            f"{_LOG_PREFIX} --force-load-from-cache pinned sequence_len to "
-            f"{scania_data_module.sequence_len} (from the cache manifest at {cache_dir}), but "
-            f"Dynamic DeepHit needs sequence_len == the longest vehicle's row count ({max_length}) "
-            f"for its one-window-per-vehicle-history design. This cache was built for a different "
-            f"model's sequence_len and cannot be shared with Dynamic DeepHit. Point --dataset-cache-dir "
-            f"at a cache built for this model (run once without --force-load-from-cache to create it), "
-            f"or drop --force-load-from-cache for this run."
-        )
-
-    train_arrays = _extract_vehicle_arrays(scania_data_module.get_full_dataset("train"))
-    val_arrays = _extract_vehicle_arrays(scania_data_module.get_full_dataset("val"))
-    test_arrays = _extract_vehicle_arrays(scania_data_module.get_full_dataset("test"))
-
-    edges = _build_time_bin_edges(
-        train_arrays["meas_time_abs"], train_arrays["event_time_abs"],
-        val_arrays["meas_time_abs"], val_arrays["event_time_abs"],
-        num_bins=num_category_bins,
+    network_settings = _build_network_settings(
+        tf,
+        h_dim_RNN=h_dim_RNN,
+        h_dim_FC=h_dim_FC,
+        num_layers_RNN=num_layers_RNN,
+        num_layers_ATT=num_layers_ATT,
+        num_layers_CS=num_layers_CS,
+        RNN_type=RNN_type,
+        FC_active_fn=FC_active_fn,
+        RNN_active_fn=RNN_active_fn,
+        reg_W=reg_W,
+        reg_W_out=reg_W_out,
     )
-    num_category = len(edges) - 1
-    print(f"{_LOG_PREFIX} {num_category} time bins, edges [{edges[0]:.2f}, {edges[-1]:.2f}]")
-
-    for split_arrays in (train_arrays, val_arrays, test_arrays):
-        split_arrays["x"], split_arrays["x_mi"] = _windows_to_x_and_missing(split_arrays["windows"])
-        split_arrays["meas_time_bin"] = _digitize(split_arrays["meas_time_abs"], edges)
-        split_arrays["event_time_bin"] = _digitize(split_arrays["event_time_abs"], edges)
-
-    n_features = train_arrays["x"].shape[-1] - 1
-    input_dims = {
-        "x_dim": n_features + 1,
-        "x_dim_cont": n_features,
-        "x_dim_bin": 0,
-        "num_Event": 1,
-        "num_Category": num_category,
-        "max_length": max_length,
-    }
-    network_settings = {
-        "h_dim_RNN": h_dim_RNN,
-        "h_dim_FC": h_dim_FC,
-        "num_layers_RNN": num_layers_RNN,
-        "num_layers_ATT": num_layers_ATT,
-        "num_layers_CS": num_layers_CS,
-        "RNN_type": RNN_type,
-        "FC_active_fn": activation_functions[FC_active_fn],
-        "RNN_active_fn": activation_functions[RNN_active_fn],
-        "initial_W": tf.keras.initializers.GlorotUniform(),
-        "reg_W": reg_W,
-        "reg_W_out": reg_W_out,
-    }
 
     training_kwargs = {
         "mb_size": mb_size,
@@ -662,7 +925,7 @@ def train_model(
         "gamma": gamma,
         "eval_every": eval_every,
         "num_category_bins": num_category_bins,
-        "num_category_realized": num_category,
+        "num_category_realized": context.num_category,
         "use_gpu": use_gpu,
         "c_index_time_quantiles": c_index_time_quantiles,
         "c_index_max_vehicles": c_index_max_vehicles,
@@ -679,81 +942,50 @@ def train_model(
         "RNN_active_fn": RNN_active_fn,
         "reg_W": reg_W,
         "reg_W_out": reg_W_out,
-        "input_dims": input_dims,
+        "input_dims": context.input_dims,
     }
     print(f"Models parameters : {model_kwargs}")
     print(f"Training parameters : {training_kwargs}")
     save_train_parameters(
         results_path=results_path,
-        dataset_parameters=dataset_kwargs,
+        dataset_parameters=context.dataset_kwargs,
         training_parameters=training_kwargs,
         model_parameters=model_kwargs,
     )
 
-    model = model_class("dynamic_deephit_scania", input_dims, network_settings)
+    model = model_class("dynamic_deephit_scania", context.input_dims, network_settings)
 
     checkpoint_prefix = os.path.join(checkpoints_path, "dynamic_deephit_ckpt")
     checkpoint = tf.train.Checkpoint(model=model)
 
-    train_mask1, train_mask2, train_mask3 = _build_masks(
-        train_arrays["meas_time_bin"], train_arrays["event_time_bin"],
-        train_arrays["event_indicator"], num_category, import_data,
+    best_c_index, training_time_seconds = _fit(
+        model=model,
+        checkpoint=checkpoint,
+        checkpoint_prefix=checkpoint_prefix,
+        context=context,
+        mb_size=mb_size,
+        burn_in_mode=burn_in_mode,
+        iteration_burn_in=iteration_burn_in,
+        iteration=iteration,
+        keep_prob=keep_prob,
+        lr_train=lr_train,
+        alpha=alpha,
+        beta=beta,
+        gamma=gamma,
+        eval_every=eval_every,
+        c_index_time_quantiles=c_index_time_quantiles,
+        c_index_max_vehicles=c_index_max_vehicles,
+        seed=seed,
+        utils_helper_module=utils_helper,
+        utils_eval_module=utils_eval,
+        inference_batch_size=inference_batch_size,
     )
-
-    training_start = time.perf_counter()
-
-    if burn_in_mode:
-        print(f"{_LOG_PREFIX} burn-in training ({iteration_burn_in} iterations)...")
-        for step in tqdm(range(iteration_burn_in)):
-            # mask1/mask2/mask3 are unused by train_burn_in (RNN-reconstruction loss only) but
-            # f_get_minibatch always returns all seven arrays, so they still have to be passed in.
-            x_mb, x_mi_mb, k_mb, t_mb, _, _, _ = utils_helper.f_get_minibatch(
-                mb_size, train_arrays["x"], train_arrays["x_mi"],
-                train_arrays["event_indicator"][:, np.newaxis],
-                train_arrays["event_time_bin"][:, np.newaxis],
-                train_mask1, train_mask2, train_mask3,
-            )
-            _, loss = model.train_burn_in((x_mb, k_mb, t_mb), x_mi_mb, keep_prob, lr_train)
-            if (step + 1) % 1000 == 0:
-                print(f"{_LOG_PREFIX} burn-in itr {step + 1:6d} | loss {loss:.4f}")
-
-    checkpoint.write(checkpoint_prefix)  # baseline, so a checkpoint always exists
-    best_c_index = float("-inf")
-
-    print(f"{_LOG_PREFIX} main training ({iteration} iterations)...")
-    for step in tqdm(range(iteration)):
-        x_mb, x_mi_mb, k_mb, t_mb, m1_mb, m2_mb, m3_mb = utils_helper.f_get_minibatch(
-            mb_size, train_arrays["x"], train_arrays["x_mi"],
-            train_arrays["event_indicator"][:, np.newaxis],
-            train_arrays["event_time_bin"][:, np.newaxis],
-            train_mask1, train_mask2, train_mask3,
-        )
-        _, loss = model.train(
-            (x_mb, k_mb, t_mb), (m1_mb, m2_mb, m3_mb), x_mi_mb, (alpha, beta, gamma),
-            keep_prob, lr_train)
-
-        if (step + 1) % 1000 == 0:
-            print(f"{_LOG_PREFIX} itr {step + 1:6d} | loss {loss:.4f}")
-
-        if (step + 1) % eval_every == 0:
-            c_index = _validation_c_index(
-                model, val_arrays, edges, c_index_time_quantiles, c_index_max_vehicles, seed,
-                utils_eval, inference_batch_size)
-            print(f"{_LOG_PREFIX} itr {step + 1:6d} | val C-index {c_index:.4f}")
-            if c_index > best_c_index:
-                best_c_index = c_index
-                checkpoint.write(checkpoint_prefix)
-                print(f"{_LOG_PREFIX} updated... best val C-index = {best_c_index:.4f}")
-
-    training_time_seconds = time.perf_counter() - training_start
     print(f"{model_version.value} trained in {training_time_seconds:.1f}s")
 
-    checkpoint.restore(checkpoint_prefix).expect_partial()
-
-    train_rmse, _ = _score_split(train_arrays, model, edges, inference_batch_size)
-    val_rmse, _ = _score_split(val_arrays, model, edges, inference_batch_size)
+    train_rmse, _ = _score_split(context.train_arrays, model, context.edges, inference_batch_size)
+    val_rmse, _ = _score_split(context.val_arrays, model, context.edges, inference_batch_size)
     test_rmse, test_score, test_predictions, test_targets = _score_split(
-        test_arrays, model, edges, inference_batch_size, return_predictions=True)
+        context.test_arrays, model, context.edges, inference_batch_size, return_predictions=True)
 
     scores = pd.DataFrame(
         columns=["train_rmse", "val_rmse", "test_rmse", "test_score", "training_time_seconds"])
@@ -764,27 +996,27 @@ def train_model(
     def _predict_challenge_rul(
             features: Any, split: Literal["test", "validation"] = "test") -> dict[str, np.ndarray]:
         challenge_set = (
-            scania_data_module.build_challenge_dataset() if split == "test"
-            else scania_data_module.build_validation_challenge_dataset())
+            context.scania_data_module.build_challenge_dataset() if split == "test"
+            else context.scania_data_module.build_validation_challenge_dataset())
         features_np = features.numpy() if hasattr(features, "numpy") else np.asarray(features)
         x_challenge, x_mi_challenge = _windows_to_x_and_missing(features_np)
         meas_time_bin_challenge = _digitize(
-            challenge_set.time_step_array.astype(np.float64), edges)
+            challenge_set.time_step_array.astype(np.float64), context.edges)
         pmf_challenge = _predict_pmf(model, x_challenge, x_mi_challenge, inference_batch_size)
-        return {"test": _predicted_rul(pmf_challenge, meas_time_bin_challenge, edges)}
+        return {"test": _predicted_rul(pmf_challenge, meas_time_bin_challenge, context.edges)}
 
     # Additionally score the trained model on the official Scania Component X held-out sets (test
     # and validation). Never raises: the run's own results are already written by the time this
     # runs. _predict_challenge_rul must be re-invoked per split: it needs that split's own
     # challenge_set (time_step_array) to digitize its measurement time bins, not just its features.
     run_challenge_evaluation(
-        data_module=scania_data_module,
+        data_module=context.scania_data_module,
         predict_fn=lambda features: _predict_challenge_rul(features, split="test"),
         model_version=model_version.value,
         results_path=results_path,
     )
     run_challenge_evaluation(
-        data_module=scania_data_module,
+        data_module=context.scania_data_module,
         predict_fn=lambda features: _predict_challenge_rul(features, split="validation"),
         model_version=model_version.value,
         results_path=results_path,
