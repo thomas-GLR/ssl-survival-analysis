@@ -1,7 +1,10 @@
 {
   "hyper_parameters": {
+    "use_average_window_confidence": [false, true],
+    "confidence_width_threshold": [null],
     "use_monotone_projection": [true],
     "monotone_residual_weight": [1.0],
+    "disable_isotonic_regression": [false, true],
     "use_fine_tuning": [true],
     "fine_tune_lr_factor": [0.3],
     "fine_tune_max_epochs": [1],
@@ -14,7 +17,11 @@
     "use_cotraining_ensemble_survival_loss_function": [true],
     "cotraining_survival_loss_lambda": [0.7],
     "suspension_pool_size": [0.35],
-    "add_ratio": [0.1]
+    "add_ratio": [0.1],
+    "use_mondrian_categorizer": [false, true],
+    "mondrian_no_bins": [5],
+    "use_cps": [false, true],
+    "difficulty_estimator_k": [10]
   },
   "training_params": {
     "iterations": 20,

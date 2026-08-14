@@ -60,8 +60,11 @@ def train_model(
     # every non-default one.
     calib_rate: float = 0.0,
     inference_batch_size: int | None = None,
+    use_average_window_confidence: bool = False,
+    confidence_width_threshold: float | None = None,
     use_monotone_projection: bool = False,
     monotone_residual_weight: float = 1.0,
+    disable_isotonic_regression: bool = False,
     # Opt-in CoTrainingEnsemble_v2 levers (all default to legacy behavior). Settable from the
     # ``training_params`` block of the config JSON.
     use_fine_tuning: bool = False,
@@ -77,6 +80,10 @@ def train_model(
     train_with_censored_data: bool = False,
     use_cotraining_ensemble_survival_loss_function: bool = False,
     cotraining_survival_loss_lambda: float = 1.0,
+    use_mondrian_categorizer: bool = False,
+    mondrian_no_bins: int = 10,
+    use_cps: bool = False,
+    difficulty_estimator_k: int = 25,
     # Others
     force_load_from_cache: bool = False,
     gpu_ids: list[int] | None = None,
@@ -110,12 +117,24 @@ def train_model(
         inference_batch_size: If set, chunk every ``_predict`` forward pass into batches of this
             size so peak (host) memory during conformal scoring / metrics stays ``O(batch)``.
             Needed to fit small budgets (e.g. Colab T4). ``None`` keeps single-shot inference.
+        use_average_window_confidence: When ``True``, a censored unit's confidence-interval width
+            is the mean width across all of its windows instead of only the last (most recent)
+            window. ``False`` (default) keeps the legacy last-window-only behavior.
+        confidence_width_threshold: Optional cutoff on a unit's confidence-interval width (same
+            scale as ``use_average_window_confidence``). A model's candidate whose width exceeds
+            it is dropped entirely for that iteration. ``None`` (default) disables the filter.
         use_monotone_projection: When ``True``, each censored unit's per-window pseudo-labels are
             projected onto the closest non-increasing sequence and clipped up to the per-window
             survival lower bound; the projection residual is blended into unit selection. ``False``
             (default) keeps the legacy width-only scoring.
         monotone_residual_weight: Weight of the residual term in the blended selection score (only
             used when ``use_monotone_projection`` is ``True``).
+        disable_isotonic_regression: When ``True``, skips the isotonic-regression smoothing (and
+            its lower-bound clip) even when ``use_monotone_projection`` is ``True``: raw
+            predictions are used unchanged, and a peer whose raw prediction violates the survival
+            lower bound is dropped (not corrected) by the existing physical-validity filter.
+            Only has an effect when ``use_monotone_projection`` is ``True``; cannot be combined
+            with ``isotonic_time_weighting``. ``False`` (default) keeps the isotonic projection.
         use_fine_tuning: When ``True``, receivers are warm-start fine-tuned each iteration instead
             of retrained from scratch. ``False`` (default) keeps from-scratch retraining.
         fine_tune_lr_factor: LR multiplier for a fine-tune (only used when ``use_fine_tuning``).
@@ -161,6 +180,17 @@ def train_model(
         cotraining_survival_loss_lambda: Weight of the pseudo-label MSE term in
             ``cotraining_ensemble_survival_loss_function``. Only used when
             ``use_cotraining_ensemble_survival_loss_function`` is ``True``.
+        use_mondrian_categorizer: When ``True``, every ``crepes`` conformal regressor is also
+            Mondrian: a ``MondrianCategorizer`` (fit on the model's training features using its
+            ``DifficultyEstimator``) bins calibration instances into ``mondrian_no_bins``
+            categories. ``False`` (default) keeps calibration purely normalized.
+        mondrian_no_bins: Number of Mondrian categories. Only used when
+            ``use_mondrian_categorizer`` is ``True``.
+        use_cps: When ``True``, every ``crepes`` conformal regressor is calibrated as a
+            ``ConformalPredictiveSystem`` instead of a ``ConformalRegressor``. ``False``
+            (default) keeps the ``ConformalRegressor``.
+        difficulty_estimator_k: Number of nearest neighbors used by the (always-on)
+            ``DifficultyEstimator`` to compute each instance's normalized difficulty score.
         force_load_from_cache: When ``True``, the data module reads the splits straight out of
             ``cache_dir`` and adopts every split-defining param from its ``manifest.json``,
             never re-preprocessing and never overwriting the cache. Used to pin every
@@ -262,8 +292,11 @@ def train_model(
         "add_ratio": add_ratio,
         "confidence": confidence,
         "inference_batch_size": inference_batch_size,
+        "use_average_window_confidence": use_average_window_confidence,
+        "confidence_width_threshold": confidence_width_threshold,
         "use_monotone_projection": use_monotone_projection,
         "monotone_residual_weight": monotone_residual_weight,
+        "disable_isotonic_regression": disable_isotonic_regression,
         "use_fine_tuning": use_fine_tuning,
         "fine_tune_lr_factor": fine_tune_lr_factor,
         "fine_tune_max_epochs": fine_tune_max_epochs,
@@ -277,6 +310,10 @@ def train_model(
         "train_with_censored_data": train_with_censored_data,
         "use_cotraining_ensemble_survival_loss_function": use_cotraining_ensemble_survival_loss_function,
         "cotraining_survival_loss_lambda": cotraining_survival_loss_lambda,
+        "use_mondrian_categorizer": use_mondrian_categorizer,
+        "mondrian_no_bins": mondrian_no_bins,
+        "use_cps": use_cps,
+        "difficulty_estimator_k": difficulty_estimator_k,
         "lr": meta["lr"],
         "max_epochs": meta["max_epochs"],
         "patiences": meta["patiences"],
@@ -296,8 +333,11 @@ def train_model(
         verbose=1,
         confidence=confidence,
         inference_batch_size=inference_batch_size,
+        use_average_window_confidence=use_average_window_confidence,
+        confidence_width_threshold=confidence_width_threshold,
         use_monotone_projection=use_monotone_projection,
         monotone_residual_weight=monotone_residual_weight,
+        disable_isotonic_regression=disable_isotonic_regression,
         use_fine_tuning=use_fine_tuning,
         fine_tune_lr_factor=fine_tune_lr_factor,
         fine_tune_max_epochs=fine_tune_max_epochs,
@@ -310,6 +350,10 @@ def train_model(
         computing_weight_mode=computing_weight_mode,
         use_cotraining_ensemble_survival_loss_function=use_cotraining_ensemble_survival_loss_function,
         cotraining_survival_loss_lambda=cotraining_survival_loss_lambda,
+        use_mondrian_categorizer=use_mondrian_categorizer,
+        mondrian_no_bins=mondrian_no_bins,
+        use_cps=use_cps,
+        difficulty_estimator_k=difficulty_estimator_k,
     )
 
     print(f"Co-training ensemble GPU selection: {gpu_ids if gpu_ids else 'auto (single GPU)'}")

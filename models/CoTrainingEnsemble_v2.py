@@ -13,7 +13,7 @@ import torch.nn as nn
 from enum import Enum
 
 from crepes import WrapRegressor
-from crepes.extras import DifficultyEstimator
+from crepes.extras import DifficultyEstimator, MondrianCategorizer
 from lightning import LightningModule, Trainer
 from torch.utils.data import TensorDataset, DataLoader
 
@@ -49,8 +49,11 @@ class CoTrainingEnsemble_v2:
             verbose: int = 0,
             confidence: float = 0.95,
             inference_batch_size: int | None = None,
+            use_average_window_confidence: bool = False,
+            confidence_width_threshold: float | None = None,
             use_monotone_projection: bool = False,
             monotone_residual_weight: float = 1.0,
+            disable_isotonic_regression: bool = False,
             use_fine_tuning: bool = False,
             fine_tune_lr_factor: float = 0.1,
             fine_tune_max_epochs: int = 20,
@@ -63,6 +66,10 @@ class CoTrainingEnsemble_v2:
             computing_weight_mode: str = "val_rmse",
             use_cotraining_ensemble_survival_loss_function: bool = False,
             cotraining_survival_loss_lambda: float = 1.0,
+            use_mondrian_categorizer: bool = False,
+            mondrian_no_bins: int = 10,
+            use_cps: bool = False,
+            difficulty_estimator_k: int = 25,
     ):
         """
         :param models: list[nn.Module]
@@ -81,6 +88,23 @@ class CoTrainingEnsemble_v2:
             ``O(batch)`` during the conformal scoring and per-stage metrics, which is what keeps
             the run within a small (e.g. Colab T4, 12.7 GB RAM) budget. ``None`` keeps the
             legacy single-shot behavior. Numerically identical either way.
+        :param use_average_window_confidence: bool
+            When ``True``, a censored unit's confidence-interval width (used to rank candidates
+            and, when ``confidence_width_threshold`` is set, to filter them) is the **mean**
+            width across *all* of the unit's windows, computed with one batched ``crepes`` call
+            per model, instead of only the last (most recent) window. ``False`` (default) keeps
+            the legacy last-window-only behavior. Sequential path only (like every other opt-in
+            lever); ``train()`` raises if combined with multi-GPU parallel (``gpu_ids`` with
+            ``>= 2`` GPUs).
+        :param confidence_width_threshold: float | None
+            Optional cutoff on a unit's confidence-interval width (same scale/definition as
+            ``use_average_window_confidence`` above). A model's candidate whose width exceeds
+            this threshold is dropped entirely for that iteration -- it can never be selected
+            nor offered as a pseudo-label source to a peer, mirroring how the survival-bound
+            validity filter *drops* (rather than corrects) an invalid prediction. If every
+            model's candidate for a unit is dropped this way, the unit is simply absent from
+            this iteration's pool. ``None`` (default) disables the filter. Must be ``> 0`` when
+            given. Sequential path only.
         :param use_monotone_projection: bool
             When ``True``, each censored unit's per-window pseudo-labels are projected onto the
             closest non-increasing sequence (isotonic regression), optionally clipped up to the
@@ -94,6 +118,18 @@ class CoTrainingEnsemble_v2:
             ``width_norm + lambda * residual_norm`` (both terms per-model normalized). Only used
             when ``use_monotone_projection`` is ``True``; ``0`` disables the residual term (the
             projection still cleans the injected labels but selection stays width-only).
+        :param disable_isotonic_regression: bool
+            When ``True``, the isotonic-regression smoothing step inside the monotone
+            projection is skipped even if ``use_monotone_projection`` is ``True``: a unit's raw
+            per-window predictions are used unchanged (no isotonic fit, no lower-bound clip),
+            and the projection residual stays ``0.0`` (so it never contributes to the blended
+            selection score). A peer whose raw prediction still violates the survival lower
+            bound is not corrected -- it is simply excluded from being a pseudo-label source by
+            the existing physical-validity filter in ``_voting_censored_data_selection``, the
+            same as when ``use_monotone_projection`` is ``False`` outright. Only has an effect
+            when ``use_monotone_projection`` is ``True``; ``train()`` raises if combined with
+            ``isotonic_time_weighting`` (which only has meaning inside the isotonic fit this
+            flag skips). ``False`` (default) keeps the isotonic projection. Sequential path only.
         :param use_fine_tuning: bool
             When ``True``, each receiver model is **warm-started from its current weights and
             fine-tuned** on its grown dataset every iteration instead of being retrained from
@@ -184,6 +220,30 @@ class CoTrainingEnsemble_v2:
             Weight of the pseudo-label MSE term in
             ``cotraining_ensemble_survival_loss_function``. Only used when
             ``use_cotraining_ensemble_survival_loss_function`` is ``True``. Must be ``>= 0``.
+        :param use_mondrian_categorizer: bool
+            When ``True``, every ``crepes`` conformal regressor built by
+            ``_build_calibrated_regressor`` (censored-unit scoring, and
+            ``computing_weight_mode="confidence"``) is additionally Mondrian: a
+            ``crepes.extras.MondrianCategorizer`` is fit on the model's training features using
+            its already-fitted ``DifficultyEstimator`` (``mondrian_no_bins`` categories) and
+            passed as ``mc=`` to ``WrapRegressor.calibrate``, so calibration is done per-bin on
+            top of being normalized. ``False`` (default) keeps calibration purely normalized
+            (no Mondrian categories).
+        :param mondrian_no_bins: int
+            Number of Mondrian categories (``no_bins=`` passed to
+            ``MondrianCategorizer.fit``). Only used when ``use_mondrian_categorizer`` is
+            ``True``. Must be ``>= 2``.
+        :param use_cps: bool
+            When ``True``, every ``crepes`` conformal regressor is calibrated as a
+            ``ConformalPredictiveSystem`` instead of a ``ConformalRegressor`` (``cps=True``
+            passed to ``WrapRegressor.calibrate``). ``predict_int``/``predict_p`` dispatch on
+            whichever was fitted, so no other call site needs to change. ``False`` (default)
+            keeps the legacy ``ConformalRegressor``.
+        :param difficulty_estimator_k: int
+            Number of nearest neighbors (``k=`` passed to ``DifficultyEstimator.fit``) used to
+            compute each instance's normalized difficulty score. ``DifficultyEstimator`` is
+            always used (never optional) regardless of the other conformal-calibration flags
+            above. Must be a positive integer. Defaults to ``25`` (``crepes``'s own default).
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
@@ -193,6 +253,9 @@ class CoTrainingEnsemble_v2:
 
         if monotone_residual_weight < 0:
             raise ValueError("monotone_residual_weight must be non-negative.")
+
+        if confidence_width_threshold is not None and confidence_width_threshold <= 0:
+            raise ValueError("confidence_width_threshold must be positive when provided.")
 
         if fine_tune_lr_factor <= 0:
             raise ValueError("fine_tune_lr_factor must be positive.")
@@ -211,6 +274,12 @@ class CoTrainingEnsemble_v2:
         if cotraining_survival_loss_lambda < 0:
             raise ValueError("cotraining_survival_loss_lambda must be non-negative.")
 
+        if difficulty_estimator_k <= 0:
+            raise ValueError("difficulty_estimator_k must be a positive integer.")
+
+        if mondrian_no_bins < 2:
+            raise ValueError("mondrian_no_bins must be an integer >= 2.")
+
         self.models = models
         self.number_of_models = len(self.models)
         self.lightning_modules = None
@@ -225,8 +294,11 @@ class CoTrainingEnsemble_v2:
         self.verbose = verbose
         self.confidence = confidence
         self._inference_batch_size = inference_batch_size
+        self.use_average_window_confidence = use_average_window_confidence
+        self.confidence_width_threshold = confidence_width_threshold
         self.use_monotone_projection = use_monotone_projection
         self.monotone_residual_weight = monotone_residual_weight
+        self.disable_isotonic_regression = disable_isotonic_regression
         self.use_fine_tuning = use_fine_tuning
         self.fine_tune_lr_factor = fine_tune_lr_factor
         self.fine_tune_max_epochs = fine_tune_max_epochs
@@ -239,6 +311,10 @@ class CoTrainingEnsemble_v2:
         self.computing_weight_mode = computing_weight_mode
         self.use_cotraining_ensemble_survival_loss_function = use_cotraining_ensemble_survival_loss_function
         self.cotraining_survival_loss_lambda = cotraining_survival_loss_lambda
+        self.use_mondrian_categorizer = use_mondrian_categorizer
+        self.mondrian_no_bins = mondrian_no_bins
+        self.use_cps = use_cps
+        self.difficulty_estimator_k = difficulty_estimator_k
 
         # Builder-style config (set through setup_training_builder), required for multi-GPU
         # parallel training. Mirrors models.Coprog / CoTrainingEnsemble (v1).
@@ -567,7 +643,8 @@ class CoTrainingEnsemble_v2:
         self._check_if_training_is_possible()
 
         # The opt-in levers (fine-tuning, fine-tune-from-initial-model, peer-weighted
-        # pseudo-labels, keep-best-model, time-weighted isotonic) are only wired into the
+        # pseudo-labels, keep-best-model, time-weighted isotonic, average-window confidence,
+        # disabled isotonic regression, confidence-width threshold) are only wired into the
         # sequential path; refuse to run them silently under multi-GPU parallel where they
         # would be ignored.
         new_features_on = (
@@ -575,14 +652,17 @@ class CoTrainingEnsemble_v2:
                 or self.peer_weighted_pseudo_label
                 or self.keep_best_model_mode is not None or self.isotonic_time_weighting
                 or train_with_censored_data or self.use_cotraining_ensemble_survival_loss_function
+                or self.use_average_window_confidence or self.disable_isotonic_regression
+                or self.confidence_width_threshold is not None
         )
         if self._parallel and new_features_on:
             raise ValueError(
                 "use_fine_tuning, fine_tune_from_initial_model, peer_weighted_pseudo_label, "
-                "keep_best_model_mode, isotonic_time_weighting, train_with_censored_data and "
-                "use_cotraining_ensemble_survival_loss_function are only supported on the "
-                "sequential path; they cannot be combined with multi-GPU parallel (gpu_ids "
-                "with >= 2 GPUs).")
+                "keep_best_model_mode, isotonic_time_weighting, train_with_censored_data, "
+                "use_cotraining_ensemble_survival_loss_function, use_average_window_confidence, "
+                "disable_isotonic_regression and confidence_width_threshold are only supported "
+                "on the sequential path; they cannot be combined with multi-GPU parallel "
+                "(gpu_ids with >= 2 GPUs).")
 
         # Injected pretrained models replace the sequential path's Initial-training block; the
         # parallel path runs its own (and would silently ignore them).
@@ -633,6 +713,10 @@ class CoTrainingEnsemble_v2:
             if not self.use_monotone_projection:
                 raise ValueError(
                     "isotonic_time_weighting requires use_monotone_projection=True.")
+            if self.disable_isotonic_regression:
+                raise ValueError(
+                    "isotonic_time_weighting cannot be combined with "
+                    "disable_isotonic_regression (there is no isotonic fit left to weight).")
             if suspension_time_steps is None:
                 raise ValueError(
                     "isotonic_time_weighting requires suspension_time_steps to be provided.")
@@ -680,8 +764,12 @@ class CoTrainingEnsemble_v2:
         # only reachable with use_monotone_projection and suspension_time_steps present).
         time_weight = self.isotonic_time_weighting and suspension_time_steps is not None
 
-        self._log(1, f"[CoTraining] Training parameters | use_monotone_projection: {self.use_monotone_projection} | "
+        self._log(1, f"[CoTraining] Training parameters | "
+                     f"use_average_window_confidence: {self.use_average_window_confidence} |"
+                     f"confidence_width_threshold: {self.confidence_width_threshold} |"
+                     f"use_monotone_projection: {self.use_monotone_projection} | "
                      f"monotone_residual_weight: {self.monotone_residual_weight} |"
+                     f"disable_isotonic_regression: {self.disable_isotonic_regression} |"
                      f"use_fine_tuning: {self.use_fine_tuning} |"
                      f"fine_tune_lr_factor: {self.fine_tune_lr_factor} |"
                      f"fine_tune_max_epochs: {self.fine_tune_max_epochs} |"
@@ -695,6 +783,10 @@ class CoTrainingEnsemble_v2:
                      f"use_cotraining_ensemble_survival_loss_function: "
                      f"{self.use_cotraining_ensemble_survival_loss_function} |"
                      f"cotraining_survival_loss_lambda: {self.cotraining_survival_loss_lambda} |"
+                     f"use_mondrian_categorizer: {self.use_mondrian_categorizer} |"
+                     f"mondrian_no_bins: {self.mondrian_no_bins} |"
+                     f"use_cps: {self.use_cps} |"
+                     f"difficulty_estimator_k: {self.difficulty_estimator_k} |"
                      f"pool_seed: {pool_seed}")
 
         # Wall-clock bookkeeping for this run (see ``training_duration_seconds`` /
@@ -834,9 +926,12 @@ class CoTrainingEnsemble_v2:
 
             # Phase 1 — for each model j, build a conformal regressor (calibrated on the
             # validation set) and score every pooled censored unit by the width of the
-            # prediction interval at the unit's last window (narrower = more confident).
-            # Results are stored in an OrderedDict (sorted by width ascending) so the most
-            # confident candidate is always first.
+            # prediction interval at the unit's last window (narrower = more confident), or by
+            # the *mean* width across all of the unit's windows when
+            # use_average_window_confidence is on. A unit whose width exceeds
+            # confidence_width_threshold (when set) is dropped entirely for this model this
+            # iteration. Results are stored in an OrderedDict (sorted by width ascending) so the
+            # most confident candidate is always first.
             # Structure:
             #   all_preds[j] = OrderedDict{ unit_id_int -> (unit_id, xu, lu_p, lower, upper, width, residual, raw_lu_p, lb) }
             # (lu_p is the monotone-projected label when projection is on; residual is 0.0 otherwise;
@@ -858,14 +953,16 @@ class CoTrainingEnsemble_v2:
                 wrapper = self._build_calibrated_regressor(hj, xj, yj, calib_data_eff, calib_label_eff)
 
                 # Collect each unit's rows, its per-window pseudo-labels, its (optional) per-window
-                # lower bounds and its last window (the interval of that final window is the unit's
-                # "range").
+                # lower bounds and the window(s) that feed the confidence interval: the last
+                # window only by default, or every window when use_average_window_confidence is
+                # on (averaging a single window degenerates to the last-window-only behavior, so
+                # both cases share the same code path below).
                 unit_ids = list(pool_ids)
                 xus: list[torch.Tensor] = []
                 lu_ps: list[torch.Tensor] = []
                 lb_us: list[torch.Tensor | None] = []
                 sw_us: list[np.ndarray | None] = []
-                last_windows: list[torch.Tensor] = []
+                conf_windows: list[torch.Tensor] = []
                 for unit_id in unit_ids:
                     mask = (suspension_ids == unit_id)
                     xu = suspension_data[mask]
@@ -878,22 +975,37 @@ class CoTrainingEnsemble_v2:
                     sw_us.append(
                         self._time_gap_sample_weight(suspension_time_steps[mask])
                         if time_weight else None)
-                    last_windows.append(xu[-1])
+                    conf_windows.append(xu if self.use_average_window_confidence else xu[-1:])
 
-                # One batched conformal call for all units' last windows -> (U, 2) [lower, upper].
-                last_windows_tensor = torch.stack(last_windows, dim=0)
+                # One batched conformal call for every window that contributes to a unit's
+                # confidence score -> (total_windows, 2) [lower, upper] numpy array (crepes'
+                # own return type), split back per unit.
+                window_counts = [w.shape[0] for w in conf_windows]
+                windows_tensor = torch.cat(conf_windows, dim=0)
                 intervals = wrapper.predict_int(
-                    self._flatten(last_windows_tensor), confidence=self.confidence)
+                    self._flatten(windows_tensor), confidence=self.confidence)
+                per_unit_intervals = np.split(intervals, np.cumsum(window_counts)[:-1])
 
                 candidates = []
                 for idx, unit_id in enumerate(unit_ids):
-                    lower = float(intervals[idx, 0])
-                    upper = float(intervals[idx, 1])
-                    width = upper - lower
+                    unit_intervals = per_unit_intervals[idx]
+                    lower = float(unit_intervals[:, 0].mean())
+                    upper = float(unit_intervals[:, 1].mean())
+                    width = float((unit_intervals[:, 1] - unit_intervals[:, 0]).mean())
+                    if (self.confidence_width_threshold is not None
+                            and width > self.confidence_width_threshold):
+                        self._log(2, f"[CoTraining]   Model {j}: unit {unit_id.item()} excluded "
+                                     f"(width {width:.4f} exceeds confidence_width_threshold "
+                                     f"{self.confidence_width_threshold}).")
+                        continue
                     # When enabled, project this unit's per-window predictions onto a
                     # non-increasing (and lower-bound-clipped) sequence; the projected labels
                     # replace the raw predictions and the residual feeds the selection score.
-                    if self.use_monotone_projection:
+                    # disable_isotonic_regression skips the isotonic fit (and its clip) even when
+                    # projection is on: raw predictions are used unchanged, and a peer whose
+                    # prediction violates the survival lower bound is dropped (not corrected) by
+                    # the physical-validity filter in _voting_censored_data_selection.
+                    if self.use_monotone_projection and not self.disable_isotonic_regression:
                         label, residual = _monotone_project(
                             lu_ps[idx], lb_us[idx], sample_weight=sw_us[idx])
                     else:
@@ -920,7 +1032,7 @@ class CoTrainingEnsemble_v2:
                 # Release this model's calibrated regressor (and the fitted kNN
                 # DifficultyEstimator + train-set copies it holds) before the next model
                 # builds its own, so at most one is alive at a time instead of all four.
-                del wrapper, xus, lu_ps, lb_us, sw_us, last_windows, last_windows_tensor, intervals, candidates
+                del wrapper, xus, lu_ps, lb_us, sw_us, conf_windows, windows_tensor, intervals, per_unit_intervals, candidates
                 gc.collect()
 
             # Widths are not comparable across models (each model calibrates its own conformal
@@ -1679,6 +1791,10 @@ class CoTrainingEnsemble_v2:
                         confidence=self.confidence,
                         use_monotone_projection=self.use_monotone_projection,
                         unit_lower_bounds=unit_lb,
+                        difficulty_estimator_k=self.difficulty_estimator_k,
+                        use_mondrian_categorizer=self.use_mondrian_categorizer,
+                        mondrian_no_bins=self.mondrian_no_bins,
+                        use_cps=self.use_cps,
                         accelerator="gpu",
                         devices=1,
                     )
@@ -2119,14 +2235,19 @@ class CoTrainingEnsemble_v2:
             calib_y: torch.Tensor,
     ) -> WrapRegressor:
         """
-        Wrap an already-trained ``model`` in a normalized conformal regressor.
+        Wrap an already-trained ``model`` in a normalized (and optionally Mondrian / CPS)
+        conformal regressor.
 
-        A ``DifficultyEstimator`` is fitted on the model's (flattened) training features so
-        the conformal intervals are *normalized* — their width varies per instance with how
-        far the instance is from the training data. Without it a standard conformal regressor
-        would return the same width for every unit, giving nothing to rank on. The regressor
-        is calibrated on the validation set. crepes never calls ``.fit`` on the learner, so
-        wrapping the pre-trained model via ``_TorchRegressorAdapter`` is sufficient.
+        A ``DifficultyEstimator`` is always fitted on the model's (flattened) training
+        features so the conformal intervals are *normalized* — their width varies per instance
+        with how far the instance is from the training data. Without it a standard conformal
+        regressor would return the same width for every unit, giving nothing to rank on. When
+        ``self.use_mondrian_categorizer`` is set, a ``MondrianCategorizer`` (fit on the same
+        difficulty scores) additionally bins calibration instances into
+        ``self.mondrian_no_bins`` categories. The regressor (or, when ``self.use_cps`` is set,
+        predictive system) is calibrated on the validation set. crepes never calls ``.fit`` on
+        the learner, so wrapping the pre-trained model via ``_TorchRegressorAdapter`` is
+        sufficient.
         """
         seq_len, n_features = train_x.shape[1], train_x.shape[2]
 
@@ -2140,19 +2261,25 @@ class CoTrainingEnsemble_v2:
 
         residuals = train_y.view(-1).cpu().numpy().astype(np.float32) - adapter.predict(self._flatten(train_x))
 
-
-
         de = DifficultyEstimator()
         de.fit(
             X=self._flatten(train_x),
             residuals=residuals,
+            k=self.difficulty_estimator_k,
         )
+
+        mc = None
+        if self.use_mondrian_categorizer:
+            mc = MondrianCategorizer()
+            mc.fit(X=self._flatten(train_x), de=de, no_bins=self.mondrian_no_bins)
 
         wrapper = WrapRegressor(adapter)
         wrapper.calibrate(
             X=self._flatten(calib_x),
             y=calib_y.view(-1).detach().cpu().numpy().astype(np.float32),
             de=de,
+            mc=mc,
+            cps=self.use_cps,
         )
         return wrapper
 

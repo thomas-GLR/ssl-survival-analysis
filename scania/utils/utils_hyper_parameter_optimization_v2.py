@@ -87,8 +87,9 @@ _DEPENDENT_HYPER_PARAMETERS: dict[str, list[str]] = {
         "fine_tune_patience",
         "fine_tune_from_initial_model",
     ],
-    "use_monotone_projection": ["monotone_residual_weight"],
+    "use_monotone_projection": ["monotone_residual_weight", "disable_isotonic_regression"],
     "use_cotraining_ensemble_survival_loss_function": ["cotraining_survival_loss_lambda"],
+    "use_mondrian_categorizer": ["mondrian_no_bins"],
 }
 
 
@@ -418,6 +419,9 @@ def build_configurations(hyper_parameters: dict[str, list]) -> list[dict[str, An
        only produce duplicate runs.
     3. ``isotonic_time_weighting=True`` requires ``use_monotone_projection=True``
        (``CoTrainingEnsemble_v2.train`` raises otherwise), so those combinations are dropped.
+    4. ``isotonic_time_weighting=True`` and ``disable_isotonic_regression=True`` are mutually
+       exclusive (``CoTrainingEnsemble_v2.train`` raises otherwise), so those combinations are
+       dropped too.
 
     What survives is then deduplicated, preserving order.
 
@@ -458,6 +462,10 @@ def build_configurations(hyper_parameters: dict[str, list]) -> list[dict[str, An
 
         if configuration["isotonic_time_weighting"] and not configuration["use_monotone_projection"]:
             # Would raise in train(): the isotonic weighting only exists inside the projection.
+            continue
+
+        if configuration["isotonic_time_weighting"] and configuration["disable_isotonic_regression"]:
+            # Would raise in train(): there is no isotonic fit left for the weighting to apply to.
             continue
 
         _canonicalize(configuration, hyper_parameters)
