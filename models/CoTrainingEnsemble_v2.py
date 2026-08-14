@@ -855,7 +855,7 @@ class CoTrainingEnsemble_v2:
                              f"scoring {len(pool_ids)} pooled censored units...")
 
                 conformal_start = time.perf_counter()
-                wrapper = self._build_calibrated_regressor(hj, xj, calib_data_eff, calib_label_eff)
+                wrapper = self._build_calibrated_regressor(hj, xj, yj, calib_data_eff, calib_label_eff)
 
                 # Collect each unit's rows, its per-window pseudo-labels, its (optional) per-window
                 # lower bounds and its last window (the interval of that final window is the unit's
@@ -1671,6 +1671,7 @@ class CoTrainingEnsemble_v2:
                         module_builder=self.module_builders[j],
                         state_dict={k: v.detach().cpu().clone() for k, v in h[j].state_dict().items()},
                         train_x=xj.detach().cpu(),
+                        train_y=yj.detach().cpu(),
                         val_x=calib_cpu[0],
                         val_y=calib_cpu[1],
                         unit_ids=unit_ids_int,
@@ -2113,8 +2114,9 @@ class CoTrainingEnsemble_v2:
             self,
             model: LightningModule,
             train_x: torch.Tensor,
-            val_x: torch.Tensor,
-            val_y: torch.Tensor,
+            train_y: torch.Tensor,
+            calib_x: torch.Tensor,
+            calib_y: torch.Tensor,
     ) -> WrapRegressor:
         """
         Wrap an already-trained ``model`` in a normalized conformal regressor.
@@ -2134,13 +2136,22 @@ class CoTrainingEnsemble_v2:
         # changes the internal chunk size, not the numerical result.
         sklearn.set_config(working_memory=128)
 
-        de = DifficultyEstimator()
-        de.fit(X=self._flatten(train_x))
+        adapter = _TorchRegressorAdapter(self._predict, model, seq_len, n_features)
 
-        wrapper = WrapRegressor(_TorchRegressorAdapter(self._predict, model, seq_len, n_features))
+        residuals = train_y.view(-1).cpu().numpy().astype(np.float32) - adapter.predict(self._flatten(train_x))
+
+
+
+        de = DifficultyEstimator()
+        de.fit(
+            X=self._flatten(train_x),
+            residuals=residuals,
+        )
+
+        wrapper = WrapRegressor(adapter)
         wrapper.calibrate(
-            X=self._flatten(val_x),
-            y=val_y.view(-1).detach().cpu().numpy().astype(np.float32),
+            X=self._flatten(calib_x),
+            y=calib_y.view(-1).detach().cpu().numpy().astype(np.float32),
             de=de,
         )
         return wrapper
@@ -2612,8 +2623,8 @@ class CoTrainingEnsemble_v2:
         val_y_flat = val_y.view(-1).detach().cpu().numpy().astype(np.float32)
         scores = []
         for j, model in enumerate(self.lightning_modules):
-            train_x, _ = self._models_datasets[j]
-            wrapper = self._build_calibrated_regressor(model, train_x, calib_x, calib_y)
+            train_x, train_y = self._models_datasets[j]
+            wrapper = self._build_calibrated_regressor(model, train_x, train_y, calib_x, calib_y)
             p_values = wrapper.predict_p(self._flatten(val_x), val_y_flat, online=True)
             scores.append(float(np.mean(p_values)))
 

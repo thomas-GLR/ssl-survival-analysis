@@ -298,6 +298,10 @@ class ConformalScoreSpec:
     :param state_dict: CPU ``state_dict`` of the trained model to score with.
     :param train_x: The model's (flattened-internally) training features, for the
         ``DifficultyEstimator``.
+    :param train_y: The model's training targets, aligned with ``train_x``. Used to compute
+        the model's own residuals on its training data, which the ``DifficultyEstimator``
+        uses (``target_type="residuals"``) so interval widths scale with local prediction
+        error rather than just training-data density.
     :param val_x: Validation features used to calibrate the conformal regressor.
     :param val_y: Validation targets used to calibrate the conformal regressor.
     :param unit_ids: The pooled censored unit ids (ints), aligned with ``unit_x``.
@@ -318,6 +322,7 @@ class ConformalScoreSpec:
     module_builder: Callable[[], LightningModule]
     state_dict: dict[str, torch.Tensor]
     train_x: torch.Tensor
+    train_y: torch.Tensor
     val_x: torch.Tensor
     val_y: torch.Tensor
     unit_ids: list[int]
@@ -460,8 +465,9 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
     """Score a model's pooled censored units with ``crepes`` conformal intervals (v2).
 
     Builds the trained model, wraps it in a normalized conformal regressor
-    (``DifficultyEstimator`` fitted on ``spec.train_x``, calibrated on the validation set),
-    predicts each unit's per-window pseudo-labels, and computes the prediction interval of
+    (``DifficultyEstimator`` fitted on ``spec.train_x`` with the model's own training
+    residuals, calibrated on the validation set), predicts each unit's per-window
+    pseudo-labels, and computes the prediction interval of
     each unit's last window in one batched ``predict_int`` call. When
     ``spec.use_monotone_projection`` is set, each unit's pseudo-labels are additionally passed
     through :func:`_monotone_project` (returning the projected labels and a residual).
@@ -492,10 +498,14 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
     train_x = spec.train_x
     seq_len, n_features = train_x.shape[1], train_x.shape[2]
 
-    # Normalized conformal regressor: DifficultyEstimator makes widths vary per instance.
+    adapter = _TorchRegressorAdapter(_predict, model, seq_len, n_features)
+
+    # Normalized conformal regressor: DifficultyEstimator makes widths vary per instance,
+    # based on the model's own residuals in the neighborhood (not just training-data density).
+    residuals = spec.train_y.view(-1).cpu().numpy().astype(np.float32) - adapter.predict(_flatten(train_x))
     de = DifficultyEstimator()
-    de.fit(X=_flatten(train_x))
-    wrapper = WrapRegressor(_TorchRegressorAdapter(_predict, model, seq_len, n_features))
+    de.fit(X=_flatten(train_x), residuals=residuals)
+    wrapper = WrapRegressor(adapter)
     wrapper.calibrate(
         X=_flatten(spec.val_x),
         y=spec.val_y.view(-1).detach().cpu().numpy().astype(np.float32),
