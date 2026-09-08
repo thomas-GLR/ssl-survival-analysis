@@ -87,6 +87,12 @@ def _parse_args() -> argparse.Namespace:
             "For parallel runs use postgresql://user:pass@host/db"
         ),
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=int(os.getenv("SEED", "42")),
+        help="Random seed for reproducibility across Python, NumPy, Pandas, PyTorch, PyTorch CUDA",
+    )
     return parser.parse_args()
 
 
@@ -108,9 +114,10 @@ def main() -> None:
     storage = args.storage or f"sqlite:///{db_path.replace(os.sep, '/')}"
 
     logger.info(
-        "HPO started — model=%s  trials=%d  storage=%s",
+        "HPO started — model=%s  trials=%d  seed=%d  storage=%s",
         args.model,
         args.n_trials,
+        args.seed,
         storage,
     )
 
@@ -121,6 +128,7 @@ def main() -> None:
         cache_dir=args.cache_dir,
         max_epochs=args.max_epochs,
         storage=storage,
+        seed=args.seed,
     )
 
     summary_table(study)
