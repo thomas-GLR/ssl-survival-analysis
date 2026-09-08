@@ -21,6 +21,7 @@ from scania.utils import (
     train_model_coprog,
     train_model_cotraining_ensemble,
     train_model_cotraining_ensemble_v2,
+    train_model_dynamic_deephit,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,8 @@ def _get_train_model_method(model_version: ModelVersion) -> Callable:
             return train_model_lightning
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
             return train_model_lightning
+        case ModelVersion.DYNAMIC_DEEPHIT:
+            return train_model_dynamic_deephit
         case _:
             raise ValueError(f"Model version {model_version.value} not supported")
 
@@ -180,6 +183,7 @@ def _parse_args() -> argparse.Namespace:
             "cnn",
             "transformer_features",
             "transformer_time_sequence",
+            "dynamic_deephit",
         ],
         help="The model to train",
     )

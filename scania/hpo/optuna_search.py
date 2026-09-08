@@ -48,6 +48,7 @@ from torch.utils.data import DataLoader
 
 from scania.dataset import ScaniaDataModule
 from scania.lightning_module.BasicLightningModule import BasicLightningModule
+from shared.utils import set_seed
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
@@ -80,22 +81,16 @@ class ModelSpec:
     :param build: builder returning the nn.Module for a trial.
     """
 
-    counter_mode: str
-    seq_len_range: Tuple[int, int]
-    rul_target_standardization: bool
+    # counter_mode: str
+    # seq_len_range: Tuple[int, int]
+    # rul_target_standardization: bool
     build: ModelBuilder
 
 
 _MODEL_REGISTRY: Dict[str, ModelSpec] = {}
 
 
-def register_model(
-    name: str,
-    *,
-    counter_mode: str = "both",
-    seq_len_range: Tuple[int, int] = (30, 50),
-    rul_target_standardization: bool = True,
-) -> Callable[[ModelBuilder], ModelBuilder]:
+def register_model(name: str) -> Callable[[ModelBuilder], ModelBuilder]:
     """Decorator registering a model builder together with its ``ModelSpec``.
 
     The builder receives ``(trial, feature_num, sequence_len)`` and returns an
@@ -103,9 +98,6 @@ def register_model(
     builder via ``trial.suggest_*``.
 
     :param name: unique registry key (align with ModelVersion values, e.g. "cnn").
-    :param counter_mode: fixed feature mode for this model.
-    :param seq_len_range: inclusive bounds for the ``sequence_len`` search.
-    :param rul_target_standardization: whether to standardize the RUL target.
     :return: the decorator that stores the builder under ``name``.
     """
 
@@ -113,9 +105,6 @@ def register_model(
         if name in _MODEL_REGISTRY:
             logger.warning("Overwriting existing builder for '%s'.", name)
         _MODEL_REGISTRY[name] = ModelSpec(
-            counter_mode=counter_mode,
-            seq_len_range=seq_len_range,
-            rul_target_standardization=rul_target_standardization,
             build=fn,
         )
         return fn
@@ -133,7 +122,7 @@ def list_models() -> list[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@register_model("cnn", counter_mode="both", seq_len_range=(30, 50))
+@register_model("cnn")
 def _build_cnn(trial: optuna.Trial, feature_num: int, sequence_len: int) -> nn.Module:
     """1D CNN model.
 
@@ -150,6 +139,65 @@ def _build_cnn(trial: optuna.Trial, feature_num: int, sequence_len: int) -> nn.M
     return CNN1D(num_features=feature_num, output_dim=1)
 
 
+@register_model("lstm")
+def _build_lstm(trial: optuna.Trial, feature_num: int, sequence_len: int) -> nn.Module:
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+    lstm_num_layers = trial.suggest_int("lstm_num_layers", 1, 3)
+    lstm_dropout = trial.suggest_float("lstm_dropout", 0.0, 0.4, step=0.1) if lstm_num_layers > 1 else 0.0
+    fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256])
+    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1)
+
+    from models.Simple_LSTM import Simple_LSTM
+    return Simple_LSTM(
+        feature_num=feature_num,
+        sequence_len=sequence_len,
+        hidden_dim=hidden_dim,
+        lstm_num_layers=lstm_num_layers,
+        lstm_dropout=lstm_dropout,
+        fc_layer_dim=fc_layer_dim,
+        fc_dropout=fc_dropout,
+    )
+
+@register_model("transformer_features")
+def _build_transformer_features(trial: optuna.Trial, feature_num: int, sequence_len: int) -> nn.Module:
+    fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256])
+    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1)
+    valid_heads = [h for h in [1, 2, 4, 8] if sequence_len % h == 0]
+    transformer_encoder_head_num = trial.suggest_categorical("transformer_encoder_head_num", valid_heads)
+    transformer_num_layer = trial.suggest_categorical("transformer_num_layer", [1, 2, 3])
+
+    from models.TransformerFeatures import TransformerFeatures
+
+    return TransformerFeatures(
+        feature_num=feature_num,
+        sequence_len=sequence_len,
+        transformer_encoder_head_num=transformer_encoder_head_num,
+        fc_layer_dim=fc_layer_dim,
+        fc_dropout=fc_dropout,
+        transformer_num_layer=transformer_num_layer,
+    )
+
+
+@register_model("transformer_time_sequence")
+def _build_transformer_time_sequence(trial: optuna.Trial, feature_num: int, sequence_len: int) -> nn.Module:
+    fc_layer_dim = trial.suggest_categorical("fc_layer_dim", [64, 128, 256])
+    fc_dropout = trial.suggest_float("fc_dropout", 0.0, 0.4, step=0.1)
+    valid_heads = [h for h in [1, 2, 4, 8] if sequence_len % h == 0]
+    transformer_encoder_head_num = trial.suggest_categorical("transformer_encoder_head_num", valid_heads)
+    transformer_num_layer = trial.suggest_categorical("transformer_num_layer", [1, 2, 3])
+
+    from models.TransformerTimeSequence import TransformerTimeSequence
+
+    return TransformerTimeSequence(
+        feature_num=feature_num,
+        sequence_len=sequence_len,
+        d_model=sequence_len,
+        transformer_encoder_head_num=transformer_encoder_head_num,
+        fc_layer_dim=fc_layer_dim,
+        fc_dropout=fc_dropout,
+        num_layers=transformer_num_layer,
+    )
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Scania data
 # ──────────────────────────────────────────────────────────────────────────────
@@ -159,9 +207,12 @@ def _build_cnn(trial: optuna.Trial, feature_num: int, sequence_len: int) -> nn.M
 def _build_datamodule_cached(
     sequence_len: int,
     counter_mode: str,
+    histogram_mode: str,
+    include_histograms: bool,
     standardize_target: bool,
     data_dir: str,
     cache_dir: str,
+    seed: int = HPO_SEED,
 ) -> Tuple[ScaniaDataModule, float, float]:
     """Build and ``setup()`` a ScaniaDataModule for a (sequence_len, counter_mode)
     pair, cached across trials.
@@ -179,19 +230,22 @@ def _build_datamodule_cached(
 
     :param sequence_len: window length.
     :param counter_mode: ScaniaDataModule counter feature mode.
+    :param histogram_mode: ScaniaDataModule histogram feature mode.
+    :param include_histograms: whether to include histogram features.
     :param standardize_target: whether to compute target mean/std.
     :param data_dir: root directory of the Scania data files.
     :param cache_dir: base cache directory (a per-config sub-dir is created).
+    :param seed: random seed for the vehicle split and dataset processing.
     :return: (setup data module, target_mean, target_std).
     """
-    sub_cache_dir = os.path.join(cache_dir, f"cm={counter_mode}_sl={sequence_len}")
+    sub_cache_dir = os.path.join(cache_dir, f"cm={counter_mode}_sl={sequence_len}_seed={seed}")
 
     # batch_size=None: the DataLoaders are built per-trial from the underlying
     # datasets with the trial's batch_size, so the module's own batch_size is
     # never used. num_workers=0 is deliberate: the datasets are fully in-memory
     # TensorDatasets, and worker subprocesses leak across trials (they eventually
     # crash with "can only test a child process").
-    # seed=HPO_SEED (not the ScaniaDataModule default of None): without it the vehicle split
+    # seed=seed (not the ScaniaDataModule default of None): without it the vehicle split
     # is drawn from an unseeded RNG and, worse, `seed: null` lands in the cache manifest, so a
     # cache written from a *different* random split still validates on the next run.
     dm = ScaniaDataModule(
@@ -199,10 +253,12 @@ def _build_datamodule_cached(
         batch_size=None,
         sequence_len=sequence_len,
         counter_mode=counter_mode,
+        histogram_mode=histogram_mode,
+        include_histograms=include_histograms,
         cache_dir=sub_cache_dir,
         num_workers=0,
         pin_memory=False,
-        seed=HPO_SEED,
+        seed=seed,
     )
     dm.setup()
 
@@ -225,23 +281,36 @@ def _build_datamodule_cached(
 def get_dataloaders(
     sequence_len: int,
     counter_mode: str,
+    histogram_mode: str,
+    include_histograms: bool,
     standardize_target: bool,
     batch_size: int,
     data_dir: str,
     cache_dir: str,
+    seed: int = HPO_SEED,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, int, float, float]:
     """Build train / val / test DataLoaders for a Scania configuration.
 
     :param sequence_len: window length.
     :param counter_mode: ScaniaDataModule counter feature mode.
+    :param histogram_mode: ScaniaDataModule histogram feature mode.
+    :param include_histograms: whether to include histogram features.
     :param standardize_target: whether to standardize the RUL target.
     :param batch_size: DataLoader batch size for this trial.
     :param data_dir: root directory of the Scania data files.
     :param cache_dir: base cache directory.
+    :param seed: random seed for the dataset split and cache.
     :return: (train_dl, val_dl, test_dl, feature_num, target_mean, target_std).
     """
     dm, target_mean, target_std = _build_datamodule_cached(
-        sequence_len, counter_mode, standardize_target, data_dir, cache_dir
+        sequence_len,
+        counter_mode,
+        histogram_mode,
+        include_histograms,
+        standardize_target,
+        data_dir,
+        cache_dir,
+        seed=seed,
     )
 
     train_dl = dm.train_set.get_data_loader_without_censored_data(
@@ -277,6 +346,7 @@ def _make_objective(
     data_dir: str,
     cache_dir: str,
     max_epochs: int,
+    seed: int = HPO_SEED,
 ) -> Callable[[optuna.Trial], float]:
     """Build the single-objective Optuna closure for a given model.
 
@@ -287,24 +357,36 @@ def _make_objective(
     :param data_dir: root directory of the Scania data files.
     :param cache_dir: base cache directory.
     :param max_epochs: max epochs per trial.
+    :param seed: random seed for reproducibility across Python, NumPy, Pandas,
+        PyTorch, and PyTorch CUDA.
     :return: the objective callable returning ``val_rmse``.
     """
     spec = _MODEL_REGISTRY[model_name]
 
     def objective(trial: optuna.Trial) -> float:
+        # Seed Python, NumPy, Pandas, PyTorch CPU, and PyTorch CUDA for this trial
+        set_seed(seed)
+
         # ── Training / data hyperparameters ────────────────────────────────
         lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
         batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
-        sequence_len = trial.suggest_int("sequence_len", *spec.seq_len_range)
+        sequence_len = trial.suggest_categorical("sequence_len", [32, 48, 64])
+        counter_mode = trial.suggest_categorical("counter_mode", ["delta", "cumulative", "both"])
+        histogram_mode = trial.suggest_categorical("histogram_mode", ["sum", "zhist"])
+        include_histograms = trial.suggest_categorical("include_histograms", [True, False])
+        standardize_target = trial.suggest_categorical("standardize_target", [True, False])
 
         # ── Data ────────────────────────────────────────────────────────────
         train_dl, val_dl, test_dl, feature_num, target_mean, target_std = get_dataloaders(
             sequence_len=sequence_len,
-            counter_mode=spec.counter_mode,
-            standardize_target=spec.rul_target_standardization,
+            counter_mode=counter_mode,
+            histogram_mode=histogram_mode,
+            include_histograms=include_histograms,
+            standardize_target=standardize_target,
             batch_size=batch_size,
             data_dir=data_dir,
             cache_dir=cache_dir,
+            seed=seed,
         )
 
         # ── Model ─────────────────────────────────────────────────────────
@@ -370,6 +452,7 @@ def run_search(
     study_name: Optional[str] = None,
     storage: Optional[str] = None,
     n_jobs: int = 1,
+    seed: int = HPO_SEED,
 ) -> optuna.Study:
     """Run single-objective hyperparameter search for one Scania model.
 
@@ -383,6 +466,8 @@ def run_search(
     :param study_name: custom study name (auto-generated if None).
     :param storage: Optuna storage URL (e.g. "sqlite:///optuna.db") for resuming.
     :param n_jobs: parallel trials (keep 1 to avoid GPU-memory conflicts).
+    :param seed: random seed for reproducibility across Python, NumPy, Pandas,
+        PyTorch, and PyTorch CUDA.
     :return: the completed ``optuna.Study``.
     """
     if model_name not in _MODEL_REGISTRY:
@@ -390,13 +475,16 @@ def run_search(
             f"Model '{model_name}' is not registered. Available models: {list_models()}"
         )
 
+    # Set seed globally at search start
+    set_seed(seed)
+
     if cache_dir is None:
         cache_dir = os.path.join(data_dir, "scania_cache")
 
     study_name = study_name or f"{model_name}_scania"
 
     # TPE + Hyperband: efficient for single-objective search on a limited budget.
-    sampler = optuna.samplers.TPESampler(seed=HPO_SEED)
+    sampler = optuna.samplers.TPESampler(seed=seed)
     pruner = optuna.pruners.HyperbandPruner(
         min_resource=10,
         max_resource=max_epochs,
@@ -412,7 +500,7 @@ def run_search(
         load_if_exists=True,  # resume an existing study with the same name + storage
     )
 
-    objective = _make_objective(model_name, data_dir, cache_dir, max_epochs)
+    objective = _make_objective(model_name, data_dir, cache_dir, max_epochs, seed=seed)
 
     logger.info(
         "Starting search: model=%s  trials=%d  mode=single-objective (val_rmse)",
@@ -466,7 +554,12 @@ def summary_table(study: optuna.Study) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def save_study_results(study: optuna.Study, model_name: str, output_dir: str) -> None:
+def save_study_results(
+    study: optuna.Study,
+    model_name: str,
+    output_dir: str,
+    extra_user_attrs: Optional[list[str]] = None,
+) -> None:
     """Save all completed trials and the best params of a study to ``output_dir``.
 
     Files written:
@@ -476,6 +569,9 @@ def save_study_results(study: optuna.Study, model_name: str, output_dir: str) ->
     :param study: a completed Optuna study.
     :param model_name: registered model name (used in the filenames).
     :param output_dir: directory to write the result files to.
+    :param extra_user_attrs: names of additional trial user-attrs to add as columns, after the four
+        metric columns. Missing attrs become NaN, so a study that did not record them still writes.
+        Used by the Dynamic DeepHit search for ``n_time_bins`` and the resolved head layer lists.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -492,6 +588,8 @@ def save_study_results(study: optuna.Study, model_name: str, output_dir: str) ->
         row["val_score"] = t.user_attrs.get("val_score", float("nan"))
         row["test_rmse"] = t.user_attrs.get("test_rmse", float("nan"))
         row["test_score"] = t.user_attrs.get("test_score", float("nan"))
+        for attr in extra_user_attrs or []:
+            row[attr] = t.user_attrs.get(attr, float("nan"))
         rows.append(row)
 
     trials_path = os.path.join(output_dir, f"{model_name}_trials.csv")

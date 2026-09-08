@@ -46,6 +46,25 @@ NECESSARY_DATASET_PYCLUS_KEYS = NECESSARY_DATASET_RSF_KEYS
 NECESSARY_DATASET_TRANSFORMER_FEATURES_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 NECESSARY_DATASET_TRANSFORMER_TIME_SEQUENCE_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
+# Dynamic DeepHit (TF rewrite) trains on one full vehicle history per sample, not a fixed sliding
+# window: "sequence_len" is computed at run time (the longest vehicle's own readout count) rather
+# than configured, and pad_mode is hard-coded to "nan" internally -- neither is a config knob for
+# this model, unlike every windowed model. There is therefore no DataLoader either (no
+# batch_size/num_workers/pin_memory/shuffle_loader/return_sequence_label). This also means Dynamic
+# DeepHit gets its own dataset cache (a different sequence_len) and cannot usefully share
+# --force-load-from-cache with the windowed models.
+NECESSARY_DATASET_DYNAMIC_DEEPHIT_KEYS = [
+    "seed",
+    "data_fraction",
+    "val_rate",
+    "test_rate",
+    "stratify",
+    "norm_type",
+    "counter_mode",
+    "include_histograms",
+    "histogram_mode",
+]
+
 # =======================================================
 # MODEL
 # =======================================================
@@ -138,6 +157,23 @@ NECESSARY_TRANSFORMER_TIME_SEQUENCE_KEYS = [
     "fc_dropout",
 ]
 
+# Dynamic DeepHit (TF rewrite) architecture -- these mirror dynamic_deephit/main.py's own
+# "network_settings" dict field names directly, so the paper's own hyperparameters drop straight
+# into this config. FC_active_fn/RNN_active_fn are "relu"/"tanh" strings here (mapped to
+# tf.nn.relu/tf.nn.tanh inside the trainer, since JSON cannot hold a function reference).
+NECESSARY_DYNAMIC_DEEPHIT_KEYS = [
+    "h_dim_RNN",
+    "h_dim_FC",
+    "num_layers_RNN",
+    "num_layers_ATT",
+    "num_layers_CS",
+    "RNN_type",
+    "FC_active_fn",
+    "RNN_active_fn",
+    "reg_W",
+    "reg_W_out",
+]
+
 # =======================================================
 # TRAINING
 # =======================================================
@@ -155,6 +191,31 @@ NECESSARY_TRAINING_TRANSFORMER_FEATURES_KEYS = NECESSARY_TRAINING_CNN_KEYS
 NECESSARY_TRAINING_TRANSFORMER_TIME_SEQUENCE_KEYS = NECESSARY_TRAINING_CNN_KEYS
 
 NECESSARY_TRAINING_RSF_KEYS = []
+
+# Dynamic DeepHit (TF rewrite) training -- mirrors dynamic_deephit/main.py's own "new_parser"
+# field names (mb_size/iteration_burn_in/iteration/keep_prob/lr_train/alpha/beta/gamma) directly.
+# There is no early stopping (matching main.py): "iteration" always runs to completion, and the
+# checkpoint whose validation C-index was best (computed every "eval_every" iterations, over
+# "c_index_time_quantiles" absolute-time horizons, capped to "c_index_max_vehicles" validation
+# vehicles since the metric is O(n^2)) is restored afterwards. "num_category_bins" is the target
+# number of absolute-time discretization bins (see utils_dynamic_deephit._build_time_bin_edges).
+NECESSARY_TRAINING_DYNAMIC_DEEPHIT_KEYS = [
+    "mb_size",
+    "burn_in_mode",
+    "iteration_burn_in",
+    "iteration",
+    "keep_prob",
+    "lr_train",
+    "alpha",
+    "beta",
+    "gamma",
+    "eval_every",
+    "num_category_bins",
+    "use_gpu",
+    "c_index_time_quantiles",
+    "c_index_max_vehicles",
+    "inference_batch_size",
+]
 
 NECESSARY_TRAINING_COPROG_KEYS = [
     "lr",
@@ -198,8 +259,13 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
 # are swept too, so unlike NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS they live here and
 # not in the fixed training block.
 NECESSARY_HPO_CO_TRAINING_ENSEMBLE_V2_HYPER_PARAMETER_KEYS = [
+    "use_average_window_confidence",
+    # None disables the filter; a float value is the width cutoff.
+    "confidence_width_threshold",
     "use_monotone_projection",
     "monotone_residual_weight",
+    # Only read when use_monotone_projection is True.
+    "disable_isotonic_regression",
     "use_fine_tuning",
     "fine_tune_lr_factor",
     "fine_tune_max_epochs",
@@ -214,6 +280,11 @@ NECESSARY_HPO_CO_TRAINING_ENSEMBLE_V2_HYPER_PARAMETER_KEYS = [
     "cotraining_survival_loss_lambda",
     "suspension_pool_size",
     "add_ratio",
+    "use_mondrian_categorizer",
+    # Only read when use_mondrian_categorizer is True.
+    "mondrian_no_bins",
+    "use_cps",
+    "difficulty_estimator_k",
 ]
 
 # Held constant across every configuration of the sweep. train_with_censored_data is optional
