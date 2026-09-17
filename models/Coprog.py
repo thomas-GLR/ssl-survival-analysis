@@ -1,6 +1,7 @@
 import copy
 import csv
 import os
+import time
 from typing import Callable
 
 import torch
@@ -85,6 +86,28 @@ class Coprog:
         # Trained Lightning modules (set after calling .train())
         self._h1: LightningModule | None = None
         self._h2: LightningModule | None = None
+
+        # Wall-clock bookkeeping (seconds), filled by ``train`` / ``_train_parallel``. Read by the
+        # Scania entry points to report the run duration in ``<model_version>-scania.csv``.
+        # ``_initial_train_durations`` holds one entry per model for Initial training, and is a
+        # list of ``None`` when Initial training was skipped because pretrained models were
+        # injected (nothing was trained, only reloaded from disk).
+        self.training_duration_seconds: float | None = None
+        self.iteration_durations_seconds: list[float] = []
+        self._initial_train_durations: list[float | None] = []
+
+    @property
+    def average_iteration_duration_seconds(self) -> float | None:
+        """Mean wall-clock duration (seconds) of one co-training iteration.
+
+        Returns:
+            The average of :attr:`iteration_durations_seconds`, or ``None`` when no iteration
+            completed (e.g. ``train`` has not run yet, or it stopped early before the first
+            iteration finished).
+        """
+        if not self.iteration_durations_seconds:
+            return None
+        return sum(self.iteration_durations_seconds) / len(self.iteration_durations_seconds)
 
     def _log(self, level: int, message: str) -> None:
         if self.verbose >= level:
@@ -347,11 +370,25 @@ class Coprog:
         x1, y1 = failure_data, failure_label
         x2, y2 = failure_data, failure_label
 
+        # Wall-clock bookkeeping for this run (see ``training_duration_seconds`` /
+        # ``iteration_durations_seconds``). Reset here so a second train() call starts clean.
+        train_start = time.perf_counter()
+        self.training_duration_seconds = None
+        self.iteration_durations_seconds = []
+
+        self._initial_train_durations = []
+
         # Line 2 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
         self._log(1, f"[Coprog] Initial training of h1 on {len(x1)} failure samples...")
+        fit_start = time.perf_counter()
         h1 = self._fit_one(0, x1, y1, val_data, val_label)
+        self._initial_train_durations.append(time.perf_counter() - fit_start)
+
         self._log(1, f"[Coprog] Initial training of h2 on {len(x2)} failure samples...")
+        fit_start = time.perf_counter()
         h2 = self._fit_one(1, x2, y2, val_data, val_label)
+        self._initial_train_durations.append(time.perf_counter() - fit_start)
+
         self._log(1, f"[Coprog] Initial training done.")
 
         if metrics_enabled:
@@ -367,12 +404,14 @@ class Coprog:
                 weight_callback=weight_callback,
                 weight_mode=weight_mode,
                 metrics_file=metrics_file,
+                train_times=self._initial_train_durations,
             )
 
         remaining_suspension_ids = torch.unique(suspension_ids)
 
         # Line 3 – Repeat for T times
         for i in range(iterations):
+            iteration_start = time.perf_counter()
 
             # Line 4 – Create pool U' of u suspension units
             if len(remaining_suspension_ids) == 0:
@@ -459,11 +498,25 @@ class Coprog:
             # Remove newly labelled samples from U (global pool)
             remaining_suspension_ids = self._drop_selected(remaining_suspension_ids, pi)
 
+            # Per-model training duration for this iteration; a model that received no unit is
+            # never trained and keeps None (an empty cell in the metrics file).
+            train_times: list[float | None] = [None] * 2 # 2 = number of models
+
             # Line 20 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
             self._log(1, f"[Coprog]   Retraining h1 | dataset size: {len(x1)} samples")
+            fit_start = time.perf_counter()
             h1 = self._fit_one(0, x1, y1, val_data, val_label)
+            train_times[0] = time.perf_counter() - fit_start
+
             self._log(1, f"[Coprog]   Retraining h2 | dataset size: {len(x2)} samples")
+            fit_start = time.perf_counter()
             h2 = self._fit_one(1, x2, y2, val_data, val_label)
+            train_times[1] = time.perf_counter() - fit_start
+
+            # Closed here, before the metrics below: those are instrumentation (extra forward
+            # passes on the val/test sets), not part of the co-training iteration itself.
+            iteration_time = time.perf_counter() - iteration_start
+            self.iteration_durations_seconds.append(iteration_time)
 
             if metrics_enabled:
                 self._log_stage_metrics(
@@ -478,6 +531,8 @@ class Coprog:
                     weight_callback=weight_callback,
                     weight_mode=weight_mode,
                     metrics_file=metrics_file,
+                    train_times=train_times,
+                    iteration_time=iteration_time,
                 )
 
         self._log(1, f"[Coprog] Training complete.")
@@ -496,6 +551,12 @@ class Coprog:
                 weight_mode=weight_mode,
                 metrics_file=metrics_file,
             )
+
+        self.training_duration_seconds = time.perf_counter() - train_start
+        self._log(1, f"[Coprog] Training complete in "
+                     f"{self.training_duration_seconds:.1f}s "
+                     f"({len(self.iteration_durations_seconds)} iteration(s), average "
+                     f"{self.average_iteration_duration_seconds or 0.0:.1f}s each).")
 
         # Save final trained models
         self._h1 = h1
@@ -1091,6 +1152,20 @@ class Coprog:
         pred = self._predict(model, x).view(-1).to(y_flat.device)
         return (((y_flat - pred) ** 2).mean().item()) ** 0.5
 
+    @staticmethod
+    def _sum_durations(durations: list[float | None]) -> float | None:
+        """Sum the measured durations, ignoring the ``None`` (not-measured) entries.
+
+        Args:
+            durations: Per-model durations in seconds; ``None`` where nothing was measured.
+
+        Returns:
+            The sum of the measured entries, or ``None`` when none were measured (so the CSV
+            cell stays empty rather than reading a misleading ``0.0``).
+        """
+        measured = [d for d in durations if d is not None]
+        return sum(measured) if measured else None
+
     def _log_stage_metrics(
             self,
             stage: str,
@@ -1104,6 +1179,9 @@ class Coprog:
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float],
             weight_mode: str,
             metrics_file: str,
+            train_times: list[float | None] | None = None,
+            train_time_total: float | None = None,
+            iteration_time: float | None = None,
     ) -> None:
         """
         Compute and append one row of per-stage metrics to ``metrics_file``.
@@ -1131,9 +1209,12 @@ class Coprog:
             metrics_file: destination CSV; header written only when it does not yet exist.
         """
         test_label_flat = test_label.view(-1).float()
+        val_label_flat = val_label.view(-1).float()
 
         train_rmses: list[float] = []
         val_rmses: list[float] = []
+        val_scores: list[float] = []
+        val_preds: list[torch.Tensor] = []
         test_rmses: list[float] = []
         test_scores: list[float] = []
         test_preds: list[torch.Tensor] = []
@@ -1141,7 +1222,11 @@ class Coprog:
         for j, model in enumerate(models):
             xj, yj = models_datasets[j]
             train_rmses.append(self._rmse_on(model, xj, yj))
-            val_rmses.append(self._rmse_on(model, val_data, val_label))
+
+            val_pred_j = self._predict(model, val_data).view(-1).to(val_label_flat.device)
+            val_preds.append(val_pred_j)
+            val_rmses.append((((val_label_flat - val_pred_j) ** 2).mean().item()) ** 0.5)
+            val_scores.append(score_callback(val_pred_j, val_label_flat))
 
             pred_j = self._predict(model, test_data).view(-1).to(test_label_flat.device)
             test_preds.append(pred_j)
@@ -1149,35 +1234,67 @@ class Coprog:
             test_scores.append(score_callback(pred_j, test_label_flat))
 
         n = len(models)
+        avg_val_rmse = sum(val_rmses) / n
+        avg_val_score = sum(val_scores) / n
         avg_test_rmse = sum(test_rmses) / n
         avg_test_score = sum(test_scores) / n
 
         # Weights come from the validation set (no test leakage) and do NOT mutate
-        # self.w1/self.w2 — they exist only to report the weighted-ensemble metrics for
-        # this stage's models (self._h1/_h2 are not set until train() finishes).
-        weights = self._compute_weights(models, val_data, val_label, weight_callback, weight_mode)
+        # self.weights — they exist only to report the weighted-ensemble metrics.
+        # Pass ``h`` explicitly: self.lightning_modules still holds the untrained template
+        # modules at this point (they are only replaced by ``h`` when train() finishes),
+        # so weighting against it would give weights unrelated to the trained models —
+        # and would not match the caller's post-train ``calculate_weights``.
+        weights = self._compute_weights(
+            x_test=val_data,
+            target=val_label,
+            criteria_callback=weight_callback,
+            mode=weight_mode,
+            models=models
+        )
         weighted_pred = torch.stack(
             [w * pred for w, pred in zip(weights, test_preds)], dim=0
         ).sum(dim=0).view(-1)
         weighted_test_rmse = (((test_label_flat - weighted_pred) ** 2).mean().item()) ** 0.5
         weighted_test_score = score_callback(weighted_pred, test_label_flat)
 
+        weighted_val_pred = torch.stack(
+            [w * pred for w, pred in zip(weights, val_preds)], dim=0
+        ).sum(dim=0).view(-1)
+        weighted_val_rmse = (((val_label_flat - weighted_val_pred) ** 2).mean().item()) ** 0.5
+        weighted_val_score = score_callback(weighted_val_pred, val_label_flat)
+
+        # Durations (seconds). A missing list means "this stage did nothing of that kind"; the
+        # totals default to the sum of what was actually measured (None when nothing was), and
+        # the parallel path overrides them with its wall-clock.
+        train_times = list(train_times) if train_times is not None else [None] * n
+        if train_time_total is None:
+            train_time_total = self._sum_durations(train_times)
+
         header = ["stage"]
         for j in range(n):
-            header += [f"train_rmse_{j}", f"val_rmse_{j}", f"test_rmse_{j}", f"test_score_{j}"]
+            header += [f"train_rmse_{j}", f"val_rmse_{j}", f"val_score_{j}",
+                       f"test_rmse_{j}", f"test_score_{j}"]
+        header += ["avg_val_rmse", "avg_val_score", "weighted_val_rmse", "weighted_val_score"]
         header += ["avg_test_rmse", "avg_test_score", "weighted_test_rmse", "weighted_test_score"]
         for j in range(n):
             header += [f"weight_{j}"]
+        for j in range(n):
+            header += [f"train_time_{j}"]
+        header += ["train_time_total", "iteration_time_total"]
 
         row = [stage]
         for j in range(n):
-            row += [train_rmses[j], val_rmses[j], test_rmses[j], test_scores[j]]
+            row += [train_rmses[j], val_rmses[j], val_scores[j], test_rmses[j], test_scores[j]]
+        row += [avg_val_rmse, avg_val_score, weighted_val_rmse, weighted_val_score]
         row += [avg_test_rmse, avg_test_score, weighted_test_rmse, weighted_test_score]
         for j in range(n):
             row += [weights[j]]
+        row += train_times
+        row += [train_time_total, iteration_time]
 
         # Append per call (crash-safe, no file-handle lifecycle), writing the header only
-        # the first time the file is created.
+        # the first time the file is created — mirrors the append style of ``_log``.
         write_header = not os.path.exists(metrics_file)
         with open(metrics_file, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -1186,6 +1303,9 @@ class Coprog:
             writer.writerow(row)
 
         self._log(1, f"[Coprog] Metrics [{stage}] | "
+                     f"avg val RMSE: {avg_val_rmse:.4f} | avg val score: {avg_val_score:.4f} | "
+                     f"weighted val RMSE: {weighted_val_rmse:.4f} | "
+                     f"weighted val score: {weighted_val_score:.4f} | "
                      f"avg test RMSE: {avg_test_rmse:.4f} | avg test score: {avg_test_score:.4f} | "
                      f"weighted test RMSE: {weighted_test_rmse:.4f} | "
                      f"weighted test score: {weighted_test_score:.4f}")

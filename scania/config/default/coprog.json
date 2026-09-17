@@ -1,16 +1,16 @@
 {
   "dataset_params": {
-    "sequence_len": 32,
+    "sequence_len": 64,
     "seed": 42,
     "data_fraction": 1.0,
-    "val_rate": 0.2,
-    "test_rate": 0.1,
+    "val_rate": 0.15,
+    "test_rate": 0.15,
     "stratify": true,
     "norm_type": "z-score",
-    "num_workers": 4,
+    "num_workers": 7,
     "pin_memory": true,
     "return_sequence_label": false,
-    "batch_size": 128,
+    "batch_size": 64,
     "shuffle_loader": true,
     "counter_mode": "both",
     "include_histograms": false,
@@ -23,20 +23,20 @@
     },
     "second_model": {
       "lstm": {
-        "hidden_dim": 256,
-        "lstm_num_layers": 3,
-        "lstm_dropout": 0.3,
-        "fc_layer_dim": 128,
-        "fc_dropout": 0.2
+        "hidden_dim": 128,
+        "lstm_num_layers": 2,
+        "lstm_dropout": 0.2,
+        "fc_layer_dim": 64,
+        "fc_dropout": 0.1
       }
     }
   },
   "training_params": {
-    "lr": [0.0002, 0.0002],
+    "lr": [0.0004, 0.001],
     "patiences": [50, 50],
     "max_epochs": [500, 500],
     "coprog_iterations": 10,
-    "coprog_suspension_pool_size": 25,
+    "coprog_suspension_pool_size": 100,
     "rul_target_standardization": [true, true]
   }
 }

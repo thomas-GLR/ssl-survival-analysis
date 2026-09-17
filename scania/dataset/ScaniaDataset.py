@@ -814,6 +814,7 @@ class ScaniaDataset(Dataset):
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            persistent_workers=True,
         )
 
     def get_censored_split_tensors(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

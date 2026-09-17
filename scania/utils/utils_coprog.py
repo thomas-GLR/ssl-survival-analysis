@@ -337,7 +337,8 @@ def train_model(
         'test_score_weighted',
         'weight_h1',
         'weight_h2',
-        'training_time_seconds'
+        'training_time_seconds',
+        'avg_iteration_time_seconds',
     ])
 
     scores.loc[0] = [
@@ -349,7 +350,8 @@ def train_model(
         score_weighted,
         coprog.w1,
         coprog.w2,
-        training_time_seconds
+        training_time_seconds,
+        coprog.average_iteration_duration_seconds,
     ]
 
     # Save the results
