@@ -23,7 +23,7 @@
         "cnn": {
           "model_params": {},
           "lr": 0.0004,
-          "max_epochs": 500,
+          "max_epochs": 10,
           "patience": 50,
           "rul_target_standardization": true
         }
@@ -38,7 +38,7 @@
             "fc_dropout": 0.1
           },
           "lr": 0.001,
-          "max_epochs": 500,
+          "max_epochs": 10,
           "patience": 50,
           "rul_target_standardization": true
         }
@@ -52,7 +52,7 @@
             "fc_dropout": 0.1
           },
           "lr": 0.0002,
-          "max_epochs": 500,
+          "max_epochs": 10,
           "patience": 50,
           "rul_target_standardization": true
         }
@@ -66,7 +66,7 @@
             "fc_dropout": 0.2
           },
           "lr": 0.0004,
-          "max_epochs": 500,
+          "max_epochs": 10,
           "patience": 50,
           "rul_target_standardization": false
         }
