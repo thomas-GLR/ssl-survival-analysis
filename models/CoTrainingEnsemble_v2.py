@@ -992,12 +992,7 @@ class CoTrainingEnsemble_v2:
                     lower = float(unit_intervals[:, 0].mean())
                     upper = float(unit_intervals[:, 1].mean())
                     width = float((unit_intervals[:, 1] - unit_intervals[:, 0]).mean())
-                    if (self.confidence_width_threshold is not None
-                            and width > self.confidence_width_threshold):
-                        self._log(2, f"[CoTraining]   Model {j}: unit {unit_id.item()} excluded "
-                                     f"(width {width:.4f} exceeds confidence_width_threshold "
-                                     f"{self.confidence_width_threshold}).")
-                        continue
+
                     # When enabled, project this unit's per-window predictions onto a
                     # non-increasing (and lower-bound-clipped) sequence; the projected labels
                     # replace the raw predictions and the residual feeds the selection score.
@@ -1039,7 +1034,27 @@ class CoTrainingEnsemble_v2:
             # regressor on its own accumulated data), so normalize each model's widths by its
             # own median before comparing them across models. When monotone projection is on,
             # the median-normalized projection residual is blended in (see _selection_scores).
-            norm_width = self._selection_scores(all_preds)
+            norm_width: dict[int, dict[int, float]] = self._selection_scores(all_preds)
+
+            unit_id_to_remove_per_model_index: dict[int, list[int]] = {}
+
+            for model_index, score_per_unit_id in norm_width.items():
+                unit_id_to_remove = [unit_id for unit_id, score in score_per_unit_id.items() if score > self.confidence_width_threshold]
+
+                if len(unit_id_to_remove) > 0:
+                    for unit_id in unit_id_to_remove:
+                        score = score_per_unit_id[unit_id]
+
+                        self._log(2, f"[CoTraining]   Model {model_index}: unit {unit_id} excluded "
+                                     f"(width {score:.4f} exceeds confidence_width_threshold "
+                                     f"{self.confidence_width_threshold}).")
+
+                    unit_id_to_remove_per_model_index[model_index] = unit_id_to_remove
+
+            for j in range(self.number_of_models):
+                for unit_id_to_remove in unit_id_to_remove_per_model_index[j]:
+                    all_preds[j].pop(unit_id_to_remove, None)
+                    norm_width[j].pop(unit_id_to_remove, None)
 
             # Log each model's full unit ranking (most confident first) so it can be checked
             # whether the models agree on which censored units are confident or not.
