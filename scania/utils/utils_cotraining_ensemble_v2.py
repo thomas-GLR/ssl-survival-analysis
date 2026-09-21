@@ -13,6 +13,8 @@ Shared model/builder construction and output saving come from
 import os
 from datetime import datetime
 
+import torch
+
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
 from scania.dataset import ScaniaDataModule
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
@@ -23,6 +25,7 @@ from scania.utils.utils_scania import (
     save_train_parameters,
 )
 from shared.utils import ModelVersion, set_seed
+from scania.utils.utils_pretrained_models import get_or_train_initial_models
 
 
 def train_model(
@@ -88,6 +91,7 @@ def train_model(
     force_load_from_cache: bool = False,
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+    pretrained_model_dir: str | None = None,
 ) -> tuple[float, float]:
     """Train a :class:`models.CoTrainingEnsemble_v2` on the Scania Component X dataset.
 
@@ -381,6 +385,30 @@ def train_model(
         f.write(f"GPU selection: {gpu_ids if gpu_ids else 'auto (single GPU)'}\n")
         f.write("=====================================\n")
 
+    pretrained_models = None
+
+    if pretrained_model_dir is not None:
+        print("Loading pre-trained model...")
+        with open(log_file_path, "a", encoding="utf-8") as f:
+            f.write("Loading pre-trained model...\n")
+
+        pretrained_models = get_or_train_initial_models(
+            initial_models_dir=pretrained_model_dir,
+            module_builders=module_builders,
+            batch_size=[batch_size] * number_of_models,
+            number_of_models=number_of_models,
+            max_epochs=meta["max_epochs"],
+            patiences=meta["patiences"],
+            shuffle_dataloaders=[True] * number_of_models,
+            version_strs=meta["version_strs"],
+            failure_data=features_uncensored,
+            failure_label=targets_uncensored,
+            val_data=val_features,
+            val_label=val_targets,
+            seed=seed,
+            run_log_path=log_file_path,
+        )
+
     ensemble.train(
         train_with_censored_data=train_with_censored_data,
         failure_data=features_uncensored,
@@ -407,6 +435,7 @@ def train_model(
         metrics_file=f"{results_path}/{model_version.value}-per-stage-scania.csv",
         log_file=log_file_path,
         pool_seed=seed,
+        pretrained_models=pretrained_models,
     )
 
     ensemble.calculate_weights(

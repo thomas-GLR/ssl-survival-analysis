@@ -1,4 +1,5 @@
 import functools
+import os
 import time
 from datetime import datetime
 
@@ -22,6 +23,7 @@ from scania.utils.utils_scania import (
     _scania_score,
 )
 from shared.utils import ModelVersion, set_seed
+from scania.utils.utils_pretrained_models import get_or_train_initial_models
 
 
 def train_model(
@@ -60,6 +62,7 @@ def train_model(
     force_load_from_cache: bool = False,
     gpu_ids: list[int] | None = None,
     datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+    pretrained_model_dir: str | None = None,
 ) -> tuple[float, float]:
     set_seed(seed)
 
@@ -197,15 +200,15 @@ def train_model(
 
     # dict(...) copies: _creating_model mutates its params dict via .update, so we keep the
     # extracted params pristine for the (picklable) builders used below.
-    first_model = _creating_model(dict(first_model_params), first_model_version, feature_num, sequence_len)
+    first_model_module = _creating_model(dict(first_model_params), first_model_version, feature_num, sequence_len)
 
     print(f"Creating second model ({second_model_version.value})...")
 
-    second_model = _creating_model(dict(second_model_params), second_model_version, feature_num, sequence_len)
+    second_model_module = _creating_model(dict(second_model_params), second_model_version, feature_num, sequence_len)
 
     coprog = Coprog(
-        first_model=first_model,
-        second_model=second_model,
+        first_model=first_model_module,
+        second_model=second_model_module,
         verbose=1,
     )
 
@@ -254,6 +257,63 @@ def train_model(
 
     training_start = time.perf_counter()
 
+    pretrained_models = []
+
+    if pretrained_model_dir is not None:
+        print("Loading pre-trained model...")
+
+        number_of_models = 2
+
+        version_strs = []
+
+        for model_name in first_model.keys():
+            version_strs.append(model_name)
+
+        for model_name in second_model.keys():
+            version_strs.append(model_name)
+
+        pretrained_models = get_or_train_initial_models(
+            initial_models_dir=pretrained_model_dir,
+            module_builders=module_builders,
+            batch_size=[batch_size] * number_of_models,
+            number_of_models=number_of_models,
+            max_epochs=max_epochs,
+            patiences=patiences,
+            shuffle_dataloaders=[True] * number_of_models,
+            version_strs=version_strs,
+            failure_data=features_uncensored,
+            failure_label=targets_uncensored,
+            val_data=val_features,
+            val_label=val_targets,
+            seed=seed,
+            run_log_path=None,
+        )
+
+    # pretrained_models = []
+    #
+    # if pretrained_model_dir is not None:
+    #     print("Loading pre-trained model...")
+    #
+    #     for model_name in first_model.keys():
+    #         file = f"{model_name}.pth"
+    #
+    #         print(f"Loading {file}...\n")
+    #
+    #         if os.path.isfile(os.path.join(pretrained_model_dir, file)):
+    #             pretrained_models.append(torch.load(os.path.join(pretrained_model_dir, file), weights_only=False))
+    #         else:
+    #             raise FileNotFoundError(f"File {file} not found in {pretrained_model_dir}")
+    #
+    #     for model_name in second_model.keys():
+    #         file = f"{model_name}.pth"
+    #
+    #         print(f"Loading {file}...\n")
+    #
+    #         if os.path.isfile(os.path.join(pretrained_model_dir, file)):
+    #             pretrained_models.append(torch.load(os.path.join(pretrained_model_dir, file), weights_only=False))
+    #         else:
+    #             raise FileNotFoundError(f"File {file} not found in {pretrained_model_dir}")
+
     coprog.train(
         failure_data=features_uncensored,
         failure_label=targets_uncensored,
@@ -273,6 +333,7 @@ def train_model(
         weight_callback=_criteria_callback_for_coprog,
         weight_mode="min",
         metrics_file=f"{results_path}/{model_version.value}-per-stage-scania.csv",
+        pretrained_models=pretrained_models,
     )
 
     training_time_seconds = time.perf_counter() - training_start

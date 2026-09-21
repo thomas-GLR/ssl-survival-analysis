@@ -44,15 +44,20 @@ def reproduce_result(
         run_name: str = "",
         gpu_ids: list[int] | None = None,
         force_load_from_cache: bool = False,
+        pretrained_model_dir: str | None = None
 ):
     config_path = f"{config_path}/{benchmark_version}"
     config_model_file_path = f"{config_path}/{model_version.value}.json"
+
+    is_coprog_or_co_training_ensemble_v2 = model_version == ModelVersion.COPROG or model_version == ModelVersion.CO_TRAINING_ENSEMBLE
 
     assert os.path.exists(checkpoints_path), f"{checkpoints_path} does not exist."
     assert os.path.exists(results_path), f"{results_path} does not exist."
     assert os.path.exists(config_path), f"{config_path} does not exist."
     assert os.path.exists(dataset_root), f"{dataset_root} does not exist."
     assert os.path.exists(config_model_file_path), f"{config_model_file_path} does not exist."
+    if pretrained_model_dir is not None and is_coprog_or_co_training_ensemble_v2:
+        assert os.path.exists(pretrained_model_dir), f"{pretrained_model_dir} does not exist."
 
     if run_name != "":
         results_path = os.path.join(results_path, run_name)
@@ -74,6 +79,8 @@ def reproduce_result(
         config_model_file_path,
         necessary_keys=necessary_model_keys,
     )
+
+    model_params["pretrained_model_dir"] = pretrained_model_dir
 
     training_params = extract_training_params_from_config(
         config_model_file_path,
@@ -253,6 +260,11 @@ def _parse_args() -> argparse.Namespace:
             "(e.g. --gpu-ids 0 1) to train the models in parallel across those GPUs."
         ),
     )
+    parser.add_argument(
+        "--pretrained-model-dir",
+        default=None,
+        help="Path to the directory containing pretrained models for CoTrainingEnsemble_v2 and Coprog",
+    )
 
     return parser.parse_args()
 
@@ -281,6 +293,7 @@ def main() -> None:
         run_name=args.run_name,
         gpu_ids=args.gpu_ids,
         force_load_from_cache=args.force_load_from_cache,
+        pretrained_model_dir=args.pretrained_model_dir,
     )
 
 if __name__ == "__main__":

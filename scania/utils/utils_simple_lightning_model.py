@@ -185,7 +185,7 @@ def train_model(
                 "sequence_len": sequence_len,
                 "feature_num": feature_num,
                 "transformer_encoder_head_num": transformer_encoder_head_num,
-                "num_layers": transformer_num_layer,
+                "transformer_num_layer": transformer_num_layer,
                 "fc_layer_dim": fc_layer_dim,
                 "fc_dropout": fc_dropout,
             }
@@ -197,7 +197,7 @@ def train_model(
                 "d_model" : sequence_len,
                 "feature_num": feature_num,
                 "transformer_encoder_head_num": transformer_encoder_head_num,
-                "num_layers": transformer_num_layer,
+                "transformer_num_layer": transformer_num_layer,
                 "fc_layer_dim": fc_layer_dim,
                 "fc_dropout": fc_dropout,
             }
