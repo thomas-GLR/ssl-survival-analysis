@@ -666,16 +666,20 @@ class CoTrainingEnsemble_v2:
 
         # Injected pretrained models replace the sequential path's Initial-training block; the
         # parallel path runs its own (and would silently ignore them).
-        if (pretrained_models is None) != (pretrained_models_datasets is None):
+        if pretrained_models is None and pretrained_models_datasets is not None:
             raise ValueError(
-                "pretrained_models and pretrained_models_datasets must be provided together.")
+                "pretrained_models and pretrained_models_datasets must be provided together if pretrained_models_datasets is provided.")
+        # The datasets should be given if bagging is used to get the same dataset for each models that they used for pretraining
+        if pretrained_models is not None and pretrained_models_datasets is None and self.bagging_failure_data:
+            raise ValueError(
+                "pretrained_models and pretrained_models_datasets must be provided together if bagging_failure_data is True.")
         if pretrained_models is not None:
             if self._parallel:
                 raise ValueError(
                     "pretrained_models is only supported on the sequential path; it cannot be "
                     "combined with multi-GPU parallel (gpu_ids with >= 2 GPUs).")
             if (len(pretrained_models) != self.number_of_models
-                    or len(pretrained_models_datasets) != self.number_of_models):
+                    or (pretrained_models_datasets is not None and len(pretrained_models_datasets) != self.number_of_models)):
                 raise ValueError(
                     f"pretrained_models and pretrained_models_datasets must both have one entry "
                     f"per model ({self.number_of_models}), got {len(pretrained_models)} and "
@@ -839,7 +843,15 @@ class CoTrainingEnsemble_v2:
             # Reusing already-trained models (see the ``pretrained_models`` docstring): every
             # config of a hyperparameter sweep starts from the identical Initial-training result.
             h = list(pretrained_models)
-            models_datasets = list(pretrained_models_datasets)
+
+            if pretrained_models_datasets is not None:
+                models_datasets = list(pretrained_models_datasets)
+            else:
+                models_datasets: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+                for j in range(self.number_of_models):
+                    models_datasets.append((failure_data, failure_label))
+
             # Nothing was trained here -- the models only came back from disk -- so the "initial"
             # row reports no training time at all rather than a misleading zero.
             self._initial_train_durations = [None] * self.number_of_models
@@ -1547,9 +1559,14 @@ class CoTrainingEnsemble_v2:
         """
         if self._use_builders:
             spec = self._make_fit_spec(
-                model_index, x, y, self._cpu_pair(val_x, val_y),
-                is_censored=is_censored, lower_bound=lower_bound,
-                use_cotraining_survival_loss=use_cotraining_survival_loss)
+                model_index,
+                x,
+                y,
+                self._cpu_pair(val_x, val_y),
+                is_censored=is_censored,
+                lower_bound=lower_bound,
+                use_cotraining_survival_loss=use_cotraining_survival_loss
+            )
             spec.accelerator = self._inline_accelerator
             spec.devices = self._inline_devices
             result = run_training_job(spec)
