@@ -265,6 +265,7 @@ class Coprog:
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
             weight_mode: str = "min",
             metrics_file: str | None = None,
+            pretrained_models: list[LightningModule] | None = None,
     ) -> None:
         """
         Full COPROG training procedure (Algorithm 1 in the paper).
@@ -297,6 +298,8 @@ class Coprog:
         :param metrics_file:        Destination CSV for the per-stage metrics. Header is written
                                     only when the file does not yet exist. Required when
                                     ``test_data`` is given.
+        :param pretrained_models:   Optional already-trained module per model. They are used as the iteration-0 state.
+                                    It enables to have a fair comparison between algorithms
         """
         self._check_if_training_is_possible()
 
@@ -334,6 +337,13 @@ class Coprog:
             "metrics_file": metrics_file,
         }
 
+        if pretrained_models is not None and self._parallel:
+            raise ValueError(
+                "pretrained_models is only supported on the sequential path; it cannot be "
+                "combined with multi-GPU parallel (gpu_ids with >= 2 GPUs).")
+        if len(pretrained_models) != 2:
+            raise ValueError(f"pretrained_models must have 2 models but got {len(pretrained_models)} models")
+
         if self._parallel:
             self._train_parallel(
                 failure_data, failure_label, suspension_data, suspension_ids,
@@ -342,8 +352,15 @@ class Coprog:
             )
         else:
             self._train_sequential(
-                failure_data, failure_label, suspension_data, suspension_ids,
-                iterations, suspension_pool_size, val_data, val_label,
+                failure_data=failure_data,
+                failure_label=failure_label,
+                suspension_data=suspension_data,
+                suspension_ids=suspension_ids,
+                iterations=iterations,
+                suspension_pool_size=suspension_pool_size,
+                val_data=val_data,
+                val_label=val_label,
+                pretrained_models=pretrained_models,
                 **metrics_kwargs,
             )
 
@@ -364,32 +381,41 @@ class Coprog:
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
             weight_mode: str = "min",
             metrics_file: str | None = None,
+            pretrained_models: list[LightningModule] | None = None,
     ) -> None:
         """Sequential COPROG training (single GPU / auto / legacy style)."""
         # Line 1 – L1 = L2 = L  (we split L into two views)
         x1, y1 = failure_data, failure_label
         x2, y2 = failure_data, failure_label
 
-        # Wall-clock bookkeeping for this run (see ``training_duration_seconds`` /
-        # ``iteration_durations_seconds``). Reset here so a second train() call starts clean.
-        train_start = time.perf_counter()
-        self.training_duration_seconds = None
-        self.iteration_durations_seconds = []
+        if pretrained_models is not None:
+            h1 = pretrained_models[0]
+            h2 = pretrained_models[1]
 
-        self._initial_train_durations = []
+            self._initial_train_durations = [None, None]
 
-        # Line 2 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
-        self._log(1, f"[Coprog] Initial training of h1 on {len(x1)} failure samples...")
-        fit_start = time.perf_counter()
-        h1 = self._fit_one(0, x1, y1, val_data, val_label)
-        self._initial_train_durations.append(time.perf_counter() - fit_start)
+            self._log(1, "[CoTraining] Initial training skipped: reusing 2 pretrained models")
+        else:
+            # Wall-clock bookkeeping for this run (see ``training_duration_seconds`` /
+            # ``iteration_durations_seconds``). Reset here so a second train() call starts clean.
+            train_start = time.perf_counter()
+            self.training_duration_seconds = None
+            self.iteration_durations_seconds = []
 
-        self._log(1, f"[Coprog] Initial training of h2 on {len(x2)} failure samples...")
-        fit_start = time.perf_counter()
-        h2 = self._fit_one(1, x2, y2, val_data, val_label)
-        self._initial_train_durations.append(time.perf_counter() - fit_start)
+            self._initial_train_durations = []
 
-        self._log(1, f"[Coprog] Initial training done.")
+            # Line 2 – h1 = TrainFun(L1, 1);  h2 = TrainFun(L2, 2)
+            self._log(1, f"[Coprog] Initial training of h1 on {len(x1)} failure samples...")
+            fit_start = time.perf_counter()
+            h1 = self._fit_one(0, x1, y1, val_data, val_label)
+            self._initial_train_durations.append(time.perf_counter() - fit_start)
+
+            self._log(1, f"[Coprog] Initial training of h2 on {len(x2)} failure samples...")
+            fit_start = time.perf_counter()
+            h2 = self._fit_one(1, x2, y2, val_data, val_label)
+            self._initial_train_durations.append(time.perf_counter() - fit_start)
+
+            self._log(1, f"[Coprog] Initial training done.")
 
         if metrics_enabled:
             self._log_stage_metrics(
