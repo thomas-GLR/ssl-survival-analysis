@@ -1038,23 +1038,24 @@ class CoTrainingEnsemble_v2:
 
             unit_id_to_remove_per_model_index: dict[int, list[int]] = {}
 
-            for model_index, score_per_unit_id in norm_width.items():
-                unit_id_to_remove = [unit_id for unit_id, score in score_per_unit_id.items() if score > self.confidence_width_threshold]
+            if self.confidence_width_threshold is not None:
+                for model_index, score_per_unit_id in norm_width.items():
+                    unit_id_to_remove = [unit_id for unit_id, score in score_per_unit_id.items() if score > self.confidence_width_threshold]
 
-                if len(unit_id_to_remove) > 0:
-                    for unit_id in unit_id_to_remove:
-                        score = score_per_unit_id[unit_id]
+                    if len(unit_id_to_remove) > 0:
+                        for unit_id in unit_id_to_remove:
+                            score = score_per_unit_id[unit_id]
 
-                        self._log(2, f"[CoTraining]   Model {model_index}: unit {unit_id} excluded "
-                                     f"(width {score:.4f} exceeds confidence_width_threshold "
-                                     f"{self.confidence_width_threshold}).")
+                            self._log(2, f"[CoTraining]   Model {model_index}: unit {unit_id} excluded "
+                                         f"(width {score:.4f} exceeds confidence_width_threshold "
+                                         f"{self.confidence_width_threshold}).")
 
-                    unit_id_to_remove_per_model_index[model_index] = unit_id_to_remove
+                        unit_id_to_remove_per_model_index[model_index] = unit_id_to_remove
 
-            for j in range(self.number_of_models):
-                for unit_id_to_remove in unit_id_to_remove_per_model_index[j]:
-                    all_preds[j].pop(unit_id_to_remove, None)
-                    norm_width[j].pop(unit_id_to_remove, None)
+                for j in range(self.number_of_models):
+                    for unit_id_to_remove in unit_id_to_remove_per_model_index[j]:
+                        all_preds[j].pop(unit_id_to_remove, None)
+                        norm_width[j].pop(unit_id_to_remove, None)
 
             # Log each model's full unit ranking (most confident first) so it can be checked
             # whether the models agree on which censored units are confident or not.

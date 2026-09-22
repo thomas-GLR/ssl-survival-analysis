@@ -34,6 +34,8 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Dict, Optional, Tuple
+import gc
+from collections import OrderedDict
 
 import pandas as pd
 import torch
@@ -202,8 +204,17 @@ def _build_transformer_time_sequence(trial: optuna.Trial, feature_num: int, sequ
 # Scania data
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _target_stats(dm: ScaniaDataModule) -> Tuple[float, float]:
+    ds = dm.train_set
+    y = ds.label_array[ds.is_censored_array == 0].astype("float64")  # 1-D unless return_sequence_label
+    mean, std = float(y.mean()), float(y.std(ddof=1))  # ddof=1 matches torch.std
+    return mean, (std if std >= 1e-6 else 1.0)
 
-@lru_cache(maxsize=None)
+_DM_CACHE: "OrderedDict[tuple, ScaniaDataModule]" = OrderedDict()
+_DM_CACHE_SIZE = 2   # raise if you have RAM to spare after the ScaniaDataset fixes
+
+
+# @lru_cache(maxsize=None)
 def _build_datamodule_cached(
     sequence_len: int,
     counter_mode: str,
@@ -213,7 +224,7 @@ def _build_datamodule_cached(
     data_dir: str,
     cache_dir: str,
     seed: int = HPO_SEED,
-) -> Tuple[ScaniaDataModule, float, float]:
+) -> ScaniaDataModule | tuple[ScaniaDataModule, float, float]:
     """Build and ``setup()`` a ScaniaDataModule for a (sequence_len, counter_mode)
     pair, cached across trials.
 
@@ -238,6 +249,15 @@ def _build_datamodule_cached(
     :param seed: random seed for the vehicle split and dataset processing.
     :return: (setup data module, target_mean, target_std).
     """
+    key = (sequence_len, counter_mode, histogram_mode, include_histograms, data_dir, cache_dir, seed)
+    if key in _DM_CACHE:
+        _DM_CACHE.move_to_end(key)
+        return _DM_CACHE[key]
+
+    while len(_DM_CACHE) >= _DM_CACHE_SIZE:   # evict BEFORE building
+        _DM_CACHE.popitem(last=False)
+    gc.collect()
+
     sub_cache_dir = os.path.join(cache_dir, f"cm={counter_mode}_sl={sequence_len}_seed={seed}")
 
     # batch_size=None: the DataLoaders are built per-trial from the underlying
@@ -309,11 +329,13 @@ def get_dataloaders(
         counter_mode,
         histogram_mode,
         include_histograms,
-        standardize_target,
+        False,
         data_dir,
         cache_dir,
         seed=seed,
     )
+
+    target_mean, target_std = _target_stats(dm) if standardize_target else (0.0, 1.0)
 
     train_dl = dm.train_set.get_data_loader_without_censored_data(
         batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True
@@ -372,10 +394,10 @@ def _make_objective(
         # ── Training / data hyperparameters ────────────────────────────────
         lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
         batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
-        sequence_len = trial.suggest_categorical("sequence_len", [32, 48, 64])
+        sequence_len = trial.suggest_categorical("sequence_len", [64])
         counter_mode = trial.suggest_categorical("counter_mode", ["delta", "cumulative", "both"])
-        histogram_mode = trial.suggest_categorical("histogram_mode", ["sum", "zhist"])
-        include_histograms = trial.suggest_categorical("include_histograms", [True, False])
+        histogram_mode = trial.suggest_categorical("histogram_mode", ["sum", "delta", "cumulative"])
+        include_histograms = trial.suggest_categorical("include_histograms", [True])
         standardize_target = trial.suggest_categorical("standardize_target", [True, False])
 
         # ── Data ────────────────────────────────────────────────────────────
@@ -391,50 +413,59 @@ def _make_objective(
             seed=seed,
         )
 
-        # ── Model ─────────────────────────────────────────────────────────
-        net = spec.build(trial, feature_num, sequence_len)
-        module = BasicLightningModule(
-            lr=lr, model=net, target_mean=target_mean, target_std=target_std
-        )
+        try:
 
-        # ── Callbacks ─────────────────────────────────────────────────────
-        callbacks = [
-            EarlyStopping(monitor="val_rmse", patience=20, mode="min"),
-            PyTorchLightningPruningCallback(trial, monitor="val_rmse"),
-        ]
+            # ── Model ─────────────────────────────────────────────────────────
+            net = spec.build(trial, feature_num, sequence_len)
+            module = BasicLightningModule(
+                lr=lr, model=net, target_mean=target_mean, target_std=target_std
+            )
 
-        # ── Trainer ───────────────────────────────────────────────────────
-        # enable_checkpointing=False: HPO optimises on the logged val_rmse and
-        # never reloads a checkpoint, so writing one per trial only litters the
-        # project's ./checkpoints directory.
-        trainer = Trainer(
-            max_epochs=max_epochs,
-            accelerator="auto",
-            enable_progress_bar=False,
-            enable_model_summary=False,
-            enable_checkpointing=False,
-            logger=False,
-            callbacks=callbacks,
-        )
+            # ── Callbacks ─────────────────────────────────────────────────────
+            callbacks = [
+                EarlyStopping(monitor="val_rmse", patience=20, mode="min"),
+                PyTorchLightningPruningCallback(trial, monitor="val_rmse"),
+            ]
 
-        # ── Training ──────────────────────────────────────────────────────
-        trainer.fit(module, train_dl, val_dl)
+            # ── Trainer ───────────────────────────────────────────────────────
+            # enable_checkpointing=False: HPO optimises on the logged val_rmse and
+            # never reloads a checkpoint, so writing one per trial only litters the
+            # project's ./checkpoints directory.
+            trainer = Trainer(
+                max_epochs=max_epochs,
+                accelerator="auto",
+                enable_progress_bar=False,
+                enable_model_summary=False,
+                enable_checkpointing=False,
+                logger=False,
+                callbacks=callbacks,
+            )
 
-        # ── Validation metrics — the optimisation objective ────────────────
-        val_rmse = _metric_from_trainer(trainer, "val_rmse")
-        val_score = _metric_from_trainer(trainer, "val_score")
+            # ── Training ──────────────────────────────────────────────────────
+            trainer.fit(module, train_dl, val_dl)
 
-        # ── Test metrics — stored for post-hoc analysis only ──────────────
-        results = trainer.test(module, test_dl, verbose=False)[0]
-        test_rmse = results.get("test_rmse", float("inf"))
-        test_score = results.get("test_score", float("inf"))
+            # ── Validation metrics — the optimisation objective ────────────────
+            val_rmse = _metric_from_trainer(trainer, "val_rmse")
+            val_score = _metric_from_trainer(trainer, "val_score")
 
-        trial.set_user_attr("val_rmse", val_rmse)
-        trial.set_user_attr("val_score", val_score)
-        trial.set_user_attr("test_rmse", test_rmse)
-        trial.set_user_attr("test_score", test_score)
+            # ── Test metrics — stored for post-hoc analysis only ──────────────
+            results = trainer.test(module, test_dl, verbose=False)[0]
+            test_rmse = results.get("test_rmse", float("inf"))
+            test_score = results.get("test_score", float("inf"))
 
-        return val_rmse
+            trial.set_user_attr("val_rmse", val_rmse)
+            trial.set_user_attr("val_score", val_score)
+            trial.set_user_attr("test_rmse", test_rmse)
+            trial.set_user_attr("test_score", test_score)
+
+            return val_rmse
+
+        finally:
+            del train_dl, val_dl, test_dl
+            trainer = module = net = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     return objective
 
