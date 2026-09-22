@@ -116,7 +116,7 @@ class ScaniaDataModule(LightningDataModule):
         assert counter_mode in ("delta", "cumulative", "both"), \
             f"Unsupported counter_mode: {counter_mode}"
         assert 0 < data_fraction <= 1.0, "data_fraction must be in (0, 1]"
-        assert histogram_mode in ("sum", "zhist"), \
+        assert histogram_mode in ("sum", "zhist", "delta", "cumulative"), \
             f"Unsupported histogram_mode: {histogram_mode}"
         # Only the window-padding convention for vehicles shorter than sequence_len; see
         # ScaniaDataset.__init__. It changes nothing on disk, so a 'nan' run and an 'edge' run
@@ -308,6 +308,12 @@ class ScaniaDataModule(LightningDataModule):
             # Keep the cumulative counters AND append the per-step deltas as new columns.
             delta_cols = [f"{c}_delta" for c in base_cols]
             readouts[delta_cols] = readouts.groupby(VEHICLE_ID)[base_cols].diff().fillna(0.0)
+
+        if self.histogram_mode == "cumulative":
+            pass
+        elif self.histogram_mode == "delta":
+            # Replace histogram bins by their per-step delta (legacy behavior).
+            readouts[self._raw_histogram_cols] = readouts.groupby(VEHICLE_ID)[self._raw_histogram_cols].diff().fillna(0.0)
 
         return readouts
 

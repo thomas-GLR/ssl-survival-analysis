@@ -54,7 +54,7 @@ RUL = "rul"
 RUL_LOWER_BOUND = "rul_lower_bound"
 
 
-class HistogramFeatureNormalizer:
+class HistogramFeatureSumNormalizer:
     """Sum-based normalizer for Scania histogram variables.
 
     Histogram variables are cumulative per-bin counts (a distribution over bins).
@@ -82,7 +82,7 @@ class HistogramFeatureNormalizer:
         # Per-feature normalization scalar, populated by ``fit``.
         self.normalization_params: dict[str, float] = {}
 
-    def fit(self, x: pd.DataFrame) -> "HistogramFeatureNormalizer":
+    def fit(self, x: pd.DataFrame) -> "HistogramFeatureSumNormalizer":
         """Compute, per feature group, the average per-row bin total (+ epsilon).
 
         :param x: dataframe holding at least the histogram bin columns.
@@ -422,7 +422,7 @@ class ScaniaDataset(Dataset):
             np.random.seed(seed)
 
         assert norm_type in (None, "z-score"), f"Unsupported norm_type: {norm_type}"
-        assert histogram_mode in ("sum", "zhist"), f"Unsupported histogram_mode: {histogram_mode}"
+        assert histogram_mode in ("sum", "zhist", "delta", "cumulative"), f"Unsupported histogram_mode: {histogram_mode}"
         assert pad_mode in ("edge", "nan"), f"Unsupported pad_mode: {pad_mode}"
         # In 'nan' mode the real readouts move to the FRONT of the window, while the per-step
         # labels built by _gen_sequence stay left-edge-padded (i.e. right-aligned). Refusing the
@@ -441,9 +441,12 @@ class ScaniaDataset(Dataset):
         self.raw_histogram_cols = list(raw_histogram_cols) if raw_histogram_cols else []
         self.zhist_norm_params = zhist_norm_params
         # Columns z-scored by norm_type: every feature column that is not a
-        # histogram bin (histograms get their own sum-based normalizer).
+        # histogram bin (histograms get their own sum-based normalizer) if the mode is not cumulative or delta.
         histogram_set = set(self.histogram_cols)
-        self._zscore_cols = [c for c in self.feature_cols if c not in histogram_set]
+        if self.histogram_mode in ["delta", "cumulative"]:
+            self._zscore_cols = [c for c in self.feature_cols]
+        else:
+            self._zscore_cols = [c for c in self.feature_cols if c not in histogram_set]
         self.return_sequence_label = return_sequence_label
         self.return_id = return_id
         self.only_final = only_final
@@ -560,10 +563,13 @@ class ScaniaDataset(Dataset):
                 zhist_df = normalizer.transform(df)
                 df = df.drop(columns=self.raw_histogram_cols)
                 df[list(zhist_df.columns)] = zhist_df
+        elif self.histogram_mode in ["delta", "cumulative"]:
+            # Already normalized with counter with z-score.
+            pass
         elif self.histogram_cols:
             # Sum-based normalization of the raw per-bin columns (default).
             df[self.histogram_cols] = df[self.histogram_cols].astype(np.float64)
-            normalizer = HistogramFeatureNormalizer(self.histogram_cols)
+            normalizer = HistogramFeatureSumNormalizer(self.histogram_cols)
             if self.hist_norm_params is None:
                 normalizer.fit(df)
                 self.hist_norm_params = normalizer.normalization_params
@@ -814,7 +820,7 @@ class ScaniaDataset(Dataset):
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            persistent_workers=True,
+            # persistent_workers=True,
         )
 
     def get_censored_split_tensors(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
