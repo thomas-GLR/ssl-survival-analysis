@@ -33,6 +33,7 @@ from scania.utils.utils_hyper_parameter_optimization_v2 import (
     build_configurations,
     run_hyper_parameter_optimization,
 )
+from scania.utils.utils_pretrained_models import get_or_train_initial_models
 
 __all__ = [
     "assert_data_is_valid",
@@ -64,4 +65,5 @@ __all__ = [
     "load_ensemble_for_inference",
     "read_checkpoint_spec",
     "read_ensemble_weights_from_results",
+    "get_or_train_initial_models",
 ]
