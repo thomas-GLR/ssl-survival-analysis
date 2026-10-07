@@ -1,6 +1,8 @@
 {
   "FD001": {
     "dataset_params": {
+      "sequence_len": 60,
+      "batch_size": 128,
       "seed": 42,
       "max_rul": 125,
       "return_sequence_label": false,
@@ -10,31 +12,37 @@
       "include_cols": [],
       "exclude_cols": [],
       "return_id": false,
-      "validation_rate": 0.2,
+      "val_rate": 0.2,
       "use_only_final_on_test": true,
       "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
-      "lstm_num_layers": 3,
-      "hidden_dim": 128,
-      "lstm_dropout": 0.2,
-      "fc_layer_dim": 128,
-      "fc_dropout": 0.5,
-      "patience": 5,
-      "lr_first_model": 0.001,
-      "lr_second_model": 0.0002,
-      "epochs_first_model": 1,
-      "epochs_second_model": 1,
-      "batch_size_first_model": 128,
-      "batch_size_second_model": 128,
+      "first_model": {
+        "cnn": {}
+      },
+      "second_model": {
+        "lstm": {
+          "hidden_dim": 128,
+          "lstm_num_layers": 3,
+          "lstm_dropout": 0.2,
+          "fc_layer_dim": 128,
+          "fc_dropout": 0.5
+        }
+      }
+    },
+    "training_params": {
+      "lr": [0.001, 0.0002],
+      "patiences": [5, 5],
+      "max_epochs": [1, 1],
       "coprog_iterations": 2,
       "coprog_suspension_pool_size": 3
     }
   },
   "FD002": {
     "dataset_params": {
+      "sequence_len": 60,
+      "batch_size": 128,
       "seed": 42,
       "max_rul": 125,
       "return_sequence_label": false,
@@ -44,31 +52,37 @@
       "include_cols": [],
       "exclude_cols": [],
       "return_id": false,
-      "validation_rate": 0.2,
+      "val_rate": 0.2,
       "use_only_final_on_test": true,
       "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
-      "lstm_num_layers": 3,
-      "hidden_dim": 128,
-      "lstm_dropout": 0.2,
-      "fc_layer_dim": 128,
-      "fc_dropout": 0.5,
-      "patience": 5,
-      "lr_first_model": 0.001,
-      "lr_second_model": 0.0002,
-      "epochs_first_model": 1,
-      "epochs_second_model": 1,
-      "batch_size_first_model": 128,
-      "batch_size_second_model": 128,
+      "first_model": {
+        "cnn": {}
+      },
+      "second_model": {
+        "lstm": {
+          "hidden_dim": 128,
+          "lstm_num_layers": 3,
+          "lstm_dropout": 0.2,
+          "fc_layer_dim": 128,
+          "fc_dropout": 0.5
+        }
+      }
+    },
+    "training_params": {
+      "lr": [0.001, 0.0002],
+      "patiences": [5, 5],
+      "max_epochs": [1, 1],
       "coprog_iterations": 2,
       "coprog_suspension_pool_size": 3
     }
   },
   "FD003": {
     "dataset_params": {
+      "sequence_len": 60,
+      "batch_size": 128,
       "seed": 42,
       "max_rul": 125,
       "return_sequence_label": false,
@@ -78,31 +92,37 @@
       "include_cols": [],
       "exclude_cols": [],
       "return_id": false,
-      "validation_rate": 0.2,
+      "val_rate": 0.2,
       "use_only_final_on_test": true,
       "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
-      "lstm_num_layers": 3,
-      "hidden_dim": 128,
-      "lstm_dropout": 0.2,
-      "fc_layer_dim": 128,
-      "fc_dropout": 0.5,
-      "patience": 5,
-      "lr_first_model": 0.001,
-      "lr_second_model": 0.0002,
-      "epochs_first_model": 1,
-      "epochs_second_model": 1,
-      "batch_size_first_model": 128,
-      "batch_size_second_model": 128,
+      "first_model": {
+        "cnn": {}
+      },
+      "second_model": {
+        "lstm": {
+          "hidden_dim": 128,
+          "lstm_num_layers": 3,
+          "lstm_dropout": 0.2,
+          "fc_layer_dim": 128,
+          "fc_dropout": 0.5
+        }
+      }
+    },
+    "training_params": {
+      "lr": [0.001, 0.0002],
+      "patiences": [5, 5],
+      "max_epochs": [1, 1],
       "coprog_iterations": 2,
       "coprog_suspension_pool_size": 3
     }
   },
   "FD004": {
     "dataset_params": {
+      "sequence_len": 60,
+      "batch_size": 128,
       "seed": 42,
       "max_rul": 125,
       "return_sequence_label": false,
@@ -112,25 +132,29 @@
       "include_cols": [],
       "exclude_cols": [],
       "return_id": false,
-      "validation_rate": 0.2,
+      "val_rate": 0.2,
       "use_only_final_on_test": true,
       "use_max_rul_on_test": false,
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 60,
-      "lstm_num_layers": 3,
-      "hidden_dim": 128,
-      "lstm_dropout": 0.2,
-      "fc_layer_dim": 128,
-      "fc_dropout": 0.5,
-      "patience": 5,
-      "lr_first_model": 0.001,
-      "lr_second_model": 0.0002,
-      "epochs_first_model": 1,
-      "epochs_second_model": 1,
-      "batch_size_first_model": 128,
-      "batch_size_second_model": 128,
+      "first_model": {
+        "cnn": {}
+      },
+      "second_model": {
+        "lstm": {
+          "hidden_dim": 128,
+          "lstm_num_layers": 3,
+          "lstm_dropout": 0.2,
+          "fc_layer_dim": 128,
+          "fc_dropout": 0.5
+        }
+      }
+    },
+    "training_params": {
+      "lr": [0.001, 0.0002],
+      "patiences": [5, 5],
+      "max_epochs": [1, 1],
       "coprog_iterations": 2,
       "coprog_suspension_pool_size": 3
     }

@@ -1,6 +1,6 @@
 from types import ModuleType
 
-from shared.utils.ModelVersion import ModelVersion
+from shared.enums import ModelVersion
 
 
 def get_necessary_dataset_keys(model_version: ModelVersion, necessary_keys_module: ModuleType) -> list[str]:

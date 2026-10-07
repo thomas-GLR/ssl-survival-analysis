@@ -1,9 +1,10 @@
 # =======================================================
 # DATASET
 # =======================================================
+from constants.necessary_shared_keys import SEED, VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE
 
 NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
-    "seed",
+    SEED,
     "max_rul",
     "return_sequence_label",
     "norm_type",
@@ -21,7 +22,7 @@ NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
 NECESSARY_DATASET_SELF_SUPERVISED_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
 NECESSARY_DATASET_RSF_KEYS = [
-    "seed",
+    SEED,
     "max_rul",
     "norm_type",
     "cluster_operations",
@@ -33,7 +34,23 @@ NECESSARY_DATASET_RSF_KEYS = [
     "summarize_features",
 ]
 
-NECESSARY_DATASET_COPROG_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
+NECESSARY_DATASET_COPROG_KEYS = [
+    SEQUENCE_LEN,
+    BATCH_SIZE,
+    SEED,
+    "max_rul",
+    "return_sequence_label",
+    "norm_type",
+    "cluster_operations",
+    "norm_by_operations",
+    "include_cols",
+    "exclude_cols",
+    "return_id",
+    VALIDATION_RATE,
+    "use_only_final_on_test",
+    "use_max_rul_on_test",
+    "use_max_rul_on_valid",
+]
 
 NECESSARY_DATASET_PYCLUS_KEYS = NECESSARY_DATASET_RSF_KEYS
 
@@ -45,34 +62,34 @@ NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V2_KEYS = NECESSARY_DATASET_CO_TRAINING_E
 # =======================================================
 
 NECESSARY_TRANSFORMER_KEYS = [
-    "sequence_len",
+    SEQUENCE_LEN,
     "transformer_encoder_head_num",
     "hidden_dim",
     "lstm_num_layers",
     "lstm_dropout",
     "fc_layer_dim",
     "fc_dropout",
-    "batch_size",
+    BATCH_SIZE,
     "lr",
     "patience",
     "max_epochs",
 ]
 
-NECESSARY_LSTM_KEYS = [
-    "sequence_len",
-    "hidden_dim",
-    "lstm_num_layers",
-    "lstm_dropout",
-    "fc_layer_dim",
-    "fc_dropout",
-    "batch_size",
-    "lr",
-    "patience",
-    "max_epochs",
-]
+# NECESSARY_LSTM_KEYS = [
+#     "SEQUENCE_LEN,
+#     "hidden_dim",
+#     "lstm_num_layers",
+#     "lstm_dropout",
+#     "fc_layer_dim",
+#     "fc_dropout",
+#     BATCH_SIZE,
+#     "lr",
+#     "patience",
+#     "max_epochs",
+# ]
 
 NECESSARY_SELF_SUPERVISED_KEYS = [
-    "sequence_len",
+    SEQUENCE_LEN,
     "pretraining_lr",
     "dropout",
     "num_layers",
@@ -100,21 +117,32 @@ NECESSARY_RSF_KEYS = [
 ]
 
 NECESSARY_COPROG_KEYS = [
-    "sequence_len",
-    "lstm_num_layers",
+    "first_model",
+    "second_model",
+]
+
+NECESSARY_CNN_KEYS = []
+
+NECESSARY_LSTM_KEYS = [
     "hidden_dim",
+    "lstm_num_layers",
     "lstm_dropout",
     "fc_layer_dim",
     "fc_dropout",
-    "lr_first_model",
-    "lr_second_model",
-    "epochs_first_model",
-    "epochs_second_model",
-    "batch_size_first_model",
-    "batch_size_second_model",
-    "patience",
-    "coprog_iterations",
-    "coprog_suspension_pool_size",
+]
+
+NECESSARY_TRANSFORMER_FEATURES_KEYS = [
+    "transformer_encoder_head_num",
+    "transformer_num_layer",
+    "fc_layer_dim",
+    "fc_dropout",
+]
+
+NECESSARY_COPROG_TRANSFORMER_TIME_SEQUENCE_KEYS = [
+    "transformer_encoder_head_num",
+    "transformer_num_layer",
+    "fc_layer_dim",
+    "fc_dropout",
 ]
 
 NECESSARY_PYCLUS_KEYS = [
@@ -126,16 +154,16 @@ NECESSARY_PYCLUS_KEYS = [
     "variance_warning_threshold",
 ]
 
-NECESSARY_CNN_KEYS = [
-    "sequence_len",
-    "batch_size",
-    "lr",
-    "patience",
-    "max_epochs",
-]
+# NECESSARY_CNN_KEYS = [
+#     SEQUENCE_LEN,
+#     BATCH_SIZE,
+#     "lr",
+#     "patience",
+#     "max_epochs",
+# ]
 
 NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
-    "sequence_len",
+    SEQUENCE_LEN,
     "coprog_iterations",
     "coprog_suspension_pool_size",
     "coprog_add_ratio",
@@ -166,7 +194,7 @@ NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
 ]
 
 NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
-    "sequence_len",
+    SEQUENCE_LEN,
     "coprog_iterations",
     "coprog_suspension_pool_size",
     "coprog_add_ratio",
@@ -189,4 +217,16 @@ NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
     "fc_dropout_transformer_time_series",
     "num_layers_transformer_features",
     "num_layers_transformer_time_series",
+]
+
+# =======================================================
+# TRAINING
+# =======================================================
+
+NECESSARY_TRAINING_COPROG_KEYS = [
+    "lr",
+    "patiences",
+    "max_epochs",
+    "coprog_iterations",
+    "coprog_suspension_pool_size",
 ]

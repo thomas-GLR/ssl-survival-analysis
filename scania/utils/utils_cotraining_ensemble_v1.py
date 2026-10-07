@@ -17,13 +17,15 @@ from datetime import datetime
 from models.CoTrainingEnsemble import CoTrainingEnsemble, SelectionMode
 from scania.dataset import ScaniaDataModule
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
-from scania.utils.utils_coprog import _criteria_callback_for_coprog, _score_callback_for_coprog
-from scania.utils.utils_scania import (
+from shared.utils import (
+    set_seed,
+    save_train_parameters,
     assert_data_is_valid,
     create_and_get_checkpoints_results_path,
-    save_train_parameters,
+    criteria_rmse_callback,
+    criteria_score_callback
 )
-from shared.utils import ModelVersion, set_seed
+from enums import ModelVersion
 
 
 def train_model(
@@ -245,8 +247,8 @@ def train_model(
         # Runs in the main process (safe for the parallel path).
         test_data=test_features,
         test_label=test_targets,
-        score_callback=_score_callback_for_coprog,
-        weight_callback=_criteria_callback_for_coprog,
+        score_callback=criteria_score_callback,
+        weight_callback=criteria_rmse_callback,
         weight_mode="min",
         metrics_file=f"{results_path}/{model_version.value}-per-stage-scania.csv",
         log_file=log_file_path,
@@ -259,7 +261,7 @@ def train_model(
     ensemble.calculate_weights(
         x_test=val_features,
         target=val_targets,
-        criteria_callback=_criteria_callback_for_coprog,
+        criteria_callback=criteria_rmse_callback,
         mode="min",
     )
 

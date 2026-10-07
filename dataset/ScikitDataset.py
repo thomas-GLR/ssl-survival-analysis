@@ -61,7 +61,7 @@ class ScikitDataset:
             include_cols=include_cols,
             exclude_cols=exclude_cols,
             return_id=True,
-            validation_rate=0.,
+            val_rate=0.,
             use_only_final_on_test=False,
             use_max_rul_on_test=use_max_rul_on_test,
             use_max_rul_on_valid=use_max_rul_on_valid,

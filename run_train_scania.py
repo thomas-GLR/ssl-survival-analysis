@@ -2,6 +2,8 @@ import argparse
 import logging
 import os
 
+from shared.enums import DatasetVersion
+
 # This environment variable avoid for missing cuBLAS when using deterministic algorithm.
 # This happend because cuBLAS is used by every nn.Linear/matmul, so the LSTM, Transformer, and CNN's dense layers, and the backward pass
 # cuBLAS has its own determinism switch that's independent of torch.use_deterministic_algorithms — it needs an environment variable set before CUDA initializes.
@@ -11,24 +13,27 @@ import traceback
 from datetime import datetime
 from typing import Callable
 
-from shared.utils import ModelVersion
+from shared.utils import (
+    extract_dataset_params_from_config,
+    extract_model_params_from_config,
+    extract_training_params_from_config
+)
+from shared.enums import ModelVersion
 from scania.utils import (
     get_necessary_dataset_keys,
     get_necessary_model_keys,
-    extract_dataset_params_from_config,
-    extract_model_params_from_config,
-    extract_training_params_from_config,
     get_necessary_training_keys,
     override_dataset_params_from_cache_manifest,
 )
 from scania.utils import (
     train_model_lightning,
     train_model_random_survival,
-    train_model_coprog,
     train_model_cotraining_ensemble,
     train_model_cotraining_ensemble_v2,
     train_model_dynamic_deephit,
 )
+
+from shared.utils import train_model_coprog
 
 logger = logging.getLogger(__name__)
 
@@ -116,15 +121,17 @@ def reproduce_result(
     extra_params = {"gpu_ids": gpu_ids} if model_version in gpu_aware_versions else {}
 
     try:
+        dataset_params["cache_dir"] = dataset_cache_dir
+
         rmse, score = train_model(
             checkpoints_path=checkpoints_path,
             results_path=results_path,
             model_version=model_version,
-            cache_dir=dataset_cache_dir,
             force_load_from_cache=force_load_from_cache,
             dataset_root=dataset_root,
             datetime_for_folders=benchmark_datetime,
-            **dataset_params,
+            dataset_version=DatasetVersion.SCANIA,
+            dataset_params=dataset_params,
             **training_params,
             **model_params,
             **extra_params,

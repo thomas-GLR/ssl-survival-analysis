@@ -36,10 +36,13 @@ from constants import necessary_keys_scania
 from scania.challenge import run_challenge_evaluation
 from scania.dataset import ScaniaDataModule
 from scania.lightning_module import BasicLightningModule
-from scania.utils.utils_coprog import _build_scania_module, _creating_model
 from scania.utils.utils_scania import generate_and_save_model_prediction
-from shared.utils import ModelVersion
-from shared.utils.config import assert_params_contains_all_key
+from shared.enums import ModelVersion
+from shared.utils import (
+    assert_params_contains_all_key,
+    build_scania_module,
+    creating_model
+)
 
 # The co-training ensembles only support these four architectures (same set as COPROG).
 _ALLOWED_MODEL_VERSIONS = {
@@ -163,10 +166,10 @@ def parse_models_config(
 
         # dict(...) copies: _creating_model mutates its params dict via .update, so keep the
         # extracted params pristine for the (picklable) builder below.
-        nn_modules.append(_creating_model(dict(model_params), model_version, feature_num, sequence_len))
+        nn_modules.append(creating_model(dict(model_params), model_version, feature_num, sequence_len))
         module_builders.append(
             functools.partial(
-                _build_scania_module,
+                build_scania_module,
                 model_params=dict(model_params),
                 model_version_value=model_version.value,
                 feature_num=feature_num,
@@ -264,7 +267,7 @@ def _model_from_spec(spec: dict) -> nn.Module:
             f"The checkpoint's '{CHECKPOINT_SPEC_KEY}' block cannot rebuild the architecture: "
             f"missing {missing}. Pass the model explicitly via the 'model' argument instead.")
     # dict(...): _creating_model mutates its params dict via .update.
-    return _creating_model(
+    return creating_model(
         dict(spec["model_params"]),
         ModelVersion(spec["model_version"]),
         spec["feature_num"],

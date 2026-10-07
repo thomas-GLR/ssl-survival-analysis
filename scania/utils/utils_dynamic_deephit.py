@@ -57,12 +57,15 @@ from scania.dataset import ScaniaDataModule
 from scania.dataset.ScaniaDataset import ScaniaDataset
 from scania.metrics import scania_score
 from scania.utils.utils_scania import (
-    assert_data_is_valid,
-    create_and_get_checkpoints_results_path,
     generate_and_save_model_prediction,
-    save_train_parameters,
 )
-from shared.utils import ModelVersion, set_seed
+from shared.utils import (
+    set_seed,
+    save_train_parameters,
+    assert_data_is_valid,
+    create_and_get_checkpoints_results_path
+)
+from enums import ModelVersion
 
 # Repository root, from ``scania/utils/utils_dynamic_deephit.py``.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

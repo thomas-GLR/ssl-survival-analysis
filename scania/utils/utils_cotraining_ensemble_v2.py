@@ -13,18 +13,18 @@ Shared model/builder construction and output saving come from
 import os
 from datetime import datetime
 
-import torch
-
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
 from scania.dataset import ScaniaDataModule
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
-from scania.utils.utils_coprog import _criteria_callback_for_coprog, _score_callback_for_coprog
-from scania.utils.utils_scania import (
+from shared.utils import (
+    set_seed,
+    save_train_parameters,
     assert_data_is_valid,
     create_and_get_checkpoints_results_path,
-    save_train_parameters,
+    criteria_rmse_callback,
+    criteria_score_callback
 )
-from shared.utils import ModelVersion, set_seed
+from shared.enums import ModelVersion, DatasetVersion
 from scania.utils.utils_pretrained_models import get_or_train_initial_models
 
 
@@ -92,6 +92,7 @@ def train_model(
     gpu_ids: list[int] | None = None,
     datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
     pretrained_model_dir: str | None = None,
+    dataset_version: DatasetVersion = DatasetVersion.SCANIA
 ) -> tuple[float, float]:
     """Train a :class:`models.CoTrainingEnsemble_v2` on the Scania Component X dataset.
 
@@ -335,6 +336,7 @@ def train_model(
     ensemble = CoTrainingEnsemble_v2(
         models=nn_modules,
         verbose=1,
+        dataset_version=dataset_version,
         confidence=confidence,
         inference_batch_size=inference_batch_size,
         use_average_window_confidence=use_average_window_confidence,
@@ -429,8 +431,8 @@ def train_model(
         # (matching calculate_weights below) -- the cost is reported, never used for selection.
         test_data=test_features,
         test_label=test_targets,
-        score_callback=_score_callback_for_coprog,
-        weight_callback=_criteria_callback_for_coprog,
+        score_callback=criteria_score_callback,
+        weight_callback=criteria_rmse_callback,
         weight_mode="min",
         metrics_file=f"{results_path}/{model_version.value}-per-stage-scania.csv",
         log_file=log_file_path,
@@ -441,7 +443,7 @@ def train_model(
     ensemble.calculate_weights(
         x_test=val_features,
         target=val_targets,
-        criteria_callback=_criteria_callback_for_coprog,
+        criteria_callback=criteria_rmse_callback,
         mode="min",
         calib_data=calib_features,
         calib_label=calib_targets,

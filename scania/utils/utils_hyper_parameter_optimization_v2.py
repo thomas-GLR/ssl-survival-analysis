@@ -43,15 +43,20 @@ from tqdm import tqdm
 from constants import necessary_keys_scania
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
 from scania.dataset import ScaniaDataModule
-from scania.utils.utils_coprog import _criteria_callback_for_coprog, _score_callback_for_coprog
 from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
 from scania.utils.utils_scania import (
-    assert_data_is_valid,
     override_dataset_params_from_cache_manifest,
-    save_train_parameters,
 )
-from shared.utils import ModelVersion, set_seed
-from shared.utils.config import assert_params_contains_all_key, extract_data_from_config
+from shared.utils import (
+    set_seed,
+    save_train_parameters,
+    assert_data_is_valid,
+    assert_params_contains_all_key,
+    extract_data_from_config,
+    criteria_rmse_callback,
+    criteria_score_callback
+)
+from shared.enums import ModelVersion
 
 MODEL_VERSION = ModelVersion.CO_TRAINING_ENSEMBLE_V2
 
@@ -892,8 +897,8 @@ def _run_one_configuration(
             calib_label=data["calib_targets"],
             test_data=data["test_features"],
             test_label=data["test_targets"],
-            score_callback=_score_callback_for_coprog,
-            weight_callback=_criteria_callback_for_coprog,
+            score_callback=criteria_score_callback,
+            weight_callback=criteria_rmse_callback,
             weight_mode="min",
             metrics_file=os.path.join(results_path, PER_STAGE_FILE),
             log_file=log_file_path,
@@ -905,7 +910,7 @@ def _run_one_configuration(
         ensemble.calculate_weights(
             x_test=data["val_features"],
             target=data["val_targets"],
-            criteria_callback=_criteria_callback_for_coprog,
+            criteria_callback=criteria_rmse_callback,
             mode="min",
             calib_data=data["calib_features"],
             calib_label=data["calib_targets"],

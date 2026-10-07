@@ -15,6 +15,7 @@ from models.coprog_gpu_pool import (
     TrainingSpec,
     run_training_job,
 )
+from shared.enums import DatasetVersion
 
 
 class Coprog:
@@ -51,12 +52,14 @@ class Coprog:
             self,
             first_model: nn.Module,
             second_model: nn.Module,
+            dataset_version: DatasetVersion,
             verbose: int = 0,
     ):
         # Keep the originals so external code can still reference them.
         self.first_model = first_model
         self.second_model = second_model
         self.models = [first_model, second_model]
+        self.dataset_version = dataset_version
 
         self.w1 = None
         self.w2 = None
@@ -261,7 +264,7 @@ class Coprog:
             val_label: torch.Tensor | None = None,
             test_data: torch.Tensor | None = None,
             test_label: torch.Tensor | None = None,
-            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            score_callback: Callable[[DatasetVersion, torch.Tensor, torch.Tensor], float] | None = None,
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
             weight_mode: str = "min",
             metrics_file: str | None = None,
@@ -337,12 +340,15 @@ class Coprog:
             "metrics_file": metrics_file,
         }
 
-        if pretrained_models is not None and self._parallel:
-            raise ValueError(
-                "pretrained_models is only supported on the sequential path; it cannot be "
-                "combined with multi-GPU parallel (gpu_ids with >= 2 GPUs).")
-        if len(pretrained_models) != 2:
-            raise ValueError(f"pretrained_models must have 2 models but got {len(pretrained_models)} models")
+        if pretrained_models is not None and len(pretrained_models) > 0:
+            if self._parallel:
+                raise ValueError(
+                    "pretrained_models is only supported on the sequential path; it cannot be "
+                    "combined with multi-GPU parallel (gpu_ids with >= 2 GPUs).")
+            if len(pretrained_models) != 2:
+                raise ValueError(f"pretrained_models must have 2 models but got {len(pretrained_models)} models")
+        else:
+            pretrained_models = None
 
         if self._parallel:
             self._train_parallel(
@@ -377,7 +383,7 @@ class Coprog:
             metrics_enabled: bool = False,
             test_data: torch.Tensor | None = None,
             test_label: torch.Tensor | None = None,
-            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            score_callback: Callable[[DatasetVersion, torch.Tensor, torch.Tensor], float] | None = None,
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
             weight_mode: str = "min",
             metrics_file: str | None = None,
@@ -626,7 +632,7 @@ class Coprog:
             metrics_enabled: bool = False,
             test_data: torch.Tensor | None = None,
             test_label: torch.Tensor | None = None,
-            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            score_callback: Callable[[DatasetVersion, torch.Tensor, torch.Tensor], float] | None = None,
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
             weight_mode: str = "min",
             metrics_file: str | None = None,
@@ -1202,7 +1208,7 @@ class Coprog:
             test_label: torch.Tensor,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
-            score_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            score_callback: Callable[[DatasetVersion, torch.Tensor, torch.Tensor], float],
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float],
             weight_mode: str,
             metrics_file: str,
@@ -1253,12 +1259,12 @@ class Coprog:
             val_pred_j = self._predict(model, val_data).view(-1).to(val_label_flat.device)
             val_preds.append(val_pred_j)
             val_rmses.append((((val_label_flat - val_pred_j) ** 2).mean().item()) ** 0.5)
-            val_scores.append(score_callback(val_pred_j, val_label_flat))
+            val_scores.append(score_callback(self.dataset_version, val_pred_j, val_label_flat))
 
             pred_j = self._predict(model, test_data).view(-1).to(test_label_flat.device)
             test_preds.append(pred_j)
             test_rmses.append((((test_label_flat - pred_j) ** 2).mean().item()) ** 0.5)
-            test_scores.append(score_callback(pred_j, test_label_flat))
+            test_scores.append(score_callback(self.dataset_version, pred_j, test_label_flat))
 
         n = len(models)
         avg_val_rmse = sum(val_rmses) / n
@@ -1283,13 +1289,13 @@ class Coprog:
             [w * pred for w, pred in zip(weights, test_preds)], dim=0
         ).sum(dim=0).view(-1)
         weighted_test_rmse = (((test_label_flat - weighted_pred) ** 2).mean().item()) ** 0.5
-        weighted_test_score = score_callback(weighted_pred, test_label_flat)
+        weighted_test_score = score_callback(self.dataset_version, weighted_pred, test_label_flat)
 
         weighted_val_pred = torch.stack(
             [w * pred for w, pred in zip(weights, val_preds)], dim=0
         ).sum(dim=0).view(-1)
         weighted_val_rmse = (((val_label_flat - weighted_val_pred) ** 2).mean().item()) ** 0.5
-        weighted_val_score = score_callback(weighted_val_pred, val_label_flat)
+        weighted_val_score = score_callback(self.dataset_version, weighted_val_pred, val_label_flat)
 
         # Durations (seconds). A missing list means "this stage did nothing of that kind"; the
         # totals default to the sum of what was actually measured (None when nothing was), and

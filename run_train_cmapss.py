@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import traceback
 
+from shared.enums import DatasetVersion
+
 # Cap CPU/BLAS thread pools *before* numpy/torch/sklearn initialize their
 # native backends. GPU pods (e.g. RunPod) often expose many vCPUs; left
 # uncapped, every small CPU-side op (dataset windowing, KMeans, DataLoader
@@ -24,7 +26,13 @@ _NUM_THREADS = os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("MKL_NUM_THREADS", _NUM_THREADS)
 os.environ.setdefault("OPENBLAS_NUM_THREADS", _NUM_THREADS)
 
+# This environment variable avoid for missing cuBLAS when using deterministic algorithm.
+# This happend because cuBLAS is used by every nn.Linear/matmul, so the LSTM, Transformer, and CNN's dense layers, and the backward pass
+# cuBLAS has its own determinism switch that's independent of torch.use_deterministic_algorithms — it needs an environment variable set before CUDA initializes.
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 import argparse
+import json
 import logging
 from datetime import datetime
 
@@ -35,11 +43,21 @@ torch.set_num_threads(int(_NUM_THREADS))
 torch.set_num_interop_threads(int(_NUM_THREADS))
 
 from constants import results_columns
-from shared.utils import ModelVersion
-from C_MAPSS.utils.utils_cmapss import (get_necessary_dataset_keys,
-                                        get_necessary_model_keys,
-                                        get_train_model_method, extract_benchmark_information_from_config,
-                                        extract_dataset_params_from_config, extract_model_params_from_config)
+from shared.utils import (
+    extract_dataset_params_from_config,
+    extract_model_params_from_config,
+    extract_training_params_from_config,
+)
+
+from shared.enums import ModelVersion
+
+from C_MAPSS.utils import (
+    get_necessary_dataset_keys,
+    get_necessary_model_keys,
+    get_necessary_training_keys,
+    get_train_model_method,
+    extract_benchmark_information_from_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +68,10 @@ def reproduce_result(
         results_path: str,
         dataset_root: str,
         model_version: ModelVersion,
-        device: str | None,
         benchmark_version: str = "default",
+        run_name: str = "",
+        gpu_ids: list[int] | None = None,
+        pretrained_model_dir: str | None = None,
 ) -> None:
     """
     Reproduce results for CMAPSS dataset
@@ -62,13 +82,21 @@ def reproduce_result(
         results_path: the path to store results
         dataset_root: the path to the dataset folder where all cmapss files are stored
         model_version: the version of the model
-        device: the device where to run the model
         benchmark_version: the folder of the version for the benchmark.
             It enables to run different benchmark configuration
+        run_name: The name of the run
+        gpu_ids: GPU id(s) to train on (COPROG and co-training ensembles only)
+        pretrained_model_dir: Directory containing pretrained initial models
     """
     config_path = f"{config_path}/{benchmark_version}"
     config_benchmark_file_path = f"{config_path}/benchmark.json"
     config_model_file_path = f"{config_path}/{model_version.value}.json"
+
+    is_coprog_or_co_training_ensemble_v2 = (
+        model_version == ModelVersion.COPROG
+        or model_version == ModelVersion.CO_TRAINING_ENSEMBLE
+        or model_version == ModelVersion.CO_TRAINING_ENSEMBLE_V2
+    )
 
     assert os.path.exists(checkpoints_path), f"{checkpoints_path} does not exist."
     assert os.path.exists(results_path), f"{results_path} does not exist."
@@ -76,6 +104,15 @@ def reproduce_result(
     assert os.path.exists(dataset_root), f"{dataset_root} does not exist."
     assert os.path.exists(config_benchmark_file_path), f"{config_benchmark_file_path} does not exist."
     assert os.path.exists(config_model_file_path), f"{config_model_file_path} does not exist."
+    if pretrained_model_dir is not None and is_coprog_or_co_training_ensemble_v2:
+        assert os.path.exists(pretrained_model_dir), f"{pretrained_model_dir} does not exist."
+
+    if run_name != "":
+        results_path = os.path.join(results_path, run_name)
+        os.makedirs(results_path, exist_ok=True)
+
+        checkpoints_path = os.path.join(checkpoints_path, run_name)
+        os.makedirs(checkpoints_path, exist_ok=True)
 
     broken_percentages, censored_percentages, cmapss_files = extract_benchmark_information_from_config(
         config_benchmark_file_path
@@ -95,6 +132,20 @@ def reproduce_result(
     necessary_model_keys = get_necessary_model_keys(model_version)
     train_model_func = get_train_model_method(model_version)
 
+    has_training_params = False
+    with open(config_model_file_path, "r", encoding="utf-8") as f:
+        _cfg = json.load(f)
+        if any("training_params" in _cfg.get(sub, {}) for sub in cmapss_files):
+            has_training_params = True
+
+    necessary_training_keys = get_necessary_training_keys(model_version) if has_training_params else []
+
+    gpu_aware_versions = {
+        ModelVersion.COPROG,
+        ModelVersion.CO_TRAINING_ENSEMBLE,
+        ModelVersion.CO_TRAINING_ENSEMBLE_V2,
+    }
+
     benchmark_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     log_file_path = os.path.join(results_path, f"log_model_{model_version.value}_{benchmark_datetime}.txt")
@@ -109,6 +160,20 @@ def reproduce_result(
             broken_percentages_tmp = [0.0] if censored_percentage == 0.0 else broken_percentages
 
             for broken_percentage in broken_percentages_tmp:
+                extra_params = {}
+                if model_version in gpu_aware_versions:
+                    extra_params["gpu_ids"] = gpu_ids
+
+                if pretrained_model_dir is not None and is_coprog_or_co_training_ensemble_v2:
+                    pretrained_model_dir_for_current_run = pretrained_model_dir
+
+                    sub_dataseet_censored_broken_run_name = f"{sub_dataset}-censored_{censored_percentage}-broken_{broken_percentage}"
+
+                    pretrained_model_dir_for_current_run = os.path.join(pretrained_model_dir_for_current_run, sub_dataseet_censored_broken_run_name)
+                    os.makedirs(pretrained_model_dir_for_current_run, exist_ok=True)
+
+                    extra_params["pretrained_model_dir"] = pretrained_model_dir_for_current_run
+
                 print(
                     f"Training model {model_version.value} for the sub dataset : {sub_dataset}, censored percentage : {censored_percentage} and broken percentage : {broken_percentage}")
 
@@ -124,19 +189,31 @@ def reproduce_result(
                     necessary_keys=necessary_model_keys,
                 )
 
+                if has_training_params:
+                    training_params = extract_training_params_from_config(
+                        config_path=config_model_file_path,
+                        sub_dataset=sub_dataset,
+                        necessary_keys=necessary_training_keys,
+                    )
+                else:
+                    training_params = {}
+
                 try:
                     rmse, score = train_model_func(
                         checkpoints_path=checkpoints_path,
                         results_path=results_path,
-                        model_version=model_version.value,
+                        model_version=model_version,
                         dataset_root=dataset_root,
                         sub_dataset=sub_dataset,
                         percent_of_broken_data=broken_percentage,
                         percent_of_censored_data=censored_percentage,
-                        **dataset_params,
+                        dataset_params=dataset_params,
+                        dataset_version=DatasetVersion.CMAPSS,
+                        rul_target_standardization=[False, False], # CMAPSS didn't deal with rul_target_standardization
+                        **training_params,
                         **model_params,
-                        device=device,
                         datetime_for_folders=benchmark_datetime,
+                        **extra_params,
                     )
                 except Exception as e:
                     rmse = None
@@ -204,12 +281,6 @@ def _parse_args() -> argparse.Namespace:
         description="Reproduce all semi-supervised experiments."
     )
     parser.add_argument(
-        "--device",
-        default=None,
-        choices=["cpu", "cuda"],
-        help="device type",
-    )
-    parser.add_argument(
         "--model-version",
         required=True,
         choices=[
@@ -251,6 +322,27 @@ def _parse_args() -> argparse.Namespace:
         default="default",
         help="The benchmark version",
     )
+    parser.add_argument(
+        "--run-name",
+        default="",
+        help="The name of the run",
+    )
+    parser.add_argument(
+        "--gpu-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "GPU id(s) to train on (COPROG and co-training ensembles only). Omit to use a "
+            "single GPU (auto). Give one id (e.g. --gpu-ids 0) to pin to that GPU, or several "
+            "(e.g. --gpu-ids 0 1) to train the models in parallel across those GPUs."
+        ),
+    )
+    parser.add_argument(
+        "--pretrained-model-dir",
+        default=None,
+        help="Path to the directory containing pretrained models for CoTrainingEnsemble_v2 and Coprog",
+    )
 
     return parser.parse_args()
 
@@ -266,8 +358,8 @@ def main() -> None:
     os.makedirs(args.checkpoints_path, exist_ok=True)
 
     logger.info(
-        "Training started — model=%s  device=%s  benchmark_version=%s",
-        args.model_version, args.device, args.benchmark_version,
+        "Training started — model=%s  benchmark_version=%s",
+        args.model_version, args.benchmark_version,
     )
 
     model_version = ModelVersion(args.model_version)
@@ -278,8 +370,10 @@ def main() -> None:
         results_path=args.results_path,
         dataset_root=args.dataset_root,
         model_version=model_version,
-        device=args.device,
         benchmark_version=args.benchmark_version,
+        run_name=args.run_name,
+        gpu_ids=args.gpu_ids,
+        pretrained_model_dir=args.pretrained_model_dir,
     )
 
 if __name__ == "__main__":

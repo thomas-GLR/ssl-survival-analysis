@@ -22,7 +22,7 @@ class CMAPSSLoader:
             include_cols=None,
             exclude_cols=None,
             return_id=False,
-            validation_rate=0.2,
+            val_rate=0.2,
             use_only_final_on_test=True,
             use_max_rul_on_test=False,
             use_max_rul_on_valid=True,
@@ -50,7 +50,7 @@ class CMAPSSLoader:
         :param exclude_cols:
         :param return_id:
 
-        :param validation_rate:
+        :param val_rate:
             Number of units used in the validation set as a percentage of the total training set, default is 0.2
             validation_rate = len(validation_dataset.df['id'].unique()) / len(full_train_dataset.df['id'].unique())
 
@@ -94,11 +94,11 @@ class CMAPSSLoader:
         # train_df[0] is unit id column
         valid_df = None
         valid_dataset = None
-        assert 0 <= validation_rate <= 0.99
-        if validation_rate:
+        assert 0 <= val_rate <= 0.99
+        if val_rate:
             ids = train_df[0].unique()
             max_id = np.max(ids)
-            valid_len = int(validation_rate * max_id)
+            valid_len = int(val_rate * max_id)
             if valid_len:
                 # random chose valid engine id
                 valid_ids = np.random.choice(np.arange(1, max_id + 1), valid_len, replace=False)
