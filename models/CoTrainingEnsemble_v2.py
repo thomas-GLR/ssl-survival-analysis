@@ -962,7 +962,7 @@ class CoTrainingEnsemble_v2:
                              f"scoring {len(pool_ids)} pooled censored units...")
 
                 conformal_start = time.perf_counter()
-                wrapper = self._build_calibrated_regressor(hj, xj, yj, calib_data_eff, calib_label_eff)
+                wrapper = self._build_calibrated_regressor(hj, failure_data, failure_label, calib_data_eff, calib_label_eff)
 
                 # Collect each unit's rows, its per-window pseudo-labels, its (optional) per-window
                 # lower bounds and the window(s) that feed the confidence interval: the last
@@ -1187,7 +1187,7 @@ class CoTrainingEnsemble_v2:
                         # measure: L = (xj, yj) is this model's dataset before this iteration's
                         # additions, h_j = h[j] is the model before this iteration's
                         # training/fine-tuning, h'_j = candidate is the newly trained model.
-                        delta = self._mse_on(h[j], xj, yj) - self._mse_on(candidate, xj, yj)
+                        delta = self._mse_on(h[j], failure_data, failure_label) - self._mse_on(candidate, failure_data, failure_label)
                         if delta > 0:
                             self._log(1, f"[CoTraining]   Model {j}: kept (delta_criterion "
                                          f"delta={delta:.4f} > 0).")
