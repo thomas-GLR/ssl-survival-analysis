@@ -15,7 +15,7 @@ from C_MAPSS.lightning_module.BaselineModule import BaselineModule
 from C_MAPSS.lightning_module.MetricPretrainingModule import MetricPretrainingModule
 from dataset.SiamesedDataset import SiameseDataset
 from C_MAPSS.utils import utils_cmapss
-from shared.utils import set_seed
+from shared.utils import set_seed, assert_data_is_valid
 
 
 def train_self_supervised(
@@ -66,7 +66,7 @@ def train_self_supervised(
 ) -> tuple[float, float]:
     set_seed(seed)
 
-    utils_cmapss.assert_data_is_valid(
+    assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,
         dataset_root=dataset_root,
@@ -167,7 +167,7 @@ def train_self_supervised(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         return_id=return_id,
-        validation_rate=validation_rate,
+        val_rate=validation_rate,
         use_only_final_on_test=use_only_final_on_test,
         use_max_rul_on_test=use_max_rul_on_test,
         use_max_rul_on_valid=use_max_rul_on_valid,

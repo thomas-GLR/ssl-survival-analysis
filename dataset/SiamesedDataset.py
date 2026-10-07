@@ -394,7 +394,7 @@ class SiameseDataset:
             include_cols=feature_select,
             exclude_cols=exclude_cols,
             return_id=False,
-            validation_rate=validation_rate,
+            val_rate=validation_rate,
             use_only_final_on_test=use_only_final_on_test,
             use_max_rul_on_test=use_max_rul_on_test,
             use_max_rul_on_valid=use_max_rul_on_valid,

@@ -1,19 +1,20 @@
 # =======================================================
 # DATASET
 # =======================================================
+from constants.necessary_shared_keys import SEED, VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE
 
 NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
-    "sequence_len",
-    "seed",
+    SEQUENCE_LEN,
+    SEED,
     "data_fraction",
-    "val_rate",
+    VALIDATION_RATE,
     "test_rate",
     "stratify",
     "norm_type",
     "num_workers",
     "pin_memory",
     "return_sequence_label",
-    "batch_size",
+    BATCH_SIZE,
     "shuffle_loader",
     "counter_mode",
     "include_histograms",
@@ -23,9 +24,9 @@ NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
 NECESSARY_DATASET_SELF_SUPERVISED_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
 
 NECESSARY_DATASET_RSF_KEYS = [
-    "seed",
+    SEED,
     "data_fraction",
-    "val_rate",
+    VALIDATION_RATE,
     "test_rate",
     "stratify",
     "norm_type",
@@ -54,9 +55,9 @@ NECESSARY_DATASET_TRANSFORMER_TIME_SEQUENCE_KEYS = NECESSARY_DATASET_TRANSFORMER
 # DeepHit gets its own dataset cache (a different sequence_len) and cannot usefully share
 # --force-load-from-cache with the windowed models.
 NECESSARY_DATASET_DYNAMIC_DEEPHIT_KEYS = [
-    "seed",
+    SEED,
     "data_fraction",
-    "val_rate",
+    VALIDATION_RATE,
     "test_rate",
     "stratify",
     "norm_type",
@@ -87,7 +88,7 @@ NECESSARY_LSTM_KEYS = [
 ]
 
 NECESSARY_SELF_SUPERVISED_KEYS = [
-    "sequence_len",
+    SEQUENCE_LEN,
     "pretraining_lr",
     "dropout",
     "num_layers",

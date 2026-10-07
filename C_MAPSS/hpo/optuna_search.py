@@ -198,7 +198,7 @@ def _build_datasets_cached(subset: str, sequence_len: int, data_dir: str):
         include_cols=[],
         exclude_cols=[],
         return_id=False,
-        validation_rate=0.2,
+        val_rate=0.2,
         use_only_final_on_test=True,
         use_max_rul_on_test=True,
         use_max_rul_on_valid=True,

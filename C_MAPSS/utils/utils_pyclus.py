@@ -9,7 +9,7 @@ from sklearn.model_selection import ParameterGrid, StratifiedKFold
 from dataset.PyclusDataset import PyclusDataset
 from models import SslPCT
 from C_MAPSS.utils import utils_cmapss
-from shared.utils import set_seed
+from shared.utils import set_seed, assert_data_is_valid, create_and_get_checkpoints_results_path
 
 
 def train_model(
@@ -43,7 +43,7 @@ def train_model(
 ) -> tuple[float| None, float| None]:
     set_seed(seed)
 
-    utils_cmapss.assert_data_is_valid(
+    assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,
         dataset_root=dataset_root,
@@ -134,7 +134,7 @@ def train_model(
     print(f"Score: {score}")
 
     # 1. Save Best Model Checkpoint
-    final_checkpoints_path, final_results_path = utils_cmapss.create_and_get_checkpoints_results_path(
+    final_checkpoints_path, final_results_path = create_and_get_checkpoints_results_path(
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
         model_version=model_version,

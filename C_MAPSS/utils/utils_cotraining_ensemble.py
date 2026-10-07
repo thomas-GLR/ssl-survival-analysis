@@ -19,7 +19,7 @@ from models.CoTrainingEnsemble import CoTrainingEnsemble, SelectionMode
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2 as CoTrainingEnsembleV2
 from models.TransformerFeatures import TransformerFeatures
 from models.TransformerTimeSequence import TransformerTimeSequence
-from shared.utils import set_seed
+from shared.utils import set_seed, assert_data_is_valid, create_and_get_checkpoints_results_path
 
 
 def train_model(
@@ -99,14 +99,14 @@ def train_model(
             f"max_epochs {len(max_epochs)} must be lists of length 4, one for each model in the ensemble."
         )
 
-    utils_cmapss.assert_data_is_valid(
+    assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,
         dataset_root=dataset_root,
         sub_dataset=sub_dataset,
     )
 
-    checkpoints_path, results_path = utils_cmapss.create_and_get_checkpoints_results_path(
+    checkpoints_path, results_path = create_and_get_checkpoints_results_path(
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
         model_version=model_version,
@@ -154,7 +154,7 @@ def train_model(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         return_id=return_id,
-        validation_rate=validation_rate,
+        val_rate=validation_rate,
         use_only_final_on_test=use_only_final_on_test,
         use_max_rul_on_test=use_max_rul_on_test,
         use_max_rul_on_valid=use_max_rul_on_valid,
@@ -469,14 +469,14 @@ def train_model_v2(
             f"max_epochs {len(max_epochs)} must be lists of length 4, one for each model in the ensemble."
         )
 
-    utils_cmapss.assert_data_is_valid(
+    assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,
         dataset_root=dataset_root,
         sub_dataset=sub_dataset,
     )
 
-    checkpoints_path, results_path = utils_cmapss.create_and_get_checkpoints_results_path(
+    checkpoints_path, results_path = create_and_get_checkpoints_results_path(
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
         model_version=model_version,
@@ -501,7 +501,7 @@ def train_model_v2(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         return_id=return_id,
-        validation_rate=validation_rate,
+        val_rate=validation_rate,
         use_only_final_on_test=use_only_final_on_test,
         use_max_rul_on_test=use_max_rul_on_test,
         use_max_rul_on_valid=use_max_rul_on_valid,

@@ -12,12 +12,15 @@ from scania.challenge import run_challenge_evaluation
 from scania.dataset import ScaniaDataModule
 from scania.lightning_module.BasicLightningModule import BasicLightningModule
 from scania.utils.utils_scania import (
+    generate_and_save_model_prediction,
+)
+from shared.utils import (
+    set_seed,
+    save_train_parameters,
     assert_data_is_valid,
     create_and_get_checkpoints_results_path,
-    save_train_parameters,
-    generate_and_save_model_prediction
 )
-from shared.utils import ModelVersion, set_seed
+from enums import ModelVersion
 
 
 def train_model(
@@ -48,13 +51,13 @@ def train_model(
         max_epochs: int,
         rul_target_standardization: bool,
         # Model params
-        transformer_encoder_head_num: int | None=None,
-        transformer_num_layer: int | None=None,
-        hidden_dim: int | None=None,
-        lstm_num_layers: int | None=None,
-        lstm_dropout: float | None=None,
-        fc_layer_dim: int | None=None,
-        fc_dropout: float | None=None,
+        transformer_encoder_head_num: int | None = None,
+        transformer_num_layer: int | None = None,
+        hidden_dim: int | None = None,
+        lstm_num_layers: int | None = None,
+        lstm_dropout: float | None = None,
+        fc_layer_dim: int | None = None,
+        fc_dropout: float | None = None,
         # Others
         force_load_from_cache: bool = False,
         datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -194,7 +197,7 @@ def train_model(
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
             model_kwargs = {
                 "sequence_len": sequence_len,
-                "d_model" : sequence_len,
+                "d_model": sequence_len,
                 "feature_num": feature_num,
                 "transformer_encoder_head_num": transformer_encoder_head_num,
                 "transformer_num_layer": transformer_num_layer,

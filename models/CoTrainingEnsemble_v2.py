@@ -17,6 +17,7 @@ from crepes.extras import DifficultyEstimator, MondrianCategorizer
 from lightning import LightningModule, Trainer
 from torch.utils.data import TensorDataset, DataLoader
 
+from enums import DatasetVersion
 from models.coprog_gpu_pool import TrainingSpec, run_training_job
 from models.cotraining_gpu_pool import (
     CoTrainingGpuPool,
@@ -47,6 +48,7 @@ class CoTrainingEnsemble_v2:
             models: list[nn.Module],
             weights: list[float] | None = None,
             verbose: int = 0,
+            dataset_version: DatasetVersion = DatasetVersion.SCANIA,
             confidence: float = 0.95,
             inference_batch_size: int | None = None,
             use_average_window_confidence: bool = False,
@@ -283,6 +285,7 @@ class CoTrainingEnsemble_v2:
         self.models = models
         self.number_of_models = len(self.models)
         self.lightning_modules = None
+        self.dataset_version = dataset_version
         # Per-model final (accumulated) training data, set at the end of train()/_train_parallel
         # (mirrors self.lightning_modules); used by calculate_weights when
         # computing_weight_mode == "confidence" to fit each model's DifficultyEstimator.
@@ -497,7 +500,7 @@ class CoTrainingEnsemble_v2:
             suspension_time_steps: torch.Tensor | None = None,
             test_data: torch.Tensor | None = None,
             test_label: torch.Tensor | None = None,
-            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
+            score_callback: Callable[[DatasetVersion, torch.Tensor, torch.Tensor], float] | None = None,
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None = None,
             weight_mode: str = "min",
             metrics_file: str | None = None,
@@ -1712,7 +1715,7 @@ class CoTrainingEnsemble_v2:
             metrics_enabled: bool,
             test_data: torch.Tensor | None,
             test_label: torch.Tensor | None,
-            score_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
+            score_callback: Callable[[DatasetVersion, torch.Tensor, torch.Tensor], float] | None,
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float] | None,
             weight_mode: str,
             metrics_file: str | None,
@@ -1971,7 +1974,7 @@ class CoTrainingEnsemble_v2:
             test_label: torch.Tensor,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
-            score_callback: Callable[[torch.Tensor, torch.Tensor], float],
+            score_callback: Callable[[DatasetVersion, torch.Tensor, torch.Tensor], float],
             weight_callback: Callable[[torch.Tensor, torch.Tensor], float],
             weight_mode: str,
             metrics_file: str,
@@ -2051,12 +2054,12 @@ class CoTrainingEnsemble_v2:
             val_pred_j = self._predict(model, val_data).view(-1).to(val_label_flat.device)
             val_preds.append(val_pred_j)
             val_rmses.append((((val_label_flat - val_pred_j) ** 2).mean().item()) ** 0.5)
-            val_scores.append(score_callback(val_pred_j, val_label_flat))
+            val_scores.append(score_callback(self.dataset_version, val_pred_j, val_label_flat))
 
             pred_j = self._predict(model, test_data).view(-1).to(test_label_flat.device)
             test_preds.append(pred_j)
             test_rmses.append((((test_label_flat - pred_j) ** 2).mean().item()) ** 0.5)
-            test_scores.append(score_callback(pred_j, test_label_flat))
+            test_scores.append(score_callback(self.dataset_version, pred_j, test_label_flat))
 
         n = len(h)
         avg_val_rmse = sum(val_rmses) / n
@@ -2075,13 +2078,13 @@ class CoTrainingEnsemble_v2:
             [w * pred for w, pred in zip(weights, test_preds)], dim=0
         ).sum(dim=0).view(-1)
         weighted_test_rmse = (((test_label_flat - weighted_pred) ** 2).mean().item()) ** 0.5
-        weighted_test_score = score_callback(weighted_pred, test_label_flat)
+        weighted_test_score = score_callback(self.dataset_version, weighted_pred, test_label_flat)
 
         weighted_val_pred = torch.stack(
             [w * pred for w, pred in zip(weights, val_preds)], dim=0
         ).sum(dim=0).view(-1)
         weighted_val_rmse = (((val_label_flat - weighted_val_pred) ** 2).mean().item()) ** 0.5
-        weighted_val_score = score_callback(weighted_val_pred, val_label_flat)
+        weighted_val_score = score_callback(self.dataset_version, weighted_val_pred, val_label_flat)
 
         # Durations (seconds). A missing list means "this stage did nothing of that kind"; the
         # totals default to the sum of what was actually measured (None when nothing was), and

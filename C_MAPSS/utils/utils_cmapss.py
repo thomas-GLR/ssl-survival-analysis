@@ -1,18 +1,19 @@
-import os
 from typing import Callable
 
 import numpy as np
 
-from C_MAPSS.utils import (utils_transformer_lstm,
-                           utils_pyclus,
-                           utils_coprog,
-                           utils_random_survival_forest,
-                           utils_self_supervised,
-                           utils_cotraining_ensemble)
-from shared.utils import ModelVersion
-from shared.utils import necessary_keys as shared_necessary_keys
-from shared.utils.config import extract_data_from_config, assert_params_contains_all_key
+from C_MAPSS.utils import (
+    utils_transformer_lstm,
+    utils_pyclus,
+    utils_random_survival_forest,
+    utils_self_supervised,
+    utils_cotraining_ensemble
+)
 from constants import necessary_keys_cmapss
+from shared.enums import ModelVersion
+from shared.utils import utils_coprog
+from shared.utils import necessary_keys as shared_necessary_keys
+from shared.utils.config import extract_data_from_config
 
 
 def extract_benchmark_information_from_config(config_benchmark_file_path: str) -> tuple[
@@ -30,34 +31,6 @@ def extract_benchmark_information_from_config(config_benchmark_file_path: str) -
     cmapss_files: list[str] = config["cmapss_files"]
 
     return broken_percentage, censored_percentage, cmapss_files
-
-
-def extract_dataset_params_from_config(config_path: str, sub_dataset: str, necessary_keys: list[str]) -> dict:
-    params_key = "dataset_params"
-
-    return _extract_params_from_config(params_key, config_path, sub_dataset, necessary_keys)
-
-
-def extract_model_params_from_config(config_path: str, sub_dataset: str, necessary_keys: list[str]) -> dict:
-    params_key = "model_params"
-
-    return _extract_params_from_config(params_key, config_path, sub_dataset, necessary_keys)
-
-
-def _extract_params_from_config(params_key: str, config_path: str, sub_dataset: str, necessary_keys: list[str]) -> dict:
-    config = extract_data_from_config(config_path)
-
-    if sub_dataset not in config:
-        raise KeyError(f"{sub_dataset} not found in config {config_path}")
-
-    if params_key not in config[sub_dataset]:
-        raise KeyError(f"{params_key} not found in config {config_path} for sub dataset {sub_dataset}")
-
-    model_params = config[sub_dataset][params_key]
-
-    assert_params_contains_all_key(model_params, necessary_keys, params_key)
-
-    return model_params
 
 
 def get_train_model_method(model_version: ModelVersion) -> Callable:
@@ -94,49 +67,5 @@ def get_necessary_model_keys(model_version: ModelVersion) -> list[str]:
     return shared_necessary_keys.get_necessary_model_keys(model_version, necessary_keys_cmapss)
 
 
-def assert_data_is_valid(
-        checkpoints_path: str,
-        results_path: str,
-        dataset_root: str,
-        sub_dataset: str,
-):
-    assert os.path.exists(checkpoints_path), f"{checkpoints_path} does not exist"
-    assert os.path.exists(results_path), f"{results_path} does not exist"
-    assert os.path.exists(dataset_root), f"{dataset_root} does not exist"
-
-    assert sub_dataset in ['FD001', 'FD002', 'FD003',
-                           'FD004'], f"Sub dataset must be one of ['FD001', 'FD002', 'FD003', 'FD004'] and not {sub_dataset}"
-
-
-def create_and_get_checkpoints_results_path(
-        percent_of_censored_data: float,
-        percent_of_broken_data: float | None,
-        model_version: str,
-        sub_dataset: str,
-        datetime_for_folders: str,
-        checkpoints_path: str,
-        results_path: str,
-) -> tuple[str, str]:
-    broken_percentage = percent_of_broken_data if percent_of_broken_data is not None else 0.0
-
-    folder_for_current_training = (
-        f"model-{model_version}-turbofan-{sub_dataset}-{datetime_for_folders}/"
-        f"censored-{percent_of_censored_data:.2f}-broken-{broken_percentage:.2f}"
-    )
-
-    final_checkpoints_path = os.path.join(checkpoints_path, folder_for_current_training)
-    os.makedirs(final_checkpoints_path, exist_ok=True)
-
-    final_results_path = os.path.join(results_path, folder_for_current_training)
-    os.makedirs(final_results_path, exist_ok=True)
-
-    return final_checkpoints_path, final_results_path
-
-
-def cmapss_score(predict: np.ndarray, label: np.ndarray) -> float:
-    a1 = 13
-    a2 = 10
-    error = predict - label
-    pos_e = np.exp(-error[error < 0] / a1) - 1
-    neg_e = np.exp(error[error >= 0] / a2) - 1
-    return sum(pos_e) + sum(neg_e)
+def get_necessary_training_keys(model_version: ModelVersion) -> list[str]:
+    return shared_necessary_keys.get_necessary_training_keys(model_version, necessary_keys_cmapss)

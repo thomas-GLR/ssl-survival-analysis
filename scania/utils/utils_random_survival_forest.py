@@ -14,8 +14,12 @@ from dataset.ScikitDataset import ScikitDataset
 from scania.challenge import run_challenge_evaluation_rowwise
 from scania.dataset import ScaniaDataModule
 from scania.metrics import scania_score
-from scania.utils.utils_scania import assert_data_is_valid, create_and_get_checkpoints_results_path
-from shared.utils import ModelVersion, set_seed
+from shared.utils import (
+    set_seed,
+    assert_data_is_valid,
+    create_and_get_checkpoints_results_path
+)
+from enums import ModelVersion
 
 
 def train_model(

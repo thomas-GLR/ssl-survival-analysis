@@ -14,7 +14,7 @@ from models.Simple_LSTM import Simple_LSTM
 from models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
 from C_MAPSS.utils import utils_cmapss
 from models import CNN1D
-from shared.utils import set_seed
+from shared.utils import set_seed, assert_data_is_valid, create_and_get_checkpoints_results_path
 
 # For PyTorch 2.6+
 # We indicate to PyTorch that these classes are "safe" when loading checkpoints
@@ -61,7 +61,7 @@ def train_model(
 ) -> tuple[float, float]:
     set_seed(seed)
 
-    utils_cmapss.assert_data_is_valid(
+    assert_data_is_valid(
         checkpoints_path=checkpoints_path,
         results_path=results_path,
         dataset_root=dataset_root,
@@ -70,7 +70,7 @@ def train_model(
 
     device = device or 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    checkpoints_path, results_path = utils_cmapss.create_and_get_checkpoints_results_path(
+    checkpoints_path, results_path = create_and_get_checkpoints_results_path(
         percent_of_censored_data=percent_of_censored_data,
         percent_of_broken_data=percent_of_broken_data,
         model_version=model_version,
@@ -118,7 +118,7 @@ def train_model(
         include_cols=include_cols,
         exclude_cols=exclude_cols,
         return_id=return_id,
-        validation_rate=validation_rate,
+        val_rate=validation_rate,
         use_only_final_on_test=use_only_final_on_test,
         use_max_rul_on_test=use_max_rul_on_test,
         use_max_rul_on_valid=use_max_rul_on_valid,
