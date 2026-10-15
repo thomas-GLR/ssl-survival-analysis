@@ -18,7 +18,6 @@ from shared.utils.utils_common import (
     criteria_score_callback,
 )
 from shared.utils.utils_pretrained_models import get_or_train_initial_models
-from shared.utils.utils_coprog import train_model as train_model_coprog
 
 __all__ = [
     # Config
@@ -44,6 +43,4 @@ __all__ = [
     "criteria_score_callback",
     # Pretrained model
     "get_or_train_initial_models",
-    # Coprog
-    "train_model_coprog",
 ]

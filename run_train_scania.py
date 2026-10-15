@@ -29,11 +29,15 @@ from scania.utils import (
     train_model_lightning,
     train_model_random_survival,
     train_model_cotraining_ensemble,
-    train_model_cotraining_ensemble_v2,
     train_model_dynamic_deephit,
 )
 
-from shared.utils import train_model_coprog
+from shared.co_training import (
+    train_model_coprog,
+    train_model_conformal_cotraining_ensemble,
+)
+
+from constants import necessary_shared_keys as shared_keys
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +89,6 @@ def reproduce_result(
         necessary_keys=necessary_model_keys,
     )
 
-    model_params["pretrained_model_dir"] = pretrained_model_dir
-
     training_params = extract_training_params_from_config(
         config_model_file_path,
         necessary_keys=necessary_training_keys,
@@ -132,8 +134,9 @@ def reproduce_result(
             datetime_for_folders=benchmark_datetime,
             dataset_version=DatasetVersion.SCANIA,
             dataset_params=dataset_params,
-            **training_params,
-            **model_params,
+            training_params=training_params,
+            models_params=model_params,
+            pretrained_model_dir=pretrained_model_dir,
             **extra_params,
         )
     except Exception as e:
@@ -170,7 +173,7 @@ def _get_train_model_method(model_version: ModelVersion) -> Callable:
         case ModelVersion.CO_TRAINING_ENSEMBLE:
             return train_model_cotraining_ensemble
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
-            return train_model_cotraining_ensemble_v2
+            return train_model_conformal_cotraining_ensemble
         case ModelVersion.CNN:
             return train_model_lightning
         case ModelVersion.TRANSFORMER_FEATURES:

@@ -10,8 +10,6 @@ import numpy as np
 import sklearn
 import torch
 import torch.nn as nn
-from enum import Enum
-
 from crepes import WrapRegressor
 from crepes.extras import DifficultyEstimator, MondrianCategorizer
 from lightning import LightningModule, Trainer
@@ -25,7 +23,6 @@ from models.cotraining_gpu_pool import (
     FineTuneSpec,
     _TorchRegressorAdapter,
     _monotone_project,
-    run_conformal_score_job,
     run_finetune_job,
 )
 
@@ -485,13 +482,13 @@ class CoTrainingEnsemble_v2:
     def train(
             self,
             train_with_censored_data: bool,
+            iterations: int,
+            suspension_pool_size: float,
+            add_ratio: float,
             failure_data: torch.Tensor,
             failure_label: torch.Tensor,
             suspension_data: torch.Tensor,
             suspension_ids: torch.Tensor,
-            iterations: int,
-            suspension_pool_size: float,
-            add_ratio: float,
             val_data: torch.Tensor,
             val_label: torch.Tensor,
             calib_data: torch.Tensor | None = None,

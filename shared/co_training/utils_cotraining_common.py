@@ -33,6 +33,7 @@ from lightning import LightningModule
 from torch import nn
 
 from constants import necessary_keys_scania
+from enums import DatasetVersion
 from scania.challenge import run_challenge_evaluation
 from scania.dataset import ScaniaDataModule
 from scania.lightning_module import BasicLightningModule
@@ -506,6 +507,7 @@ def load_ensemble_for_inference(
 def save_ensemble_outputs(
         ensemble,
         model_version: ModelVersion,
+        dataset_version: DatasetVersion,
         checkpoints_path: str,
         results_path: str,
         test_features: torch.Tensor,
@@ -615,7 +617,7 @@ def save_ensemble_outputs(
 
     scores = pd.DataFrame(columns=columns)
     scores.loc[0] = row
-    scores.to_csv(f"{results_path}/{model_version.value}-scania.csv", index=False)
+    scores.to_csv(f"{results_path}/{model_version.value}-{dataset_version.value}.csv", index=False)
 
     # Additionally score every predictor on the official Scania Component X held-out sets (test
     # and validation). One forward pass over the challenge windows serves all n + 1 predictors.

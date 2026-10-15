@@ -23,12 +23,13 @@ class CMAPSSLoader:
             exclude_cols=None,
             return_id=False,
             val_rate=0.2,
+            calib_rate: float = 0.0,
             use_only_final_on_test=True,
             use_max_rul_on_test=False,
             use_max_rul_on_valid=True,
             percent_of_censored_data: float = 0.0,
             percent_of_broken_data: float | None = None,
-    ) -> tuple[CMAPSSDataset, CMAPSSDataset, CMAPSSDataset]:
+    ) -> tuple[CMAPSSDataset, CMAPSSDataset, CMAPSSDataset | None, CMAPSSDataset | None]:
         """
             Get train, valid, test dataset from dataset file.
             The parameter with the same name as in __init__ has the same effect, they are:
@@ -90,22 +91,31 @@ class CMAPSSLoader:
             rul_df = pd.read_csv(os.path.join(dataset_root, 'RUL_{:s}.txt'.format(sub_dataset)), header=None)
             rul = rul_df.values.squeeze()
 
-        # split valid set
-        # train_df[0] is unit id column
-        valid_df = None
         valid_dataset = None
-        assert 0 <= val_rate <= 0.99
-        if val_rate:
-            ids = train_df[0].unique()
-            max_id = np.max(ids)
-            valid_len = int(val_rate * max_id)
-            if valid_len:
-                # random chose valid engine id
-                valid_ids = np.random.choice(np.arange(1, max_id + 1), valid_len, replace=False)
+        calib_dataset = None
 
-                isin_df = np.isin(train_df[0].to_numpy(), valid_ids)
-                valid_df = train_df.iloc[np.where(isin_df == True)]
-                train_df = train_df.iloc[np.where(isin_df == False)]
+        assert (
+            0 <= val_rate < 1 and 0 <= calib_rate < 1
+            and (val_rate + calib_rate) < 1
+        ), "val_rate/calib_rate must be in [0, 1) and sum to < 1"
+
+        rng = np.random.default_rng(seed)
+
+        ids = rng.permutation(train_df[0].unique())
+
+        id_number = len(ids)
+        id_number_val = int(val_rate * id_number)
+        id_number_calib = int(calib_rate * id_number)
+
+        val_ids = set(ids[:id_number_val].tolist())
+        calib_ids = set(ids[id_number_val:id_number_val + id_number_calib].tolist())
+
+        is_val = train_df[0].isin(val_ids)
+        is_calib = train_df[0].isin(calib_ids)
+
+        valid_df = train_df[is_val]
+        calib_df = train_df[is_calib] if calib_rate > 0.0 else None
+        train_df = train_df[~(is_val | is_calib)]
 
         if sub_dataset in ['FD001', 'FD003']:
             norm_by_operations = False
@@ -166,4 +176,20 @@ class CMAPSSLoader:
                 **train_val_dataset_kwargs
             )
 
-        return train_dataset, test_dataset, valid_dataset
+        if calib_df is not None:
+            if 'final_rul' in train_val_dataset_kwargs:
+                train_val_dataset_kwargs.pop('final_rul')
+            if not use_max_rul_on_valid and 'max_rul' in train_val_dataset_kwargs:
+                train_val_dataset_kwargs.pop('max_rul')
+            if use_max_rul_on_valid and max_rul is not None:
+                train_val_dataset_kwargs['max_rul'] = max_rul
+            if 'only_final' in train_val_dataset_kwargs:
+                train_val_dataset_kwargs.pop('only_final')
+            calib_dataset = CMAPSSDataset(
+                calib_df,
+                kmeans_model=train_dataset.kmeans_model,
+                norm_params=train_dataset.norm_params,
+                **train_val_dataset_kwargs
+            )
+
+        return train_dataset, test_dataset, valid_dataset, calib_dataset

@@ -12,8 +12,15 @@ from __future__ import annotations
 
 import os
 import traceback
+from typing import Callable
 
+from shared.co_training import train_model_coprog
 from shared.enums import DatasetVersion
+from C_MAPSS.utils import utils_transformer_lstm, utils_self_supervised, utils_random_survival_forest, utils_pyclus, \
+    utils_cotraining_ensemble
+from shared.co_training import train_model_conformal_cotraining_ensemble
+
+from constants import necessary_shared_keys as shared_keys
 
 # Cap CPU/BLAS thread pools *before* numpy/torch/sklearn initialize their
 # native backends. GPU pods (e.g. RunPod) often expose many vCPUs; left
@@ -55,7 +62,6 @@ from C_MAPSS.utils import (
     get_necessary_dataset_keys,
     get_necessary_model_keys,
     get_necessary_training_keys,
-    get_train_model_method,
     extract_benchmark_information_from_config,
 )
 
@@ -209,10 +215,10 @@ def reproduce_result(
                         percent_of_censored_data=censored_percentage,
                         dataset_params=dataset_params,
                         dataset_version=DatasetVersion.CMAPSS,
-                        rul_target_standardization=[False, False], # CMAPSS didn't deal with rul_target_standardization
-                        **training_params,
-                        **model_params,
+                        training_params=training_params,
+                        models_params=model_params,
                         datetime_for_folders=benchmark_datetime,
+                        force_load_from_cache=False, # No cache for CMAPSS
                         **extra_params,
                     )
                 except Exception as e:
@@ -270,6 +276,32 @@ def reproduce_result(
 
     df_results.to_csv(f"{results_path}/{model_version.value}_benchmark_{benchmark_version}_{benchmark_datetime}_results_turbofan.csv",
                       index=False)
+
+
+def get_train_model_method(model_version: ModelVersion) -> Callable:
+    match model_version:
+        case ModelVersion.TRANSFORMER_LSTM:
+            return utils_transformer_lstm.train_model
+        case ModelVersion.LSTM:
+            return utils_transformer_lstm.train_model
+        case ModelVersion.AUTOENCODER:
+            return utils_self_supervised.train_self_supervised
+        case ModelVersion.METRIC:
+            return utils_self_supervised.train_self_supervised
+        case ModelVersion.RSF:
+            return utils_random_survival_forest.train_model
+        case ModelVersion.PYCLUS:
+            return utils_pyclus.train_model
+        case ModelVersion.COPROG:
+            return train_model_coprog
+        case ModelVersion.CNN:
+            return utils_transformer_lstm.train_model
+        case ModelVersion.CO_TRAINING_ENSEMBLE:
+            return utils_cotraining_ensemble.train_model
+        case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
+            return train_model_conformal_cotraining_ensemble
+        case _:
+            raise ValueError(f"Model version {model_version.value} not supported")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -43,7 +43,8 @@ from tqdm import tqdm
 from constants import necessary_keys_scania
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
 from scania.dataset import ScaniaDataModule
-from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
+# TODO change hpo cotraining place
+# from co_training.utils_cotraining_common import parse_models_config, save_ensemble_outputs
 from scania.utils.utils_scania import (
     override_dataset_params_from_cache_manifest,
 )
@@ -242,12 +243,17 @@ def run_hyper_parameter_optimization(
             "The co-training ensemble needs a validation set for early stopping / best-model "
             "selection, conformal calibration and the ensemble weights. Set val_rate > 0.")
 
-    nn_modules, module_builders, meta = parse_models_config(
-        models_cfg=models_cfg,
-        feature_num=len(data_module.feature_cols),
-        sequence_len=dataset_params["sequence_len"],
-        targets_uncensored=data["train_targets"],
-    )
+    # TODO change hpo cotraining place
+    nn_modules = []
+    module_builders = []
+    meta = {}
+
+    # nn_modules, module_builders, meta = parse_models_config(
+    #     models_cfg=models_cfg,
+    #     feature_num=len(data_module.feature_cols),
+    #     sequence_len=dataset_params["sequence_len"],
+    #     targets_uncensored=data["train_targets"],
+    # )
     number_of_models = len(nn_modules)
     batch_size = dataset_params["batch_size"]
 
@@ -916,21 +922,22 @@ def _run_one_configuration(
             calib_label=data["calib_targets"],
         )
 
-        save_ensemble_outputs(
-            ensemble=ensemble,
-            model_version=MODEL_VERSION,
-            checkpoints_path=checkpoints_path,
-            results_path=results_path,
-            test_features=data["test_features"],
-            test_targets=data["test_targets"],
-            version_strs=meta["version_strs"],
-            model_specs=meta["model_specs"],
-            # Initial training is not part of this: every configuration reuses the shared
-            # pretrained models, so the duration covers the co-training iterations only.
-            training_time_seconds=ensemble.training_duration_seconds,
-            avg_iteration_time_seconds=ensemble.average_iteration_duration_seconds,
-            data_module=data_module,
-        )
+        # TODO change hpo cotraining place
+        # save_ensemble_outputs(
+        #     ensemble=ensemble,
+        #     model_version=MODEL_VERSION,
+        #     checkpoints_path=checkpoints_path,
+        #     results_path=results_path,
+        #     test_features=data["test_features"],
+        #     test_targets=data["test_targets"],
+        #     version_strs=meta["version_strs"],
+        #     model_specs=meta["model_specs"],
+        #     # Initial training is not part of this: every configuration reuses the shared
+        #     # pretrained models, so the duration covers the co-training iterations only.
+        #     training_time_seconds=ensemble.training_duration_seconds,
+        #     avg_iteration_time_seconds=ensemble.average_iteration_duration_seconds,
+        #     data_module=data_module,
+        # )
 
 
 # ---------------------------------------------------------------------- #

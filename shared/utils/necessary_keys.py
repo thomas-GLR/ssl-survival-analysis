@@ -1,5 +1,6 @@
 from types import ModuleType
 
+from constants import necessary_shared_keys
 from shared.enums import ModelVersion
 
 
@@ -56,7 +57,7 @@ def get_necessary_model_keys(model_version: ModelVersion, necessary_keys_module:
         case ModelVersion.CO_TRAINING_ENSEMBLE:
             return necessary_keys_module.NECESSARY_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
-            return necessary_keys_module.NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS
+            return necessary_shared_keys.NECESSARY_CONFORMAL_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.TRANSFORMER_FEATURES:
             return necessary_keys_module.NECESSARY_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
@@ -88,7 +89,7 @@ def get_necessary_training_keys(model_version: ModelVersion, necessary_keys_modu
         case ModelVersion.CO_TRAINING_ENSEMBLE:
             return necessary_keys_module.NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
-            return necessary_keys_module.NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS
+            return necessary_shared_keys.NECESSARY_TRAINING_CONFORMAL_CO_TRAINING_ENSEMBLE_KEYS
         case ModelVersion.TRANSFORMER_FEATURES:
             return necessary_keys_module.NECESSARY_TRAINING_TRANSFORMER_FEATURES_KEYS
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:

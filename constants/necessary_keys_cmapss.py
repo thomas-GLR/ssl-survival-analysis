@@ -1,7 +1,8 @@
 # =======================================================
 # DATASET
 # =======================================================
-from constants.necessary_shared_keys import SEED, VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE
+from constants.necessary_shared_keys import SEED, VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE, LEARNING_RATE, PATIENCES, \
+    MAX_EPOCHS, COPROG_ITERATIONS, COPROG_SUSPENSION_POOL_SIZE, CALIB_RATE
 
 NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
     SEED,
@@ -52,10 +53,28 @@ NECESSARY_DATASET_COPROG_KEYS = [
     "use_max_rul_on_valid",
 ]
 
+NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V2_KEYS = [
+    SEQUENCE_LEN,
+    BATCH_SIZE,
+    SEED,
+    "max_rul",
+    "return_sequence_label",
+    "norm_type",
+    "cluster_operations",
+    "norm_by_operations",
+    "include_cols",
+    "exclude_cols",
+    "return_id",
+    VALIDATION_RATE,
+    CALIB_RATE,
+    "use_only_final_on_test",
+    "use_max_rul_on_test",
+    "use_max_rul_on_valid",
+]
+
 NECESSARY_DATASET_PYCLUS_KEYS = NECESSARY_DATASET_RSF_KEYS
 
 NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS = NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
-NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_V2_KEYS = NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS
 
 # =======================================================
 # MODEL
@@ -194,13 +213,11 @@ NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
 ]
 
 NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
-    SEQUENCE_LEN,
     "coprog_iterations",
     "coprog_suspension_pool_size",
     "coprog_add_ratio",
     "max_epochs",
     "patiences",
-    "batchs_size",
     "lr",
     "confidence",
     "shuffle_dataloaders",
@@ -224,9 +241,9 @@ NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
 # =======================================================
 
 NECESSARY_TRAINING_COPROG_KEYS = [
-    "lr",
-    "patiences",
-    "max_epochs",
-    "coprog_iterations",
-    "coprog_suspension_pool_size",
+    LEARNING_RATE,
+    PATIENCES,
+    MAX_EPOCHS,
+    COPROG_ITERATIONS,
+    COPROG_SUSPENSION_POOL_SIZE,
 ]

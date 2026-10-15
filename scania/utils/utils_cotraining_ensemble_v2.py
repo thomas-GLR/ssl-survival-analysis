@@ -15,7 +15,7 @@ from datetime import datetime
 
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
 from scania.dataset import ScaniaDataModule
-from scania.utils.utils_cotraining_common import parse_models_config, save_ensemble_outputs
+# from co_training.utils_cotraining_common import parse_models_config, save_ensemble_outputs
 from shared.utils import (
     set_seed,
     save_train_parameters,
@@ -283,12 +283,16 @@ def train_model(
     if scania_data_module.calib_rate > 0:
         calib_features, calib_targets, _, _ = scania_data_module.get_cotraining_tensors("calib")
 
-    nn_modules, module_builders, meta = parse_models_config(
-        models_cfg=models,
-        feature_num=feature_num,
-        sequence_len=sequence_len,
-        targets_uncensored=targets_uncensored,
-    )
+    nn_modules = []
+    module_builders = []
+    meta = {}
+
+    # nn_modules, module_builders, meta = parse_models_config(
+    #     models_cfg=models,
+    #     feature_num=feature_num,
+    #     sequence_len=sequence_len,
+    #     targets_uncensored=targets_uncensored,
+    # )
     number_of_models = len(nn_modules)
 
     training_kwargs = {
@@ -449,16 +453,16 @@ def train_model(
         calib_label=calib_targets,
     )
 
-    return save_ensemble_outputs(
-        ensemble=ensemble,
-        model_version=model_version,
-        checkpoints_path=checkpoints_path,
-        results_path=results_path,
-        test_features=test_features,
-        test_targets=test_targets,
-        version_strs=meta["version_strs"],
-        model_specs=meta["model_specs"],
-        training_time_seconds=ensemble.training_duration_seconds,
-        avg_iteration_time_seconds=ensemble.average_iteration_duration_seconds,
-        data_module=scania_data_module,
-    )
+    # return save_ensemble_outputs(
+    #     ensemble=ensemble,
+    #     model_version=model_version,
+    #     checkpoints_path=checkpoints_path,
+    #     results_path=results_path,
+    #     test_features=test_features,
+    #     test_targets=test_targets,
+    #     version_strs=meta["version_strs"],
+    #     model_specs=meta["model_specs"],
+    #     training_time_seconds=ensemble.training_duration_seconds,
+    #     avg_iteration_time_seconds=ensemble.average_iteration_duration_seconds,
+    #     data_module=scania_data_module,
+    # )
