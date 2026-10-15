@@ -1,6 +1,5 @@
 import functools
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -9,6 +8,7 @@ import torch
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
 from challenge import run_challenge_evaluation
+from co_training.CoTrainingData import CoTrainingData
 from constants import necessary_keys_cmapss
 from constants import necessary_keys_scania
 from constants.necessary_shared_keys import VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE, SEED
@@ -22,32 +22,15 @@ from shared.utils import (
     creating_model,
     build_scania_module,
     criteria_rmse_callback,
-    criteria_score_callback
-)
-from shared.utils import (
+    criteria_score_callback,
     save_train_parameters,
     get_or_train_initial_models,
-    generate_and_save_model_prediction
-)
-from shared.utils import (
+    generate_and_save_model_prediction,
     set_seed,
     assert_data_is_valid,
-    create_and_get_checkpoints_results_path
+    create_and_get_checkpoints_results_path,
 )
-
-
-@dataclass
-class CoprogDataset:
-    feature_num: int
-    features_uncensored: torch.Tensor
-    targets_uncensored: torch.Tensor
-    features_censored: torch.Tensor
-    ids_censored: torch.Tensor
-    features_test: torch.Tensor
-    targets_test: torch.Tensor
-    val_features: torch.Tensor
-    val_targets: torch.Tensor
-    scania_data_module: ScaniaDataModule | None
+from constants import necessary_shared_keys as shared_keys
 
 
 def train_model(
@@ -59,15 +42,9 @@ def train_model(
         dataset_params: dict[str, Any],
         dataset_root: str,
         # Model params
-        first_model: dict,
-        second_model: dict,
+        models_params: list[dict],
         # Training params
-        lr: list[float],
-        patiences: list[int],
-        max_epochs: list[int],
-        coprog_iterations: int,
-        coprog_suspension_pool_size: int,
-        rul_target_standardization: list[bool],  # scania specific
+        training_params: dict[str, Any],
         # Others
         force_load_from_cache: bool = False,  # scania specific
         gpu_ids: list[int] | None = None,
@@ -80,6 +57,19 @@ def train_model(
     seed = dataset_params[SEED]
 
     set_seed(seed)
+
+    first_model = models_params[shared_keys.COPROG_FIRST_MODEL]
+    second_model = models_params[shared_keys.COPROG_SECOND_MODEL]
+
+    lr = training_params[shared_keys.LEARNING_RATE]
+    patiences = training_params[shared_keys.PATIENCES]
+    max_epochs = training_params[shared_keys.MAX_EPOCHS]
+    coprog_iterations = training_params[shared_keys.COPROG_ITERATIONS]
+    coprog_suspension_pool_size = training_params[shared_keys.COPROG_SUSPENSION_POOL_SIZE]
+
+    rul_target_standardization = [False, False]
+    if "rul_target_standardization" in training_params:
+        rul_target_standardization = training_params["rul_target_standardization"]
 
     sequence_len = dataset_params[SEQUENCE_LEN]
     batch_size = dataset_params[BATCH_SIZE]
@@ -125,11 +115,14 @@ def train_model(
     print("Loading datasets with the following parameters :")
     print(dataset_params)
 
-    coprog_dataset: CoprogDataset = _get_coprog_dataset_for_training(
+    coprog_dataset: CoTrainingData = _get_coprog_dataset_for_training(
         dataset_version=dataset_version,
         dataset_params=dataset_params,
         dataset_root=dataset_root,
         sub_dataset=sub_dataset,
+        force_load_from_cache=force_load_from_cache,
+        percent_of_censored_data=percent_of_censored_data,
+        percent_of_broken_data=percent_of_broken_data,
     )
 
     first_model_params, first_model_version = _extract_model_coprog_params(dataset_version, first_model)
@@ -281,8 +274,8 @@ def train_model(
         # the class-based cost; the reported weights use
         # RMSE + "min", matching calculate_weights
         # below. Runs in the main process, so it is safe for the parallel training path too.
-        test_data=coprog_dataset.features_test,
-        test_label=coprog_dataset.targets_test,
+        test_data=coprog_dataset.test_features,
+        test_label=coprog_dataset.test_targets,
         score_callback=criteria_score_callback,
         weight_callback=criteria_rmse_callback,
         weight_mode="min",
@@ -307,8 +300,8 @@ def train_model(
     torch.save(coprog._h2, f"{final_checkpoints_path}/coprog_{second_model_version.value}.pth")
 
     # Flatten both sides so we compute a real element-wise RMSE.
-    y_hat = coprog.predict(coprog_dataset.features_test).detach().cpu().view(-1)
-    targets_flat = coprog_dataset.targets_test.detach().cpu().view(-1)
+    y_hat = coprog.predict(coprog_dataset.test_features).detach().cpu().view(-1)
+    targets_flat = coprog_dataset.test_targets.detach().cpu().view(-1)
 
     rmse_weighted, score_weighted = generate_and_save_model_prediction(
         predictions=y_hat,
@@ -324,7 +317,7 @@ def train_model(
     print(f"Test RMSE: {rmse_weighted}")
     print(f"Score: {score_weighted}")
 
-    predictions_first_model = coprog.prediction_for_first_model(coprog_dataset.features_test)
+    predictions_first_model = coprog.prediction_for_first_model(coprog_dataset.test_features)
     rmse_h1, score_h1 = generate_and_save_model_prediction(
         predictions=predictions_first_model,
         targets=targets_flat,
@@ -336,7 +329,7 @@ def train_model(
         score_callback=criteria_score_callback,
     )
 
-    predictions_second_model = coprog.prediction_for_second_model(coprog_dataset.features_test)
+    predictions_second_model = coprog.prediction_for_second_model(coprog_dataset.test_features)
     rmse_h2, score_h2 = generate_and_save_model_prediction(
         predictions=predictions_second_model,
         targets=targets_flat,
@@ -414,10 +407,13 @@ def _get_coprog_dataset_for_training(
         dataset_version: DatasetVersion,
         dataset_params: dict[str, Any],
         dataset_root: str,
+        force_load_from_cache: bool,
         sub_dataset: str | None = None,
-) -> CoprogDataset:
+        percent_of_censored_data: float | None = None,
+        percent_of_broken_data: float | None = None,
+) -> CoTrainingData:
     """
-    Get the CoprogDataset data for Coprog depending on the dataset version.
+    Get the CoTrainingData data for Coprog depending on the dataset version.
     Only Scania and CMAPSS are implemented for the moment.
 
     Args:
@@ -426,7 +422,7 @@ def _get_coprog_dataset_for_training(
         dataset_root: the root where the files of the dataset are stored
 
     Returns:
-        All information for Coprog stored inside CoprogDataset
+        All information for Coprog stored inside CoTrainingData
     """
     scania_data_module = None
 
@@ -434,9 +430,15 @@ def _get_coprog_dataset_for_training(
         case DatasetVersion.CMAPSS:
             dataset_params.pop(BATCH_SIZE)
 
-            train_dataset, test_dataset, valid_dataset = CMAPSSLoader.get_datasets(
+            assert sub_dataset is not None, f"sub_dataset for CMAPSS can't be None"
+            assert percent_of_censored_data is not None, f"percent_of_censored_data for CMAPSS can't be None"
+            assert percent_of_broken_data is not None, f"percent_of_broken_data for CMAPSS can't be None"
+
+            train_dataset, test_dataset, valid_dataset, _ = CMAPSSLoader.get_datasets(
                 dataset_root=dataset_root,
                 sub_dataset=sub_dataset,
+                percent_of_censored_data=percent_of_censored_data,
+                percent_of_broken_data=percent_of_broken_data,
                 **dataset_params,
             )
 
@@ -449,6 +451,7 @@ def _get_coprog_dataset_for_training(
         case DatasetVersion.SCANIA:
             scania_data_module = ScaniaDataModule(
                 data_dir=dataset_root,
+                force_load_from_cache=force_load_from_cache,
                 **dataset_params,
             )
 
@@ -465,14 +468,14 @@ def _get_coprog_dataset_for_training(
         case _:
             raise ValueError(f"{dataset_version} is not a valid dataset version")
 
-    return CoprogDataset(
+    return CoTrainingData(
         feature_num=feature_num,
         features_uncensored=features_uncensored,
         targets_uncensored=targets_uncensored,
         features_censored=features_censored,
         ids_censored=ids_censored,
-        features_test=features_test,
-        targets_test=targets_test,
+        test_features=features_test,
+        test_targets=targets_test,
         val_features=val_features,
         val_targets=val_targets,
         scania_data_module=scania_data_module,

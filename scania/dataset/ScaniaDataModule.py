@@ -54,7 +54,6 @@ import numpy as np
 import pandas as pd
 import torch
 from lightning import LightningDataModule
-from lightning.pytorch.utilities.types import EVAL_DATALOADERS
 from torch.utils.data import DataLoader
 
 from constants.scania_component_x_columns import (
@@ -924,11 +923,11 @@ class ScaniaDataModule(LightningDataModule):
         feat_censored, ids_censored) for the requested split."""
         return self._get_set(split).get_censored_split_tensors()
 
-    def get_censored_lower_bounds(self, split: str = "train"):
+    def get_censored_lower_bounds(self, split: str = "train") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(feat_censored, ids_censored, lower_bounds_censored) for the split."""
         return self._get_set(split).get_censored_lower_bounds()
 
-    def get_censored_time_steps(self, split: str = "train"):
+    def get_censored_time_steps(self, split: str = "train") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(feat_censored, ids_censored, time_steps_censored) for the split."""
         return self._get_set(split).get_censored_time_steps()
 

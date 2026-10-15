@@ -1,7 +1,8 @@
 # =======================================================
 # DATASET
 # =======================================================
-from constants.necessary_shared_keys import SEED, VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE
+from constants.necessary_shared_keys import SEED, VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE, LEARNING_RATE, PATIENCES, \
+    MAX_EPOCHS, COPROG_ITERATIONS, COPROG_SUSPENSION_POOL_SIZE
 
 NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
     SEQUENCE_LEN,
@@ -128,9 +129,6 @@ NECESSARY_COPROG_KEYS = [
 NECESSARY_CO_TRAINING_ENSEMBLE_KEYS = [
     "models",
 ]
-NECESSARY_CO_TRAINING_ENSEMBLE_V2_KEYS = [
-    "models",
-]
 
 NECESSARY_PYCLUS_KEYS = [
     "n_trees",
@@ -219,11 +217,11 @@ NECESSARY_TRAINING_DYNAMIC_DEEPHIT_KEYS = [
 ]
 
 NECESSARY_TRAINING_COPROG_KEYS = [
-    "lr",
-    "patiences",
-    "max_epochs",
-    "coprog_iterations",
-    "coprog_suspension_pool_size",
+    LEARNING_RATE,
+    PATIENCES,
+    MAX_EPOCHS,
+    COPROG_ITERATIONS,
+    COPROG_SUSPENSION_POOL_SIZE,
     "rul_target_standardization",
 ]
 
@@ -238,15 +236,6 @@ NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_KEYS = [
     "fine_tune_lr_factor",
     "fine_tune_max_epochs",
     # Chunk size for inference forward passes; caps peak memory during scoring/metrics.
-    "inference_batch_size",
-]
-
-NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_V2_KEYS = [
-    "iterations",
-    "suspension_pool_size",
-    "add_ratio",
-    "confidence",
-    # Chunk size for inference forward passes; caps peak memory during conformal scoring/metrics.
     "inference_batch_size",
 ]
 

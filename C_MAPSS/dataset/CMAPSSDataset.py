@@ -326,8 +326,11 @@ class CMAPSSDataset(Dataset):
         df['real_rul'] = df['rul'] - df['time']
         df['rul'] = np.minimum(max_rul, df['real_rul'])
 
-        # For the censored data we can't calculate the RUL as we don't know when the event occurs
-        df.loc[df['is_censored'] == 1, ['rul', 'real_rul']] = np.nan
+        # For censored units the RUL is unknown: we only know a lower bound.
+        # T_obs = last observed cycle (the unit is still alive at that point), so
+        # RUL(t) >= T_obs - t. Clipped by max_rul to stay on the same scale as the labels.
+        t_obs = df.groupby('id')['time'].transform('max')
+        df['lower_bound'] = np.minimum(max_rul, t_obs - df['time']).astype(np.float64)
 
         self.df = df
         self.has_count_rul = True
@@ -494,14 +497,15 @@ class CMAPSSDataset(Dataset):
                 return np.stack((mean, standard), axis=1)
 
     def _gen_sequence(self):
-        seq_cols = ['id'] + self.feature_cols + ['rul']
+        n_feat = len(self.feature_cols)
+        # Layout: [id | features (n_feat) | rul | time | lower_bound | is_censored]
+        seq_cols = ['id'] + self.feature_cols + ['rul', 'time', 'lower_bound', 'is_censored']
         seq_len = self.sequence_len
         all_array = []
-        # print('gen_sequence')
-        # print(self.df)
+
         for id in self.df['id'].unique():
             id_df = self.df[self.df['id'] == id].sort_values(by='time', ascending=True)
-            id_array = id_df[seq_cols].values
+            id_array = id_df[seq_cols].values.astype(np.float64)
             row_num = id_array.shape[0]
             if row_num >= seq_len:
                 if self.only_final:
@@ -511,19 +515,24 @@ class CMAPSSDataset(Dataset):
                         all_array.append(id_array[i:i + seq_len])
             else:
                 # row number < sequence length, only one sequence
-                # pad width first time-cycle value
+                # pad with first time-cycle value
                 all_array.append(np.pad(id_array, ((seq_len - id_array.shape[0], 0), (0, 0)), 'edge'))
 
         all_array = np.stack(all_array)
 
-        self.sequence_array = all_array[:, :, 1:-1]
+        rul_idx = 1 + n_feat
+        self.sequence_array = all_array[:, :, 1:rul_idx]
 
         if self.return_sequence_label:
-            self.label_array = all_array[:, :, -1]
+            self.label_array = all_array[:, :, rul_idx]
         else:
-            self.label_array = all_array[:, -1, -1]
+            self.label_array = all_array[:, -1, rul_idx]
 
         self.id_array = all_array[:, 0, 0]
+        # Values taken from the last row of each window
+        self.time_step_array = all_array[:, -1, rul_idx + 1]
+        self.lower_bound_array = all_array[:, -1, rul_idx + 2]
+        self.is_censored_array = all_array[:, -1, rul_idx + 3]
 
         self.has_gen_sequence = True
 
@@ -561,3 +570,40 @@ class CMAPSSDataset(Dataset):
             keep_mask[unit_row_positions[num_rows_to_keep:]] = False
 
         self.df = self.df.loc[keep_mask].reset_index(drop=True)
+
+    def _censored_indices(self) -> np.ndarray:
+        # Same order as get_censored_split_tensors (window order in sequence_array),
+        # so features/ids/values stay row-aligned across the getters.
+        return np.flatnonzero(self.is_censored_array == 1)
+
+    def get_censored_lower_bounds(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Censored windows with their survival lower bound. Returns:
+            (features_censored, ids_censored, lower_bounds_censored)
+        ``lower_bounds_censored`` (N, 1) = min(max_rul, T_obs - t), where t is the cycle of the
+        window's last row and T_obs is the unit's last observed cycle. The predicted RUL for
+        these windows should be >= this value.
+        """
+        censored_idx = self._censored_indices()
+
+        features_censored = torch.from_numpy(self.sequence_array[censored_idx]).float()
+        ids_censored = torch.from_numpy(self.id_array[censored_idx]).long()
+        lower_bounds = self.lower_bound_array[censored_idx][:, np.newaxis]
+        lower_bounds_censored = torch.from_numpy(lower_bounds).float()
+
+        return features_censored, ids_censored, lower_bounds_censored
+
+    def get_censored_time_steps(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Censored windows with their time step (cycle). Returns:
+            (features_censored, ids_censored, time_steps_censored)
+        ``time_steps_censored`` (N, 1) = ``time`` cycle of the last row of each window.
+        """
+        censored_idx = self._censored_indices()
+
+        features_censored = torch.from_numpy(self.sequence_array[censored_idx]).float()
+        ids_censored = torch.from_numpy(self.id_array[censored_idx]).long()
+        time_steps = self.time_step_array[censored_idx][:, np.newaxis]
+        time_steps_censored = torch.from_numpy(time_steps).float()
+
+        return features_censored, ids_censored, time_steps_censored

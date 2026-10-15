@@ -61,8 +61,6 @@ def get_or_train_initial_models(
     manifest_path = os.path.join(initial_models_dir, INITIAL_MODELS_MANIFEST)
     if os.path.exists(manifest_path):
         log(f"Loading the shared initial models from {initial_models_dir}...")
-        with open(manifest_path, encoding="utf-8") as f:
-            manifest = json.load(f)
 
         for model_name in version_strs:
             model_file_name = os.path.join(initial_models_dir, f"initial_model_{model_name}.pth")
@@ -70,15 +68,17 @@ def get_or_train_initial_models(
                 log(f"Loading initial model {model_name} from {model_file_name} at index {version_strs.index(model_name)}")
                 initial_models[version_strs.index(model_name)] = torch.load(model_file_name, weights_only=False)
 
-        if manifest["version_strs"] == version_strs:
+        for model_name in version_strs:
+            model_file_name = os.path.join(initial_models_dir, f"initial_model_{model_name}.pth")
+            if not os.path.exists(model_file_name):
+                log(f"\t{model_name} at index {version_strs.index(model_name)} is missing")
+                index_model_per_model_missing[model_name] = version_strs.index(model_name)
+
+        if len(index_model_per_model_missing) == 0:
             return initial_models
-        else:
-            log("Missing some models need to train them...")
-            for model_name in version_strs:
-                model_file_name = os.path.join(initial_models_dir, f"initial_model_{model_name}.pth")
-                if not os.path.exists(model_file_name):
-                    log(f"\t{model_name} at index {version_strs.index(model_name)} is missing")
-                    index_model_per_model_missing[model_name] = version_strs.index(model_name)
+
+        log(f"Missing {len(index_model_per_model_missing)} models need to train them...")
+
     else:
         for model_name in version_strs:
             index_model_per_model_missing[model_name] = version_strs.index(model_name)

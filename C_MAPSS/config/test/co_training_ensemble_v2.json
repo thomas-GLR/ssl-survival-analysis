@@ -1,6 +1,8 @@
 {
   "FD001": {
     "dataset_params": {
+      "sequence_len": 32,
+      "batch_size": 128,
       "seed": 42,
       "max_rul": 125,
       "return_sequence_label": false,
@@ -10,39 +12,87 @@
       "include_cols": [],
       "exclude_cols": [],
       "return_id": false,
-      "validation_rate": 0.2,
+      "val_rate": 0.15,
+      "calib_rate": 0.15,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test": true,
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 32,
-      "coprog_iterations": 2,
-      "max_epochs": [1, 1, 1, 1],
-      "patiences": [50, 50, 50, 50],
-      "batchs_size": [128, 128, 128, 128],
-      "lr": [0.0002, 0.0002, 0.0002, 0.0002],
+      "models": [
+        {
+          "cnn": {
+            "model_params": {},
+            "lr": 0.001,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": false
+          }
+        },
+        {
+          "lstm": {
+            "model_params": {
+              "hidden_dim": 64,
+              "lstm_num_layers": 2,
+              "lstm_dropout": 0.2,
+              "fc_layer_dim": 256,
+              "fc_dropout": 0.2
+            },
+            "lr": 0.002,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": false
+          }
+        },
+        {
+          "transformer_features": {
+            "model_params": {
+              "transformer_encoder_head_num": 4,
+              "transformer_num_layer": 2,
+              "fc_layer_dim": 256,
+              "fc_dropout": 0.3
+            },
+            "lr": 0.0004,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": true
+          }
+        }
+      ]
+    },
+    "training_params": {
+      "iterations": 5,
+      "suspension_pool_size": 0.35,
+      "add_ratio": 0.10,
       "confidence": 0.95,
-      "coprog_suspension_pool_size": 0.5,
-      "coprog_add_ratio": 0.5,
-      "shuffle_dataloaders": [true, true, true, true],
-      "hidden_dim_lstm": 128,
-      "lstm_num_layers_lstm": 1,
-      "lstm_dropout_lstm": 0.3,
-      "fc_layer_dim_lstm": 32,
-      "fc_dropout_lstm": 0.4,
-      "transformer_encoder_head_num_transformer_features": 8,
-      "fc_layer_dim_transformer_features": 32,
-      "fc_dropout_transformer_features": 0.4,
-      "transformer_encoder_head_num_transformer_time_series": 8,
-      "fc_layer_dim_transformer_time_series": 32,
-      "fc_dropout_transformer_time_series": 0.4,
-      "num_layers_transformer_features":  2,
-      "num_layers_transformer_time_series": 2
+      "inference_batch_size": 1024,
+      "use_average_window_confidence": true,
+      "confidence_width_threshold": null,
+      "use_monotone_projection": true,
+      "monotone_residual_weight": 1.0,
+      "disable_isotonic_regression": false,
+      "use_fine_tuning": false,
+      "fine_tune_lr_factor": 0.1,
+      "fine_tune_max_epochs": 20,
+      "fine_tune_patience": 5,
+      "fine_tune_from_initial_model": false,
+      "peer_weighted_pseudo_label": false,
+      "bagging_failure_data": false,
+      "keep_best_model_mode": "val_rmse",
+      "isotonic_time_weighting": true,
+      "computing_weight_mode": "val_rmse",
+      "use_cotraining_ensemble_survival_loss_function": true,
+      "cotraining_survival_loss_lambda": 0.7,
+      "use_mondrian_categorizer": true,
+      "mondrian_no_bins": 10,
+      "use_cps": true,
+      "difficulty_estimator_k": 25
     }
   },
   "FD002": {
     "dataset_params": {
+      "sequence_len": 32,
+      "batch_size": 128,
       "seed": 42,
       "max_rul": 125,
       "return_sequence_label": false,
@@ -52,39 +102,87 @@
       "include_cols": [],
       "exclude_cols": [],
       "return_id": false,
-      "validation_rate": 0.2,
+      "val_rate": 0.15,
+      "calib_rate": 0.15,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test": true,
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 32,
-      "coprog_iterations": 2,
-      "max_epochs": [1, 1, 1, 1],
-      "patiences": [50, 50, 50, 50],
-      "batchs_size": [128, 128, 128, 128],
-      "lr": [0.0002, 0.0002, 0.0002, 0.0002],
+      "models": [
+        {
+          "cnn": {
+            "model_params": {},
+            "lr": 0.001,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": false
+          }
+        },
+        {
+          "lstm": {
+            "model_params": {
+              "hidden_dim": 64,
+              "lstm_num_layers": 2,
+              "lstm_dropout": 0.2,
+              "fc_layer_dim": 256,
+              "fc_dropout": 0.2
+            },
+            "lr": 0.002,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": false
+          }
+        },
+        {
+          "transformer_features": {
+            "model_params": {
+              "transformer_encoder_head_num": 4,
+              "transformer_num_layer": 2,
+              "fc_layer_dim": 256,
+              "fc_dropout": 0.3
+            },
+            "lr": 0.0004,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": true
+          }
+        }
+      ]
+    },
+    "training_params": {
+      "iterations": 5,
+      "suspension_pool_size": 0.35,
+      "add_ratio": 0.10,
       "confidence": 0.95,
-      "coprog_suspension_pool_size": 0.5,
-      "coprog_add_ratio": 0.5,
-      "shuffle_dataloaders": [true, true, true, true],
-      "hidden_dim_lstm": 128,
-      "lstm_num_layers_lstm": 1,
-      "lstm_dropout_lstm": 0.3,
-      "fc_layer_dim_lstm": 32,
-      "fc_dropout_lstm": 0.4,
-      "transformer_encoder_head_num_transformer_features": 8,
-      "fc_layer_dim_transformer_features": 32,
-      "fc_dropout_transformer_features": 0.4,
-      "transformer_encoder_head_num_transformer_time_series": 8,
-      "fc_layer_dim_transformer_time_series": 32,
-      "fc_dropout_transformer_time_series": 0.4,
-      "num_layers_transformer_features":  2,
-      "num_layers_transformer_time_series": 2
+      "inference_batch_size": 1024,
+      "use_average_window_confidence": true,
+      "confidence_width_threshold": null,
+      "use_monotone_projection": true,
+      "monotone_residual_weight": 1.0,
+      "disable_isotonic_regression": false,
+      "use_fine_tuning": false,
+      "fine_tune_lr_factor": 0.1,
+      "fine_tune_max_epochs": 20,
+      "fine_tune_patience": 5,
+      "fine_tune_from_initial_model": false,
+      "peer_weighted_pseudo_label": false,
+      "bagging_failure_data": false,
+      "keep_best_model_mode": "val_rmse",
+      "isotonic_time_weighting": true,
+      "computing_weight_mode": "val_rmse",
+      "use_cotraining_ensemble_survival_loss_function": true,
+      "cotraining_survival_loss_lambda": 0.7,
+      "use_mondrian_categorizer": true,
+      "mondrian_no_bins": 10,
+      "use_cps": true,
+      "difficulty_estimator_k": 25
     }
   },
   "FD003": {
     "dataset_params": {
+      "sequence_len": 32,
+      "batch_size": 128,
       "seed": 42,
       "max_rul": 125,
       "return_sequence_label": false,
@@ -94,39 +192,87 @@
       "include_cols": [],
       "exclude_cols": [],
       "return_id": false,
-      "validation_rate": 0.2,
+      "val_rate": 0.15,
+      "calib_rate": 0.15,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test": true,
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 32,
-      "coprog_iterations": 2,
-      "max_epochs": [1, 1, 1, 1],
-      "patiences": [50, 50, 50, 50],
-      "batchs_size": [128, 128, 128, 128],
-      "lr": [0.0002, 0.0002, 0.0002, 0.0002],
+      "models": [
+        {
+          "cnn": {
+            "model_params": {},
+            "lr": 0.001,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": false
+          }
+        },
+        {
+          "lstm": {
+            "model_params": {
+              "hidden_dim": 64,
+              "lstm_num_layers": 2,
+              "lstm_dropout": 0.2,
+              "fc_layer_dim": 256,
+              "fc_dropout": 0.2
+            },
+            "lr": 0.002,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": false
+          }
+        },
+        {
+          "transformer_features": {
+            "model_params": {
+              "transformer_encoder_head_num": 4,
+              "transformer_num_layer": 2,
+              "fc_layer_dim": 256,
+              "fc_dropout": 0.3
+            },
+            "lr": 0.0004,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": true
+          }
+        }
+      ]
+    },
+    "training_params": {
+      "iterations": 5,
+      "suspension_pool_size": 0.35,
+      "add_ratio": 0.10,
       "confidence": 0.95,
-      "coprog_suspension_pool_size": 0.5,
-      "coprog_add_ratio": 0.5,
-      "shuffle_dataloaders": [true, true, true, true],
-      "hidden_dim_lstm": 128,
-      "lstm_num_layers_lstm": 1,
-      "lstm_dropout_lstm": 0.3,
-      "fc_layer_dim_lstm": 32,
-      "fc_dropout_lstm": 0.4,
-      "transformer_encoder_head_num_transformer_features": 8,
-      "fc_layer_dim_transformer_features": 32,
-      "fc_dropout_transformer_features": 0.4,
-      "transformer_encoder_head_num_transformer_time_series": 8,
-      "fc_layer_dim_transformer_time_series": 32,
-      "fc_dropout_transformer_time_series": 0.4,
-      "num_layers_transformer_features":  2,
-      "num_layers_transformer_time_series": 2
+      "inference_batch_size": 1024,
+      "use_average_window_confidence": true,
+      "confidence_width_threshold": null,
+      "use_monotone_projection": true,
+      "monotone_residual_weight": 1.0,
+      "disable_isotonic_regression": false,
+      "use_fine_tuning": false,
+      "fine_tune_lr_factor": 0.1,
+      "fine_tune_max_epochs": 20,
+      "fine_tune_patience": 5,
+      "fine_tune_from_initial_model": false,
+      "peer_weighted_pseudo_label": false,
+      "bagging_failure_data": false,
+      "keep_best_model_mode": "val_rmse",
+      "isotonic_time_weighting": true,
+      "computing_weight_mode": "val_rmse",
+      "use_cotraining_ensemble_survival_loss_function": true,
+      "cotraining_survival_loss_lambda": 0.7,
+      "use_mondrian_categorizer": true,
+      "mondrian_no_bins": 10,
+      "use_cps": true,
+      "difficulty_estimator_k": 25
     }
   },
   "FD004": {
     "dataset_params": {
+      "sequence_len": 32,
+      "batch_size": 128,
       "seed": 42,
       "max_rul": 125,
       "return_sequence_label": false,
@@ -136,35 +282,81 @@
       "include_cols": [],
       "exclude_cols": [],
       "return_id": false,
-      "validation_rate": 0.2,
+      "val_rate": 0.15,
+      "calib_rate": 0.15,
       "use_only_final_on_test": true,
-      "use_max_rul_on_test":  true,
+      "use_max_rul_on_test": true,
       "use_max_rul_on_valid": true
     },
     "model_params": {
-      "sequence_len": 32,
-      "coprog_iterations": 2,
-      "max_epochs": [1, 1, 1, 1],
-      "patiences": [50, 50, 50, 50],
-      "batchs_size": [128, 128, 128, 128],
-      "lr": [0.0002, 0.0002, 0.0002, 0.0002],
+      "models": [
+        {
+          "cnn": {
+            "model_params": {},
+            "lr": 0.001,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": false
+          }
+        },
+        {
+          "lstm": {
+            "model_params": {
+              "hidden_dim": 64,
+              "lstm_num_layers": 2,
+              "lstm_dropout": 0.2,
+              "fc_layer_dim": 256,
+              "fc_dropout": 0.2
+            },
+            "lr": 0.002,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": false
+          }
+        },
+        {
+          "transformer_features": {
+            "model_params": {
+              "transformer_encoder_head_num": 4,
+              "transformer_num_layer": 2,
+              "fc_layer_dim": 256,
+              "fc_dropout": 0.3
+            },
+            "lr": 0.0004,
+            "max_epochs": 10,
+            "patience": 50,
+            "rul_target_standardization": true
+          }
+        }
+      ]
+    },
+    "training_params": {
+      "iterations": 5,
+      "suspension_pool_size": 0.35,
+      "add_ratio": 0.10,
       "confidence": 0.95,
-      "coprog_suspension_pool_size": 0.5,
-      "coprog_add_ratio": 0.5,
-      "shuffle_dataloaders": [true, true, true, true],
-      "hidden_dim_lstm": 128,
-      "lstm_num_layers_lstm": 1,
-      "lstm_dropout_lstm": 0.3,
-      "fc_layer_dim_lstm": 32,
-      "fc_dropout_lstm": 0.4,
-      "transformer_encoder_head_num_transformer_features": 8,
-      "fc_layer_dim_transformer_features": 32,
-      "fc_dropout_transformer_features": 0.4,
-      "transformer_encoder_head_num_transformer_time_series": 8,
-      "fc_layer_dim_transformer_time_series": 32,
-      "fc_dropout_transformer_time_series": 0.4,
-      "num_layers_transformer_features":  2,
-      "num_layers_transformer_time_series": 2
+      "inference_batch_size": 1024,
+      "use_average_window_confidence": true,
+      "confidence_width_threshold": null,
+      "use_monotone_projection": true,
+      "monotone_residual_weight": 1.0,
+      "disable_isotonic_regression": false,
+      "use_fine_tuning": false,
+      "fine_tune_lr_factor": 0.1,
+      "fine_tune_max_epochs": 20,
+      "fine_tune_patience": 5,
+      "fine_tune_from_initial_model": false,
+      "peer_weighted_pseudo_label": false,
+      "bagging_failure_data": false,
+      "keep_best_model_mode": "val_rmse",
+      "isotonic_time_weighting": true,
+      "computing_weight_mode": "val_rmse",
+      "use_cotraining_ensemble_survival_loss_function": true,
+      "cotraining_survival_loss_lambda": 0.7,
+      "use_mondrian_categorizer": true,
+      "mondrian_no_bins": 10,
+      "use_cps": true,
+      "difficulty_estimator_k": 25
     }
   }
 }
