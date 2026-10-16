@@ -1064,10 +1064,12 @@ class CoTrainingEnsemble_v2:
 
                         unit_id_to_remove_per_model_index[model_index] = unit_id_to_remove
 
-                for j in range(self.number_of_models):
-                    for unit_id_to_remove in unit_id_to_remove_per_model_index[j]:
-                        all_preds[j].pop(unit_id_to_remove, None)
-                        norm_width[j].pop(unit_id_to_remove, None)
+                if len(unit_id_to_remove_per_model_index) > 0:
+                    for j in range(self.number_of_models):
+                        if j in unit_id_to_remove_per_model_index:
+                            for unit_id_to_remove in unit_id_to_remove_per_model_index[j]:
+                                all_preds[j].pop(unit_id_to_remove, None)
+                                norm_width[j].pop(unit_id_to_remove, None)
 
             # Log each model's full unit ranking (most confident first) so it can be checked
             # whether the models agree on which censored units are confident or not.

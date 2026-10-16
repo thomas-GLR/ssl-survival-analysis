@@ -1,7 +1,7 @@
 {
   "hyper_parameters": {
     "use_average_window_confidence": [true],
-    "confidence_width_threshold": [null, 0.75, 0.9, 2.0, 3.0, 5.0],
+    "confidence_width_threshold": [3.0],
     "use_monotone_projection": [true],
     "monotone_residual_weight": [1.0],
     "disable_isotonic_regression": [false],
@@ -24,7 +24,7 @@
     "difficulty_estimator_k": [25]
   },
   "training_params": {
-    "iterations": 20,
+    "iterations": 5,
     "confidence": 0.95,
     "inference_batch_size": 1024,
     "bagging_failure_data": false
@@ -32,7 +32,7 @@
   "dataset_params": {
     "sequence_len": 64,
     "seed": 42,
-    "data_fraction": 1.0,
+    "data_fraction": 0.1,
     "val_rate": 0.15,
     "test_rate": 0.15,
     "calib_rate": 0.1,
@@ -53,7 +53,7 @@
         "cnn": {
           "model_params": {},
           "lr": 0.001,
-          "max_epochs": 500,
+          "max_epochs": 10,
           "patience": 50,
           "rul_target_standardization": false
         }
@@ -68,7 +68,7 @@
             "fc_dropout": 0.2
           },
           "lr": 0.002,
-          "max_epochs": 500,
+          "max_epochs": 10,
           "patience": 50,
           "rul_target_standardization": false
         }
@@ -82,23 +82,9 @@
             "fc_dropout": 0.3
           },
           "lr": 0.0004,
-          "max_epochs": 500,
+          "max_epochs": 10,
           "patience": 50,
           "rul_target_standardization": true
-        }
-      },
-      {
-        "transformer_time_sequence": {
-          "model_params": {
-            "transformer_encoder_head_num": 4,
-            "transformer_num_layer": 3,
-            "fc_layer_dim": 64,
-            "fc_dropout": 0.3
-          },
-          "lr": 0.00001,
-          "max_epochs": 500,
-          "patience": 50,
-          "rul_target_standardization": false
         }
       }
     ]

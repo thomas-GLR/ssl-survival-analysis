@@ -10,7 +10,6 @@ from scania.utils.utils_scania import (
 from scania.utils.utils_simple_lightning_model import train_model as train_model_lightning
 from scania.utils.utils_random_survival_forest import train_model as train_model_random_survival
 from scania.utils.utils_cotraining_ensemble_v1 import train_model as train_model_cotraining_ensemble
-from scania.utils.utils_cotraining_ensemble_v2 import train_model as train_model_cotraining_ensemble_v2
 from scania.utils.utils_dynamic_deephit import import_dynamic_deephit
 from scania.utils.utils_dynamic_deephit import train_model as train_model_dynamic_deephit
 from scania.utils.utils_hyper_parameter_optimization_v2 import (
@@ -27,7 +26,6 @@ __all__ = [
     "get_necessary_model_keys",
     "get_necessary_training_keys",
     "train_model_cotraining_ensemble",
-    "train_model_cotraining_ensemble_v2",
     "train_model_dynamic_deephit",
     "import_dynamic_deephit",
     "generate_and_save_model_prediction",
