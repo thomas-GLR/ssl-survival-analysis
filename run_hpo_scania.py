@@ -21,6 +21,8 @@ import argparse
 import logging
 import os
 
+from enums import DatasetVersion
+
 # This environment variable avoid for missing cuBLAS when using deterministic algorithm.
 # This happend because cuBLAS is used by every nn.Linear/matmul, so the LSTM, Transformer, and CNN's dense layers, and the backward pass
 # cuBLAS has its own determinism switch that's independent of torch.use_deterministic_algorithms — it needs an environment variable set before CUDA initializes.
@@ -30,8 +32,7 @@ import torch
 
 torch.set_float32_matmul_precision("high")
 
-
-from scania.hpo.optuna_search import (
+from shared.hpo.hpo_common import (
     best_params,
     list_models,
     run_search,
@@ -127,7 +128,9 @@ def main() -> None:
     )
 
     study = run_search(
-        args.model,
+        model_name=args.model,
+        dataset_version=DatasetVersion.SCANIA,
+        sub_dataset=None,
         n_trials=args.n_trials,
         data_dir=args.data_dir,
         cache_dir=args.cache_dir,
@@ -136,9 +139,17 @@ def main() -> None:
         seed=args.seed,
     )
 
-    summary_table(study)
+    summary_table({"SCANIA": study})
+
     logger.info("Best params: %s", best_params(study))
-    save_study_results(study, args.model, args.output_dir)
+
+    save_study_results(
+        study=study,
+        model_name=args.model,
+        dataset_version=DatasetVersion.SCANIA,
+        sub_dataset=None,
+        output_dir=args.output_dir
+    )
 
 
 if __name__ == "__main__":
