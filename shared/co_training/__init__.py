@@ -12,6 +12,10 @@ from co_training.utils_cotraining_common import (
     load_ensemble_for_inference,
     save_ensemble_outputs,
 )
+from co_training.utils_hpo_conformal_cotraining_ensemble import (
+    run_hyper_parameter_optimization,
+    HPO_CONFIG_FILE
+)
 
 __all__ = [
     # Coprog
@@ -30,4 +34,7 @@ __all__ = [
     "read_ensemble_weights_from_results",
     "load_ensemble_for_inference",
     "save_ensemble_outputs",
+    # HPO ConformalCoTrainingEnsemble
+    "run_hyper_parameter_optimization",
+    "HPO_CONFIG_FILE",
 ]
