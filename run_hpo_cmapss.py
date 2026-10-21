@@ -26,7 +26,7 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 import optuna
 import torch
 
-from enums import DatasetVersion
+from shared.enums import DatasetVersion
 
 torch.set_float32_matmul_precision('high')
 

@@ -19,7 +19,7 @@ from shared.utils import (
     assert_data_is_valid,
     create_and_get_checkpoints_results_path
 )
-from enums import ModelVersion
+from shared.enums import ModelVersion
 
 
 def train_model(

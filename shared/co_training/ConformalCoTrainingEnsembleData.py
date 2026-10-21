@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from co_training import CoTrainingData
+from shared.co_training import CoTrainingData
 
 
 @dataclass

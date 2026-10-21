@@ -2,8 +2,6 @@ import argparse
 import logging
 import os
 
-from shared.enums import DatasetVersion
-
 # This environment variable avoid for missing cuBLAS when using deterministic algorithm.
 # This happend because cuBLAS is used by every nn.Linear/matmul, so the LSTM, Transformer, and CNN's dense layers, and the backward pass
 # cuBLAS has its own determinism switch that's independent of torch.use_deterministic_algorithms — it needs an environment variable set before CUDA initializes.
@@ -18,7 +16,7 @@ from shared.utils import (
     extract_model_params_from_config,
     extract_training_params_from_config
 )
-from shared.enums import ModelVersion
+from shared.enums import ModelVersion, DatasetVersion
 from scania.utils import (
     get_necessary_dataset_keys,
     get_necessary_model_keys,

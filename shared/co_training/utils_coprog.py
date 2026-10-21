@@ -7,8 +7,8 @@ import pandas as pd
 import torch
 
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
-from challenge import run_challenge_evaluation
-from co_training.CoTrainingData import CoTrainingData
+from scania.challenge import run_challenge_evaluation
+from shared.co_training.CoTrainingData import CoTrainingData
 from constants import necessary_keys_cmapss
 from constants import necessary_keys_scania
 from constants.necessary_shared_keys import VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE, SEED

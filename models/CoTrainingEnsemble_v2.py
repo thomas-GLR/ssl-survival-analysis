@@ -15,7 +15,7 @@ from crepes.extras import DifficultyEstimator, MondrianCategorizer
 from lightning import LightningModule, Trainer
 from torch.utils.data import TensorDataset, DataLoader
 
-from enums import DatasetVersion
+from shared.enums import DatasetVersion
 from models.coprog_gpu_pool import TrainingSpec, run_training_job
 from models.cotraining_gpu_pool import (
     CoTrainingGpuPool,

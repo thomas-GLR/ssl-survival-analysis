@@ -65,7 +65,7 @@ from shared.utils import (
     assert_data_is_valid,
     create_and_get_checkpoints_results_path
 )
-from enums import ModelVersion
+from shared.enums import ModelVersion
 
 # Repository root, from ``scania/utils/utils_dynamic_deephit.py``.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

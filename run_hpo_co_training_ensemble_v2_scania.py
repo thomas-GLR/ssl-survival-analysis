@@ -16,14 +16,13 @@ import argparse
 import logging
 import os
 
-from enums import DatasetVersion
-
 # This environment variable avoid for missing cuBLAS when using deterministic algorithm.
 # This happend because cuBLAS is used by every nn.Linear/matmul, so the LSTM, Transformer, and CNN's dense layers, and the backward pass
 # cuBLAS has its own determinism switch that's independent of torch.use_deterministic_algorithms — it needs an environment variable set before CUDA initializes.
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-from co_training import HPO_CONFIG_FILE, run_hyper_parameter_optimization
+from shared.enums import DatasetVersion
+from shared.co_training import HPO_CONFIG_FILE, run_hyper_parameter_optimization
 
 logger = logging.getLogger(__name__)
 

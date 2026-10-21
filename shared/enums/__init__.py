@@ -1,5 +1,5 @@
-from enums.ModelVersion import ModelVersion
-from enums.DatasetVersion import DatasetVersion
+from shared.enums.ModelVersion import ModelVersion
+from shared.enums.DatasetVersion import DatasetVersion
 
 __all__ = [
     "ModelVersion",

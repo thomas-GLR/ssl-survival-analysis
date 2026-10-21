@@ -13,7 +13,7 @@ from optuna_integration import PyTorchLightningPruningCallback
 from torch import nn
 from torch.utils.data import DataLoader
 
-from enums import DatasetVersion
+from shared.enums import DatasetVersion
 from C_MAPSS.hpo.optuna_search import get_dataloaders_cmapss
 from scania.hpo.optuna_search import get_dataloaders_scania
 from scania.lightning_module import BasicLightningModule

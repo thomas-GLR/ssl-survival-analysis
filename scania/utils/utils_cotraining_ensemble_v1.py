@@ -25,7 +25,7 @@ from shared.utils import (
     criteria_rmse_callback,
     criteria_score_callback
 )
-from enums import ModelVersion
+from shared.enums import ModelVersion
 
 
 def train_model(

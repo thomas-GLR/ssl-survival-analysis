@@ -41,10 +41,10 @@ from lightning import LightningModule
 from tqdm import tqdm
 
 from constants import necessary_keys_scania, necessary_shared_keys
-from enums import DatasetVersion
+from shared.enums import DatasetVersion
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
 from scania.dataset import ScaniaDataModule
-from co_training.utils_cotraining_common import parse_models_config, save_ensemble_outputs
+from shared.co_training.utils_cotraining_common import parse_models_config, save_ensemble_outputs
 from scania.utils.utils_scania import (
     override_dataset_params_from_cache_manifest,
 )

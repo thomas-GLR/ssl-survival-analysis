@@ -2,11 +2,11 @@ import os
 from datetime import datetime
 from typing import Any
 
-from co_training import ConformalCoTrainingEnsembleData
-from co_training.utils_cotraining_common import parse_models_config, save_ensemble_outputs
+from shared.co_training import ConformalCoTrainingEnsembleData
+from shared.co_training.utils_cotraining_common import parse_models_config, save_ensemble_outputs
 from constants import necessary_shared_keys as shared_keys
 from C_MAPSS.dataset.CMAPSSLoader import CMAPSSLoader
-from enums import ModelVersion, DatasetVersion
+from shared.enums import ModelVersion, DatasetVersion
 from models.CoTrainingEnsemble_v2 import CoTrainingEnsemble_v2
 from scania.dataset import ScaniaDataModule
 from shared.utils import (

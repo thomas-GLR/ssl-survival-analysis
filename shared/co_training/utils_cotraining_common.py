@@ -33,12 +33,11 @@ from lightning import LightningModule
 from torch import nn
 
 from constants import necessary_keys_scania
-from enums import DatasetVersion
 from scania.challenge import run_challenge_evaluation
 from scania.dataset import ScaniaDataModule
 from scania.lightning_module import BasicLightningModule
 from scania.utils.utils_scania import generate_and_save_model_prediction
-from shared.enums import ModelVersion
+from shared.enums import ModelVersion, DatasetVersion
 from shared.utils import (
     assert_params_contains_all_key,
     build_scania_module,
