@@ -7,13 +7,13 @@
     "test_rate": 0.15,
     "stratify": true,
     "norm_type": "z-score",
-    "num_workers": 7,
+    "num_workers": 20,
     "pin_memory": true,
     "return_sequence_label": false,
-    "batch_size": 64,
+    "batch_size": 128,
     "shuffle_loader": true,
-    "counter_mode": "both",
-    "include_histograms": false,
+    "counter_mode": "cumulative",
+    "include_histograms": true,
     "histogram_mode": "sum"
   },
   "model_params": {
@@ -23,20 +23,20 @@
     },
     "second_model": {
       "lstm": {
-        "hidden_dim": 128,
+        "hidden_dim": 64,
         "lstm_num_layers": 2,
         "lstm_dropout": 0.2,
-        "fc_layer_dim": 64,
-        "fc_dropout": 0.1
+        "fc_layer_dim": 256,
+        "fc_dropout": 0.2
       }
     }
   },
   "training_params": {
-    "lr": [0.0004, 0.001],
-    "patiences": [50, 50],
+    "lr": [0.001, 0.002],
+    "patiences": [100, 100],
     "max_epochs": [500, 500],
-    "coprog_iterations": 10,
+    "coprog_iterations": 20,
     "coprog_suspension_pool_size": 100,
-    "rul_target_standardization": [true, true]
+    "rul_target_standardization": [false, false]
   }
 }

@@ -8,39 +8,39 @@
     "calib_rate": 0.1,
     "stratify": true,
     "norm_type": "z-score",
-    "num_workers": 7,
+    "num_workers": 20,
     "pin_memory": true,
     "return_sequence_label": false,
-    "batch_size": 64,
+    "batch_size": 128,
     "shuffle_loader": true,
-    "counter_mode": "both",
-    "include_histograms": false,
-    "histogram_mode": "zhist"
+    "counter_mode": "cumulative",
+    "include_histograms": true,
+    "histogram_mode": "sum"
   },
   "model_params": {
     "models": [
       {
         "cnn": {
           "model_params": {},
-          "lr": 0.0004,
+          "lr": 0.001,
           "max_epochs": 500,
-          "patience": 50,
-          "rul_target_standardization": true
+          "patience": 100,
+          "rul_target_standardization": false
         }
       },
       {
         "lstm": {
           "model_params": {
-            "hidden_dim": 128,
+            "hidden_dim": 64,
             "lstm_num_layers": 2,
             "lstm_dropout": 0.2,
-            "fc_layer_dim": 64,
-            "fc_dropout": 0.1
+            "fc_layer_dim": 256,
+            "fc_dropout": 0.2
           },
-          "lr": 0.001,
+          "lr": 0.002,
           "max_epochs": 500,
-          "patience": 50,
-          "rul_target_standardization": true
+          "patience": 100,
+          "rul_target_standardization": false
         }
       },
       {
@@ -48,39 +48,25 @@
           "model_params": {
             "transformer_encoder_head_num": 4,
             "transformer_num_layer": 2,
-            "fc_layer_dim": 128,
-            "fc_dropout": 0.1
-          },
-          "lr": 0.0002,
-          "max_epochs": 500,
-          "patience": 50,
-          "rul_target_standardization": true
-        }
-      },
-      {
-        "transformer_time_sequence": {
-          "model_params": {
-            "transformer_encoder_head_num": 4,
-            "transformer_num_layer": 3,
-            "fc_layer_dim": 128,
-            "fc_dropout": 0.2
+            "fc_layer_dim": 256,
+            "fc_dropout": 0.3
           },
           "lr": 0.0004,
           "max_epochs": 500,
           "patience": 50,
-          "rul_target_standardization": false
+          "rul_target_standardization": true
         }
       }
     ]
   },
   "training_params": {
-    "iterations": 30,
+    "iterations": 20,
     "suspension_pool_size": 0.35,
-    "add_ratio": 0.05,
+    "add_ratio": 0.1,
     "confidence": 0.95,
     "inference_batch_size": 1024,
     "use_average_window_confidence": true,
-    "confidence_width_threshold": null,
+    "confidence_width_threshold": 3.0,
     "use_monotone_projection": true,
     "monotone_residual_weight": 1.0,
     "disable_isotonic_regression": false,
