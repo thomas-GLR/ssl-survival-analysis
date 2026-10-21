@@ -20,7 +20,7 @@ from shared.utils import (
     assert_data_is_valid,
     create_and_get_checkpoints_results_path,
 )
-from enums import ModelVersion
+from enums import ModelVersion, DatasetVersion
 
 
 def train_model(
@@ -60,7 +60,9 @@ def train_model(
         fc_dropout: float | None = None,
         # Others
         force_load_from_cache: bool = False,
-        datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+        # run_train_scania take the parameter "pretrained_model_dir" for Coprog and Conformal co-training ensemble. We do not use it here.
+        pretrained_model_dir: str | None = None,
 ) -> tuple[float, float]:
     set_seed(seed)
 
@@ -71,7 +73,8 @@ def train_model(
     )
 
     checkpoints_path, results_path = create_and_get_checkpoints_results_path(
-        model_version=model_version.value,
+        model_version=model_version,
+        dataset_version=DatasetVersion.SCANIA,
         datetime_for_folders=datetime_for_folders,
         checkpoints_path=checkpoints_path,
         results_path=results_path,
