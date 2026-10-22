@@ -1,3 +1,5 @@
+The purpose of this branch is to search for ssl-state-of-the-art that work on scania and cmapss datasets.
+
 # Survival Analysis for CMAPSS and Scania Component X datasets
 
 ## CMAPSS
