@@ -20,12 +20,12 @@
   "model_params": {
     "models": [
       {
-        "cnn": {
+        "rulcnn": {
           "model_params": {},
-          "lr": 0.001,
+          "lr": 0.0004,
           "max_epochs": 500,
-          "patience": 100,
-          "rul_target_standardization": false
+          "patience": 50,
+          "rul_target_standardization": true
         }
       },
       {
@@ -39,7 +39,7 @@
           },
           "lr": 0.002,
           "max_epochs": 500,
-          "patience": 100,
+          "patience": 50,
           "rul_target_standardization": false
         }
       },
@@ -77,7 +77,7 @@
     "fine_tune_from_initial_model": false,
     "peer_weighted_pseudo_label": false,
     "bagging_failure_data": false,
-    "keep_best_model_mode": "val_rmse",
+    "keep_best_model_mode": null,
     "isotonic_time_weighting":  true,
     "computing_weight_mode": "val_rmse",
     "use_cotraining_ensemble_survival_loss_function": true,

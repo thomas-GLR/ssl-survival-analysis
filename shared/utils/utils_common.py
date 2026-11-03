@@ -10,7 +10,7 @@ from torch import nn
 from torchmetrics.functional import mean_squared_error
 
 from scania.lightning_module import BasicLightningModule
-from models import CNN1D, Simple_LSTM, TransformerFeatures
+from models import CNN1D, Simple_LSTM, TransformerFeatures, RULCNN, RULMLP, BiLSTMAttention
 from shared.enums import ModelVersion, DatasetVersion
 
 from scania.metrics import scania_score
@@ -178,6 +178,17 @@ def creating_model(
     match model_version:
         case ModelVersion.CNN:
             return CNN1D(num_features=num_features)
+        case ModelVersion.RULCNN | ModelVersion.MLP | ModelVersion.BILSTM_ATTENTION:
+            model_class = {
+                ModelVersion.RULCNN: RULCNN,
+                ModelVersion.MLP: RULMLP,
+                ModelVersion.BILSTM_ATTENTION: BiLSTMAttention,
+            }[model_version]
+            return model_class(**{
+                **model_params,
+                "num_features": num_features,
+                "sequence_len": sequence_len,
+            })
         case ModelVersion.LSTM:
             model_params.update({
                 "feature_num": num_features,

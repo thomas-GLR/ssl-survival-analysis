@@ -1,26 +1,26 @@
 {
   "dataset_params": {
-    "sequence_len": 32,
+    "sequence_len": 64,
     "seed": 42,
     "data_fraction": 1.0,
-    "val_rate": 0.2,
-    "test_rate": 0.1,
+    "val_rate": 0.15,
+    "test_rate": 0.15,
     "stratify": true,
     "norm_type": "z-score",
-    "num_workers": 4,
+    "num_workers": 0,
     "pin_memory": true,
     "return_sequence_label": false,
-    "batch_size": 128,
+    "batch_size": 32,
     "shuffle_loader": true,
-    "counter_mode": "both",
-    "include_histograms": false,
+    "counter_mode": "cumulative",
+    "include_histograms": true,
     "histogram_mode": "sum"
   },
   "training_params": {
-    "lr": 0.0002,
+    "lr": 0.001,
     "patience": 50,
-    "max_epochs":  1,
-    "rul_target_standardization": true
+    "max_epochs":  500,
+    "rul_target_standardization": false
   },
   "model_params": {
   }

@@ -172,7 +172,7 @@ def _get_train_model_method(model_version: ModelVersion) -> Callable:
             return train_model_cotraining_ensemble
         case ModelVersion.CO_TRAINING_ENSEMBLE_V2:
             return train_model_conformal_cotraining_ensemble
-        case ModelVersion.CNN:
+        case ModelVersion.CNN | ModelVersion.MLP | ModelVersion.BILSTM_ATTENTION | ModelVersion.RULCNN:
             return train_model_lightning
         case ModelVersion.TRANSFORMER_FEATURES:
             return train_model_lightning
@@ -191,21 +191,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-version",
         required=True,
-        choices=[
-            "transformer_lstm",
-            "lstm",
-            "autoencoder",
-            "metric",
-            "rsf",
-            "pyclus",
-            "coprog",
-            "co_training_ensemble",
-            "co_training_ensemble_v2",
-            "cnn",
-            "transformer_features",
-            "transformer_time_sequence",
-            "dynamic_deephit",
-        ],
+        choices=[model.value for model in ModelVersion],
         help="The model to train",
     )
     parser.add_argument(
