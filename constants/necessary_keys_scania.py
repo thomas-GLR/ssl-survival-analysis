@@ -179,6 +179,7 @@ NECESSARY_DYNAMIC_DEEPHIT_KEYS = [
 
 NECESSARY_TRAINING_CNN_KEYS = [
     "lr",
+    "weight_decay",
     "patience",
     "max_epochs",
     "rul_target_standardization",

@@ -20,7 +20,7 @@ def get_necessary_dataset_keys(model_version: ModelVersion, necessary_keys_modul
             return necessary_keys_module.NECESSARY_DATASET_PYCLUS_KEYS
         case ModelVersion.COPROG:
             return necessary_keys_module.NECESSARY_DATASET_COPROG_KEYS
-        case ModelVersion.CNN:
+        case ModelVersion.CNN | ModelVersion.MLP | ModelVersion.BILSTM_ATTENTION | ModelVersion.RULCNN:
             return necessary_keys_module.NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE:
             return necessary_keys_module.NECESSARY_DATASET_CO_TRAINING_ENSEMBLE_KEYS
@@ -52,7 +52,7 @@ def get_necessary_model_keys(model_version: ModelVersion, necessary_keys_module:
             return necessary_keys_module.NECESSARY_PYCLUS_KEYS
         case ModelVersion.COPROG:
             return necessary_keys_module.NECESSARY_COPROG_KEYS
-        case ModelVersion.CNN:
+        case ModelVersion.CNN | ModelVersion.MLP | ModelVersion.BILSTM_ATTENTION | ModelVersion.RULCNN:
             return necessary_keys_module.NECESSARY_CNN_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE:
             return necessary_keys_module.NECESSARY_CO_TRAINING_ENSEMBLE_KEYS
@@ -84,7 +84,7 @@ def get_necessary_training_keys(model_version: ModelVersion, necessary_keys_modu
             raise NotImplementedError(f"Model {model_version.value} is not yet implemented")
         case ModelVersion.COPROG:
             return necessary_keys_module.NECESSARY_TRAINING_COPROG_KEYS
-        case ModelVersion.CNN:
+        case ModelVersion.CNN | ModelVersion.MLP | ModelVersion.BILSTM_ATTENTION | ModelVersion.RULCNN:
             return necessary_keys_module.NECESSARY_TRAINING_CNN_KEYS
         case ModelVersion.CO_TRAINING_ENSEMBLE:
             return necessary_keys_module.NECESSARY_TRAINING_CO_TRAINING_ENSEMBLE_KEYS

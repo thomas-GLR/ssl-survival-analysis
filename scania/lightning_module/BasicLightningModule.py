@@ -12,6 +12,7 @@ class BasicLightningModule(LightningModule):
             self,
             lr,
             model: nn.Module,
+            weight_decay: float = 0,
             target_mean: float = 0.0,
             target_std: float = 1.0,
             use_cotraining_ensemble_survival_loss_function: bool = False,
@@ -22,6 +23,7 @@ class BasicLightningModule(LightningModule):
         self.save_hyperparameters(ignore=['model'])
         self.net = model
         self.lr = lr
+        self.weight_decay = weight_decay
         # CoTrainingEnsemble_v2-only (Scania) survival-loss selection for 4-element batches
         # (x, y, is_censored, lower_bound). False/default keeps every other caller (COPROG,
         # CoTrainingEnsemble v1, RSF, C-MAPSS, HPO) on the plain 2-element (x, y) MSE path
@@ -78,7 +80,7 @@ class BasicLightningModule(LightningModule):
         # fine-tuning; every other caller keeps the plain (x, y) 2-element batch below.
         if len(batch) == 4:
             x, y, is_censored, lower_bound = batch
-            preds = self.net(x)
+            preds = self.net(x).reshape_as(y)
             y_norm = (y - self.target_mean) / self.target_std
             lower_bound_norm = (lower_bound - self.target_mean) / self.target_std
             if self.use_cotraining_ensemble_survival_loss_function:
@@ -101,7 +103,7 @@ class BasicLightningModule(LightningModule):
             return loss
 
         x, y = batch
-        preds = self.net(x)
+        preds = self.net(x).reshape_as(y)
         # Loss is computed in normalized target space; predictions are stored
         # de-normalized so train_rmse stays in real RUL units.
         y_norm = (y - self.target_mean) / self.target_std
@@ -218,7 +220,7 @@ class BasicLightningModule(LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        preds = self.net(x)
+        preds = self.net(x).reshape_as(y)
         # Store de-normalized predictions so val_rmse / val_loss (monitored by
         # early stopping and checkpointing) stay in real RUL units.
         self.validation_step_outputs.extend(self._denorm(preds).detach())
@@ -226,7 +228,7 @@ class BasicLightningModule(LightningModule):
 
     def test_step(self, batch, batch_idx, reduction='sum'):
         x, y = batch
-        preds = self._denorm(self.net(x))
+        preds = self._denorm(self.net(x)).reshape_as(y)
         self.test_step_outputs.extend(preds)
         self.test_step_targets.extend(y)
 
@@ -265,7 +267,7 @@ class BasicLightningModule(LightningModule):
 
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         return optimizer
 
     def predict_step(self, batch, batch_idx):
@@ -276,5 +278,5 @@ class BasicLightningModule(LightningModule):
         :return: tuple of (predictions, targets) tensors.
         """
         x, y = batch
-        preds = self._denorm(self.net(x))
+        preds = self._denorm(self.net(x)).reshape_as(y)
         return preds, y

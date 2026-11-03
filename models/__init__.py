@@ -3,6 +3,9 @@ from models.SslPCT import SslPCT
 from models.Simple_LSTM import Simple_LSTM
 from models.TransformerEncoder_LSTM_1 import TransformerEncoder_LSTM_1
 from models.CNN1D import CNN1D
+from models.RULCNN import RULCNN
+from models.RULMLP import RULMLP
+from models.BiLSTMAttention import BiLSTMAttention
 from models.TransformerFeatures import TransformerFeatures
 from models.TransformerTimeSequence import TransformerTimeSequence
 
@@ -12,6 +15,9 @@ __all__ = [
     "Simple_LSTM",
     "TransformerEncoder_LSTM_1",
     "CNN1D",
+    "RULCNN",
+    "RULMLP",
+    "BiLSTMAttention",
     "TransformerFeatures",
     "TransformerTimeSequence",
 ]

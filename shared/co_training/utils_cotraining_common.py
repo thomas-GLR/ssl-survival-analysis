@@ -44,9 +44,12 @@ from shared.utils import (
     creating_model
 )
 
-# The co-training ensembles only support these four architectures (same set as COPROG).
+# Architectures supported by the shared co-training model factory.
 _ALLOWED_MODEL_VERSIONS = {
     ModelVersion.CNN,
+    ModelVersion.RULCNN,
+    ModelVersion.MLP,
+    ModelVersion.BILSTM_ATTENTION,
     ModelVersion.LSTM,
     ModelVersion.TRANSFORMER_FEATURES,
     ModelVersion.TRANSFORMER_TIME_SEQUENCE,
@@ -64,7 +67,7 @@ CHECKPOINT_SPEC_KEY = "scania_cotraining"
 def _necessary_model_keys_for(model_version: ModelVersion) -> list[str]:
     """Return the required architecture-param keys for one model version."""
     match model_version:
-        case ModelVersion.CNN:
+        case ModelVersion.CNN | ModelVersion.RULCNN | ModelVersion.MLP | ModelVersion.BILSTM_ATTENTION:
             return necessary_keys_scania.NECESSARY_CNN_KEYS
         case ModelVersion.LSTM:
             return necessary_keys_scania.NECESSARY_LSTM_KEYS
@@ -103,7 +106,8 @@ def parse_models_config(
     """Parse the config ``models`` list into models, picklable builders and per-model metadata.
 
     Each entry of ``models_cfg`` is a single-key dict whose key is a model-version string
-    (``"cnn"``, ``"lstm"``, ``"transformer_features"`` or ``"transformer_time_sequence"``) and
+    (``"cnn"``, ``"rulcnn"``, ``"mlp"``, ``"bilstm_attention"``,
+    ``"lstm"``, ``"transformer_features"`` or ``"transformer_time_sequence"``) and
     whose value carries that model's ``model_params`` plus its ``lr``, ``max_epochs``,
     ``patience`` and ``rul_target_standardization`` (per-model, so adding a model is just adding
     an entry).
@@ -125,7 +129,7 @@ def parse_models_config(
 
     Raises:
         ValueError: If fewer than two models are given, an entry is malformed, or a model
-            version is not one of the four allowed architectures.
+            version is not one of the allowed architectures.
         KeyError: If a model's ``model_params`` block is missing a required architecture key.
     """
     if not isinstance(models_cfg, list) or len(models_cfg) < 2:

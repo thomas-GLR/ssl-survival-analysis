@@ -1,12 +1,13 @@
 import time
 from datetime import datetime
+from typing import Any
 
 import pandas as pd
 import torch
 from lightning import Trainer
 from lightning.pytorch import callbacks
 
-from models import TransformerEncoder_LSTM_1, Simple_LSTM, CNN1D, TransformerFeatures
+from models import TransformerEncoder_LSTM_1, Simple_LSTM, TransformerFeatures, RULCNN, RULMLP, BiLSTMAttention, CNN1D
 from models.TransformerTimeSequence import TransformerTimeSequence
 from scania.challenge import run_challenge_evaluation
 from scania.dataset import ScaniaDataModule
@@ -27,44 +28,40 @@ def train_model(
         checkpoints_path: str,
         results_path: str,
         model_version: ModelVersion,
-        # Dataset params
+        dataset_version: DatasetVersion,
+        dataset_params: dict[str, Any],
         dataset_root: str,
-        sequence_len: int,
-        seed: int | None,
-        data_fraction: float,
-        val_rate: float,
-        test_rate: float,
-        stratify: bool,
-        norm_type: str | None,
-        shuffle_loader: bool,
-        cache_dir: str | None,
-        num_workers: int,
-        pin_memory: bool,
-        return_sequence_label: bool,
-        batch_size: int,
-        counter_mode: str,
-        include_histograms: bool,
-        histogram_mode: str,
-        # Training
-        lr: float,
-        patience: int,
-        max_epochs: int,
-        rul_target_standardization: bool,
-        # Model params
-        transformer_encoder_head_num: int | None = None,
-        transformer_num_layer: int | None = None,
-        hidden_dim: int | None = None,
-        lstm_num_layers: int | None = None,
-        lstm_dropout: float | None = None,
-        fc_layer_dim: int | None = None,
-        fc_dropout: float | None = None,
-        # Others
+        models_params: dict[str, Any],
+        training_params: dict[str, Any],
         force_load_from_cache: bool = False,
-        datetime_for_folders=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
-        # run_train_scania take the parameter "pretrained_model_dir" for Coprog and Conformal co-training ensemble. We do not use it here.
         pretrained_model_dir: str | None = None,
+        datetime_for_folders: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 ) -> tuple[float, float]:
-    set_seed(seed)
+    """Train a supervised Scania model using the runner's config dictionaries.
+
+    ``pretrained_model_dir`` is accepted for the common runner interface; this
+    trainer always fits a fresh model.
+    """
+    if dataset_version != DatasetVersion.SCANIA:
+        raise ValueError("This trainer currently supports only the Scania dataset")
+
+    sequence_len = dataset_params["sequence_len"]
+    batch_size = dataset_params["batch_size"]
+    lr = training_params["lr"]
+    weight_decay = training_params["weight_decay"]
+    patience = training_params["patience"]
+    max_epochs = training_params["max_epochs"]
+    rul_target_standardization = training_params["rul_target_standardization"]
+
+    transformer_encoder_head_num = models_params.get("transformer_encoder_head_num")
+    transformer_num_layer = models_params.get("transformer_num_layer")
+    hidden_dim = models_params.get("hidden_dim")
+    lstm_num_layers = models_params.get("lstm_num_layers")
+    lstm_dropout = models_params.get("lstm_dropout")
+    fc_layer_dim = models_params.get("fc_layer_dim")
+    fc_dropout = models_params.get("fc_dropout")
+
+    set_seed(dataset_params["seed"])
 
     assert_data_is_valid(
         checkpoints_path=checkpoints_path,
@@ -74,7 +71,7 @@ def train_model(
 
     checkpoints_path, results_path = create_and_get_checkpoints_results_path(
         model_version=model_version,
-        dataset_version=DatasetVersion.SCANIA,
+        dataset_version=dataset_version,
         datetime_for_folders=datetime_for_folders,
         checkpoints_path=checkpoints_path,
         results_path=results_path,
@@ -84,49 +81,15 @@ def train_model(
         columns=['train_rmse', 'val_rmse', 'test_rmse', 'test_score', 'training_time_seconds'])
 
     dataset_kwargs = {
-        'data_dir': dataset_root,
-        'seed': seed,
-        'val_rate': val_rate,
-        'test_rate': test_rate,
-        'stratify': stratify,
-        'data_fraction': data_fraction,
-        'norm_type': norm_type,
-        'shuffle_loader': shuffle_loader,
-        'cache_dir': cache_dir,
-        'num_workers': num_workers,
-        'pin_memory': pin_memory,
-        'return_sequence_label': return_sequence_label,
-        'batch_size': batch_size,
-        'sequence_len': sequence_len,
-        'counter_mode': counter_mode,
-        'include_histograms': include_histograms,
-        'histogram_mode': histogram_mode,
-        'force_load_from_cache': force_load_from_cache,
+        **dataset_params,
+        "data_dir": dataset_root,
+        "force_load_from_cache": force_load_from_cache,
     }
 
     print("Creating data loader with the following parameters :")
     print(dataset_kwargs)
 
-    scania_data_module = ScaniaDataModule(
-        data_dir=dataset_root,
-        seed=seed,
-        data_fraction=data_fraction,
-        val_rate=val_rate,
-        test_rate=test_rate,
-        stratify=stratify,
-        norm_type=norm_type,
-        shuffle_loader=shuffle_loader,
-        cache_dir=cache_dir,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        return_sequence_label=return_sequence_label,
-        batch_size=batch_size,
-        sequence_len=sequence_len,
-        counter_mode=counter_mode,
-        include_histograms=include_histograms,
-        histogram_mode=histogram_mode,
-        force_load_from_cache=force_load_from_cache,
-    )
+    scania_data_module = ScaniaDataModule(**dataset_kwargs)
 
     scania_data_module.setup()
 
@@ -186,6 +149,27 @@ def train_model(
             }
 
             model = CNN1D(**model_kwargs)
+        case ModelVersion.RULCNN:
+            model_kwargs = {
+                "num_features": feature_num,
+                "sequence_len": sequence_len,
+            }
+
+            model = RULCNN(**model_kwargs)
+        case ModelVersion.BILSTM_ATTENTION:
+            model_kwargs = {
+                "num_features": feature_num,
+                "sequence_len": sequence_len,
+                "hidden_dim": models_params.get("hidden_dim", 128),
+                "lstm_num_layers": models_params.get("lstm_num_layers", 4),
+            }
+            model = BiLSTMAttention(**model_kwargs)
+        case ModelVersion.MLP:
+            model_kwargs = {
+                "num_features": feature_num,
+                "sequence_len": sequence_len,
+            }
+            model = RULMLP(**model_kwargs)
         case ModelVersion.TRANSFORMER_FEATURES:
             model_kwargs = {
                 "sequence_len": sequence_len,
@@ -215,7 +199,9 @@ def train_model(
     print(f"Models parameters : {model_kwargs}")
 
     training_kwargs = {
+        **training_params,
         "lr": lr,
+        "weight_decay": weight_decay,
         "patience": patience,
         "max_epochs": max_epochs,
         "rul_target_standardization": rul_target_standardization,
@@ -235,6 +221,7 @@ def train_model(
     lightning_module = BasicLightningModule(
         lr=lr,
         model=model,
+        weight_decay=weight_decay,
         target_mean=target_mean,
         target_std=target_std,
     )
@@ -296,6 +283,12 @@ def train_model(
             model_for_reload = Simple_LSTM(**model_kwargs)
         case ModelVersion.CNN:
             model_for_reload = CNN1D(**model_kwargs)
+        case ModelVersion.RULCNN:
+            model_for_reload = RULCNN(**model_kwargs)
+        case ModelVersion.BILSTM_ATTENTION:
+            model_for_reload = BiLSTMAttention(**model_kwargs)
+        case ModelVersion.MLP:
+            model_for_reload = RULMLP(**model_kwargs)
         case ModelVersion.TRANSFORMER_FEATURES:
             model_for_reload = TransformerFeatures(**model_kwargs)
         case ModelVersion.TRANSFORMER_TIME_SEQUENCE:
