@@ -22,4 +22,4 @@ class RULMLP(nn.Module):
             raise ValueError("Expected input shape [batch, sequence_length, n_features]")
         if x.shape[1:] != (self.sequence_length, self.n_features):
             raise ValueError("Input sequence length or feature count is incorrect")
-        return self.regressor(x).squeeze(-1)
+        return self.regressor(x)
