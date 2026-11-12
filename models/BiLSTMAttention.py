@@ -41,4 +41,4 @@ class BiLSTMAttention(nn.Module):
         representation = torch.tanh(
             self.context_projection(context) + self.final_projection(final_state)
         )
-        return self.regressor(representation).squeeze(-1)
+        return self.regressor(representation)
