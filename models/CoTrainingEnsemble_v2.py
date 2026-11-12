@@ -2588,8 +2588,9 @@ class CoTrainingEnsemble_v2:
             # Blend all valid peers' per-window predictions, weighting each by
             # 1 / (norm_width**2 + eps) so a tighter, more confident peer contributes more.
             # This is the same per-unit confidence score already used to pick most_confident_j
-            # above. All peers scored the same unit windows (same xu), so their label tensors
-            # share a shape; a convex combination of non-increasing sequences stays
+            # above. All peers scored the same unit windows (same xu), but models may
+            # return (m,) or (m, 1). Align them before addition to avoid broadcasting
+            # into (m, m). A convex combination of non-increasing sequences stays
             # non-increasing (monotone projection is preserved).
             eps = 1e-8
             weighted_sum = None
@@ -2597,7 +2598,7 @@ class CoTrainingEnsemble_v2:
             for j in valid_contributors:
                 score_j = norm_width[j][best_unit_id_int]
                 w_j = 1.0 / (score_j ** 2 + eps)
-                lu_j = all_preds[j][best_unit_id_int][2]
+                lu_j = all_preds[j][best_unit_id_int][2].reshape_as(lu_p)
                 weighted_sum = lu_j * w_j if weighted_sum is None else weighted_sum + lu_j * w_j
                 weight_total += w_j
             lu_p = weighted_sum / weight_total
