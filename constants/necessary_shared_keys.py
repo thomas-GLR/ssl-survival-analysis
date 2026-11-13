@@ -18,6 +18,7 @@ NECESSARY_CONFORMAL_CO_TRAINING_ENSEMBLE_KEYS = [
 # TRAINING PARAMS FOR CONFORMAL CO-TRAINING ENSEMBLE
 # =======================================================
 LEARNING_RATE = "lr"
+WEIGHT_DECAY = "weight_decay"
 PATIENCES = "patiences"
 MAX_EPOCHS = "max_epochs"
 COPROG_ITERATIONS = "coprog_iterations"

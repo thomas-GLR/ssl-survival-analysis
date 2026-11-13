@@ -23,6 +23,7 @@
         "rulcnn": {
           "model_params": {},
           "lr": 0.0004,
+          "weight_decay": 1e-3,
           "max_epochs": 500,
           "patience": 50,
           "rul_target_standardization": true
@@ -38,6 +39,7 @@
             "fc_dropout": 0.2
           },
           "lr": 0.002,
+          "weight_decay": 0,
           "max_epochs": 500,
           "patience": 50,
           "rul_target_standardization": false
@@ -52,6 +54,7 @@
             "fc_dropout": 0.3
           },
           "lr": 0.0004,
+          "weight_decay": 0,
           "max_epochs": 500,
           "patience": 50,
           "rul_target_standardization": true

@@ -56,7 +56,7 @@ _ALLOWED_MODEL_VERSIONS = {
 }
 
 # Per-model entry fields (besides the architecture ``model_params`` block).
-_PER_MODEL_TRAINING_FIELDS = ["model_params", "lr", "max_epochs", "patience", "rul_target_standardization"]
+_PER_MODEL_TRAINING_FIELDS = ["model_params", "lr", "weight_decay", "max_epochs", "patience", "rul_target_standardization"]
 
 # Top-level checkpoint key holding the extra Scania metadata (architecture spec, position in the
 # ensemble, ensemble weights). Lightning's loader only reads the keys it knows about and ignores
@@ -141,6 +141,7 @@ def parse_models_config(
     model_specs: list[dict] = []
     version_strs: list[str] = []
     lrs: list[float] = []
+    weight_decays: list[float] = []
     max_epochs_list: list[int] = []
     patiences: list[int] = []
 
@@ -179,6 +180,7 @@ def parse_models_config(
                 feature_num=feature_num,
                 sequence_len=sequence_len,
                 lr=inner["lr"],
+                weight_decay=inner["weight_decay"],
                 target_mean=target_mean,
                 target_std=target_std,
             )
@@ -193,12 +195,14 @@ def parse_models_config(
         })
         version_strs.append(version_str)
         lrs.append(inner["lr"])
+        weight_decays.append(inner["weight_decay"])
         max_epochs_list.append(inner["max_epochs"])
         patiences.append(inner["patience"])
 
     meta = {
         "version_strs": version_strs,
         "lr": lrs,
+        "weight_decay": weight_decays,
         "max_epochs": max_epochs_list,
         "patiences": patiences,
         "model_specs": model_specs,

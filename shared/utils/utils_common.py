@@ -211,6 +211,7 @@ def build_scania_module(
     feature_num: int,
     sequence_len: int,
     lr: float,
+    weight_decay: float,
     target_mean: float,
     target_std: float,
 ) -> LightningModule:
@@ -230,6 +231,7 @@ def build_scania_module(
         feature_num: Number of input features.
         sequence_len: Input sequence length.
         lr: Learning rate for the wrapping module.
+        weight_decay: the weight decay for the wrapping module.
         target_mean: RUL target mean for standardization (0.0 disables it).
         target_std: RUL target std for standardization (1.0 disables it).
 
@@ -240,6 +242,7 @@ def build_scania_module(
 
     return BasicLightningModule(
         lr=lr,
+        weight_decay=weight_decay,
         model=model,
         target_mean=target_mean,
         target_std=target_std,

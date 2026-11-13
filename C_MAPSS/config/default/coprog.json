@@ -33,6 +33,7 @@
     },
     "training_params": {
       "lr": [0.0002, 0.0002],
+      "weight_decay": [1e-3, 1e-3],
       "patiences": [50, 50],
       "max_epochs": [500, 500],
       "coprog_iterations": 10,
@@ -73,6 +74,7 @@
     },
     "training_params": {
       "lr": [0.0002, 0.0002],
+      "weight_decay": [1e-3, 1e-3],
       "patiences": [50, 50],
       "max_epochs": [500, 500],
       "coprog_iterations": 10,
@@ -113,6 +115,7 @@
     },
     "training_params": {
       "lr": [0.002, 0.0002],
+      "weight_decay": [1e-3, 1e-3],
       "patiences": [50, 50],
       "max_epochs": [500, 500],
       "coprog_iterations": 10,
@@ -153,6 +156,7 @@
     },
     "training_params": {
       "lr": [0.0002, 0.0002],
+      "weight_decay": [1e-3, 1e-3],
       "patiences": [50, 50],
       "max_epochs": [500, 500],
       "coprog_iterations": 10,

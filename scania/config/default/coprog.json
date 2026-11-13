@@ -33,6 +33,7 @@
   },
   "training_params": {
     "lr": [0.001, 0.002],
+    "weight_decay": [1e-3, 1e-3],
     "patiences": [100, 100],
     "max_epochs": [500, 500],
     "coprog_iterations": 20,

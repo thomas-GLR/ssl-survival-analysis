@@ -62,6 +62,7 @@ def train_model(
     second_model = models_params[shared_keys.COPROG_SECOND_MODEL]
 
     lr = training_params[shared_keys.LEARNING_RATE]
+    weight_decay = training_params[shared_keys.WEIGHT_DECAY]
     patiences = training_params[shared_keys.PATIENCES]
     max_epochs = training_params[shared_keys.MAX_EPOCHS]
     coprog_iterations = training_params[shared_keys.COPROG_ITERATIONS]
@@ -99,6 +100,9 @@ def train_model(
 
     if len(lr) != 2:
         raise ValueError(f"lr should have 2 values instead of {len(lr)}")
+
+    if len(weight_decay) != 2:
+        raise ValueError(f"weight_decay should have 2 values instead of {len(weight_decay)}")
 
     if len(patiences) != 2:
         raise ValueError(f"patience should have 2 values instead of {len(patiences)}")
@@ -152,6 +156,7 @@ def train_model(
 
     training_kwargs = {
         "lr": lr,
+        "weight_decay": weight_decay,
         "patiences": patiences,
         "max_epochs": max_epochs,
         "coprog_iterations": coprog_iterations,
@@ -203,6 +208,7 @@ def train_model(
             feature_num=coprog_dataset.feature_num,
             sequence_len=sequence_len,
             lr=lr[0],
+            weight_decay=weight_decay[0],
             target_mean=targets_means[0],
             target_std=targets_stds[0],
         ),
@@ -213,6 +219,7 @@ def train_model(
             feature_num=coprog_dataset.feature_num,
             sequence_len=sequence_len,
             lr=lr[1],
+            weight_decay=weight_decay[1],
             target_mean=targets_means[1],
             target_std=targets_stds[1],
         ),

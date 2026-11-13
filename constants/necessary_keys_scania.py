@@ -2,7 +2,7 @@
 # DATASET
 # =======================================================
 from constants.necessary_shared_keys import SEED, VALIDATION_RATE, SEQUENCE_LEN, BATCH_SIZE, LEARNING_RATE, PATIENCES, \
-    MAX_EPOCHS, COPROG_ITERATIONS, COPROG_SUSPENSION_POOL_SIZE
+    MAX_EPOCHS, COPROG_ITERATIONS, COPROG_SUSPENSION_POOL_SIZE, WEIGHT_DECAY
 
 NECESSARY_DATASET_TRANSFORMER_LSTM_KEYS = [
     SEQUENCE_LEN,
@@ -178,8 +178,8 @@ NECESSARY_DYNAMIC_DEEPHIT_KEYS = [
 # =======================================================
 
 NECESSARY_TRAINING_CNN_KEYS = [
-    "lr",
-    "weight_decay",
+    LEARNING_RATE,
+    WEIGHT_DECAY,
     "patience",
     "max_epochs",
     "rul_target_standardization",
@@ -219,6 +219,7 @@ NECESSARY_TRAINING_DYNAMIC_DEEPHIT_KEYS = [
 
 NECESSARY_TRAINING_COPROG_KEYS = [
     LEARNING_RATE,
+    WEIGHT_DECAY,
     PATIENCES,
     MAX_EPOCHS,
     COPROG_ITERATIONS,

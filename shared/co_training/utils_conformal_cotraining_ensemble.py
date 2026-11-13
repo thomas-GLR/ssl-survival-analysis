@@ -114,6 +114,7 @@ def train_model(
     number_of_models = len(nn_modules)
 
     training_kwargs["lr"]=meta["lr"]
+    training_kwargs["weight_decay"]=meta["weight_decay"]
     training_kwargs["max_epochs"]=meta["max_epochs"]
     training_kwargs["patiences"]=meta["patiences"]
 
