@@ -23,6 +23,7 @@ from models.cotraining_gpu_pool import (
     FineTuneSpec,
     _TorchRegressorAdapter,
     _monotone_project,
+    mondrian_calibration_diagnostic,
     run_finetune_job,
 )
 
@@ -95,15 +96,10 @@ class CoTrainingEnsemble_v2:
             the legacy last-window-only behavior. Sequential path only (like every other opt-in
             lever); ``train()`` raises if combined with multi-GPU parallel (``gpu_ids`` with
             ``>= 2`` GPUs).
-        :param confidence_width_threshold: float | None
-            Optional cutoff on a unit's confidence-interval width (same scale/definition as
-            ``use_average_window_confidence`` above). A model's candidate whose width exceeds
-            this threshold is dropped entirely for that iteration -- it can never be selected
-            nor offered as a pseudo-label source to a peer, mirroring how the survival-bound
-            validity filter *drops* (rather than corrects) an invalid prediction. If every
-            model's candidate for a unit is dropped this way, the unit is simply absent from
-            this iteration's pool. ``None`` (default) disables the filter. Must be ``> 0`` when
-            given. Sequential path only.
+        :param confidence_width_threshold: Optional cutoff on median-normalized interval
+            width alone (not the residual-blended score). None disables the cutoff.
+            Non-finite raw widths are always excluded before computing medians. Uses mean
+            window width when use_average_window_confidence is enabled. Sequential path only.
         :param use_monotone_projection: bool
             When ``True``, each censored unit's per-window pseudo-labels are projected onto the
             closest non-increasing sequence (isotonic regression), optionally clipped up to the
@@ -933,8 +929,8 @@ class CoTrainingEnsemble_v2:
             pool_ids = shuffled_ids[:pool_size_iter]
 
             self._log(1, f"[CoTraining] --- Iteration {i + 1}/{iterations} | "
-                         f"remaining censored units: {len(remaining_suspension_ids)} | "
-                         f"pool: {pool_ids.tolist()} ---")
+                         f"remaining censored units: {len(remaining_suspension_ids)} ---")
+            self._log(2, f"[CoTraining] --- pool: {pool_ids.tolist()}")
 
             # Phase 1 — for each model j, build a conformal regressor (calibrated on the
             # validation set) and score every pooled censored unit by the width of the
@@ -963,6 +959,17 @@ class CoTrainingEnsemble_v2:
 
                 conformal_start = time.perf_counter()
                 wrapper = self._build_calibrated_regressor(hj, failure_data, failure_label, calib_data_eff, calib_label_eff)
+                if self.use_mondrian_categorizer:
+                    diagnostic = mondrian_calibration_diagnostic(
+                        wrapper.mc,
+                        wrapper.de,
+                        self._flatten(failure_data),
+                        self._flatten(calib_data_eff),
+                        self.confidence,
+                        self.use_cps,
+                        self.mondrian_no_bins
+                    )
+                    self._log(0, f"[CoTraining] Iteration {i+1} Model {j} Mondrian: {diagnostic}")
 
                 # Collect each unit's rows, its per-window pseudo-labels, its (optional) per-window
                 # lower bounds and the window(s) that feed the confidence interval: the last
@@ -1045,31 +1052,9 @@ class CoTrainingEnsemble_v2:
             # Widths are not comparable across models (each model calibrates its own conformal
             # regressor on its own accumulated data), so normalize each model's widths by its
             # own median before comparing them across models. When monotone projection is on,
-            # the median-normalized projection residual is blended in (see _selection_scores).
-            norm_width: dict[int, dict[int, float]] = self._selection_scores(all_preds)
-
-            unit_id_to_remove_per_model_index: dict[int, list[int]] = {}
-
-            if self.confidence_width_threshold is not None:
-                for model_index, score_per_unit_id in norm_width.items():
-                    unit_id_to_remove = [unit_id for unit_id, score in score_per_unit_id.items() if score > self.confidence_width_threshold]
-
-                    if len(unit_id_to_remove) > 0:
-                        for unit_id in unit_id_to_remove:
-                            score = score_per_unit_id[unit_id]
-
-                            self._log(2, f"[CoTraining]   Model {model_index}: unit {unit_id} excluded "
-                                         f"(width {score:.4f} exceeds confidence_width_threshold "
-                                         f"{self.confidence_width_threshold}).")
-
-                        unit_id_to_remove_per_model_index[model_index] = unit_id_to_remove
-
-                if len(unit_id_to_remove_per_model_index) > 0:
-                    for j in range(self.number_of_models):
-                        if j in unit_id_to_remove_per_model_index:
-                            for unit_id_to_remove in unit_id_to_remove_per_model_index[j]:
-                                all_preds[j].pop(unit_id_to_remove, None)
-                                norm_width[j].pop(unit_id_to_remove, None)
+            # the mean-normalized projection residual is blended in (see _selection_scores).
+            width_norm = self._filter_width_candidates(all_preds)
+            norm_width: dict[int, dict[int, float]] = self._selection_scores(all_preds, width_norm)
 
             # Log each model's full unit ranking (most confident first) so it can be checked
             # whether the models agree on which censored units are confident or not.
@@ -1084,7 +1069,6 @@ class CoTrainingEnsemble_v2:
             start = i % self.number_of_models
             # Pure width term (over the full pool) passed only so selection logging can show the
             # score before vs after the residual blend; None when projection is off.
-            width_norm = self._normalized_widths(all_preds) if self.use_monotone_projection else None
             selected_per_model, remaining_suspension_ids, added = self._assign_units_round_robin(
                 all_preds=all_preds,
                 norm_width=norm_width,
@@ -1417,7 +1401,7 @@ class CoTrainingEnsemble_v2:
             selected_id = picked[0].item()
             selected_per_model[k].append(picked)
             added += 1
-            self._log(1, f"[CoTraining]   Model {k}: selected unit {selected_id} ")
+            self._log(2, f"[CoTraining]   Model {k}: selected unit {selected_id} ")
 
             for j in range(self.number_of_models):
                 all_preds[j].pop(selected_id, None)
@@ -1848,6 +1832,9 @@ class CoTrainingEnsemble_v2:
                 xu_by_unit = {uid: xu for uid, xu in zip(unit_ids_int, unit_x)}
                 lb_by_unit = dict(zip(unit_ids_int, unit_lb)) if unit_lb is not None else {}
                 for j in range(n):
+                    diagnostic = results[score_jobs[j]].get("diagnostic")
+                    if self.use_mondrian_categorizer and diagnostic is not None:
+                        self._log(0, f"[CoTraining] Iteration {i+1} Model {j} Mondrian: {diagnostic}")
                     units = results[score_jobs[j]]["units"]
                     candidates = []
                     for unit_id_int, lu_p, lower, upper, width, residual, raw_lu_p in units:
@@ -1865,7 +1852,8 @@ class CoTrainingEnsemble_v2:
                         self._log(2, f"[CoTraining]   Model {j} candidate ranking "
                                      f"(most confident first): {ranking}")
 
-                norm_width = self._selection_scores(all_preds)
+                width_norm = self._filter_width_candidates(all_preds)
+                norm_width = self._selection_scores(all_preds, width_norm)
 
                 # Log each model's full unit ranking (most confident first) so it can be checked
                 # whether the models agree on which censored units are confident or not.
@@ -1875,7 +1863,6 @@ class CoTrainingEnsemble_v2:
                 n_add = max(1, round(add_ratio * len(pool_ids)))
                 start = i % n
                 # Pure width term (full pool) for selection logging only; None when projection off.
-                width_norm = self._normalized_widths(all_preds) if self.use_monotone_projection else None
                 selected_per_model, remaining_suspension_ids, added = self._assign_units_round_robin(
                     all_preds=all_preds,
                     norm_width=norm_width,
@@ -2355,6 +2342,26 @@ class CoTrainingEnsemble_v2:
                 outputs.append(model(chunk).to(x.device))
             return torch.cat(outputs, dim=0)
 
+    def _filter_width_candidates(self, all_preds: dict[int, OrderedDict]) -> dict[int, dict[int, float]]:
+        """Reject non-finite widths, then filter using fixed finite-pool normalized widths."""
+        for j, preds in all_preds.items():
+            for uid, entry in list(preds.items()):
+                if not np.isfinite(entry[5]):
+                    self._log(2, f"[CoTraining] Model {j}: unit {uid} excluded: "
+                                 f"non-finite raw width={entry[5]}")
+                    del preds[uid]
+        widths = self._normalized_widths(all_preds)
+        if self.confidence_width_threshold is not None:
+            for j, preds in all_preds.items():
+                for uid in list(preds):
+                    if widths[j][uid] > self.confidence_width_threshold:
+                        self._log(2, f"[CoTraining] Model {j}: unit {uid} excluded: "
+                                     f"raw width={preds[uid][5]}, normalized width={widths[j][uid]}, "
+                                     f"normalized cutoff={self.confidence_width_threshold}")
+                        del preds[uid]
+                        del widths[j][uid]
+        return widths
+
     def _normalized_widths(
             self,
             all_preds: dict[int, OrderedDict],
@@ -2400,7 +2407,7 @@ class CoTrainingEnsemble_v2:
         This makes it easy to eyeball whether the models agree on which units are confident
         (they rank the same unit ids first) or disagree. The score shown is the per-model
         selection score (:meth:`_selection_scores`): the median-normalized conformal interval
-        width — blended with the median-normalized projection residual when monotone projection
+        width — blended with the mean-normalized projection residual when monotone projection
         is on — so scores are on a comparable, model-relative scale. Smaller = more confident, so
         units are listed in ascending score order (most confident first).
 
@@ -2420,18 +2427,19 @@ class CoTrainingEnsemble_v2:
             scores_j = selection_scores.get(j, {})
             ranked = sorted(scores_j.items(), key=lambda kv: kv[1])
             formatted = ", ".join(f"{uid}: {score:.4f}" for uid, score in ranked)
-            self._log(1, f"[CoTraining]   Model {j} confidence ranking (most confident first): "
+            self._log(2, f"[CoTraining]   Model {j} confidence ranking (most confident first): "
                          f"[{formatted}]")
 
     def _selection_scores(
             self,
             all_preds: dict[int, OrderedDict],
+            width_norm: dict[int, dict[int, float]] | None = None,
     ) -> dict[int, dict[int, float]]:
         r"""Per-model, per-unit score used to rank censored units (smaller = better).
 
         The base score is the median-normalized conformal interval width
         (:meth:`_normalized_widths`). When monotone projection is enabled *and*
-        ``monotone_residual_weight`` is non-zero, the median-normalized projection residual is
+        ``monotone_residual_weight`` is non-zero, the mean-normalized projection residual is
         blended in:
 
             ``score = width_norm + monotone_residual_weight * residual_norm``
@@ -2457,7 +2465,8 @@ class CoTrainingEnsemble_v2:
         Returns:
             ``{model_index: {unit_id_int: score}}``.
         """
-        width_norm = self._normalized_widths(all_preds)
+        if width_norm is None:
+            width_norm = self._normalized_widths(all_preds)
         if not self.use_monotone_projection or self.monotone_residual_weight == 0:
             return width_norm
 
@@ -2575,7 +2584,7 @@ class CoTrainingEnsemble_v2:
         valid_contributors = [j for j in contributors if _label_is_valid(j)]
 
         if not valid_contributors:
-            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} NOT added for model "
+            self._log(2, f"[CoTraining]     Unit {best_unit_id_int} NOT added for model "
                          f"{model_index_to_exclude}: every peer model predicted a RUL below "
                          f"the survival lower bound (physically impossible).")
             return None
@@ -2603,8 +2612,8 @@ class CoTrainingEnsemble_v2:
                 weight_total += w_j
             lu_p = weighted_sum / weight_total
 
-        self._log(1, f"[CoTraining]     Unit {best_unit_id_int} selected for model {model_index_to_exclude} | "
-                     f"best avg normalized width = {best_avg_width:.4f}")
+        self._log(2, f"[CoTraining]     Unit {best_unit_id_int} selected for model {model_index_to_exclude} | "
+                     f"best avg selection score = {best_avg_width:.4f}")
 
         num_sequences = lu_p.view(-1).shape[0]
 
@@ -2615,39 +2624,39 @@ class CoTrainingEnsemble_v2:
             # already-popped ``all_preds`` and shift the medians, so "before"/"after" must not be
             # derived from the shrunk map).
             width_before = width_norm if width_norm is not None else self._normalized_widths(all_preds)
-            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} normalized width before -> after "
+            self._log(2, f"[CoTraining]     Unit {best_unit_id_int} width score before -> after "
                          f"residual blend (residual) per peer model:")
             for j in contributors:
-                self._log(1, f"[CoTraining]     \tmodel {j}: {width_before[j][best_unit_id_int]:.4f} -> "
+                self._log(2, f"[CoTraining]     \tmodel {j}: {width_before[j][best_unit_id_int]:.4f} -> "
                              f"{norm_width[j][best_unit_id_int]:.4f} "
                              f"(residual {all_preds[j][best_unit_id_int][6]:.4f})")
 
-            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} RUL before / after monotone projection "
+            self._log(2, f"[CoTraining]     Unit {best_unit_id_int} RUL before / after monotone projection "
                          f"per peer model ({num_sequences} sequences for this unit):")
             for j in contributors:
                 raw_list = [round(v, 4) for v in all_preds[j][best_unit_id_int][7].view(-1).tolist()]
                 proj_list = [round(v, 4) for v in all_preds[j][best_unit_id_int][2].view(-1).tolist()]
-                self._log(1, f"[CoTraining]     \tmodel {j} before: {raw_list}")
-                self._log(1, f"[CoTraining]     \tmodel {j} after : {proj_list}")
+                self._log(2, f"[CoTraining]     \tmodel {j} before: {raw_list}")
+                self._log(2, f"[CoTraining]     \tmodel {j} after : {proj_list}")
                 lb_j = all_preds[j][best_unit_id_int][8]
                 if lb_j is not None and not bool((all_preds[j][best_unit_id_int][7].view(-1) >= lb_j.view(-1)).all()):
-                    self._log(1, f"[CoTraining]     \tmodel {j} predicted a wrong RUL for unit "
+                    self._log(2, f"[CoTraining]     \tmodel {j} predicted a wrong RUL for unit "
                                  f"{best_unit_id_int} (raw prediction below survival lower bound "
                                  f"{[round(v, 4) for v in lb_j.view(-1).tolist()]}).")
         else:
-            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} width per peer model (raw / normalized):")
+            self._log(2, f"[CoTraining]     Unit {best_unit_id_int} width per peer model (raw / normalized):")
             for j in contributors:
-                self._log(1, f"[CoTraining]     \tmodel {j}: {all_preds[j][best_unit_id_int][5]:.4f} / "
+                self._log(2, f"[CoTraining]     \tmodel {j}: {all_preds[j][best_unit_id_int][5]:.4f} / "
                              f"{norm_width[j][best_unit_id_int]:.4f}")
 
-            self._log(1, f"[CoTraining]     Unit {best_unit_id_int} RUL predicted by all peer models "
+            self._log(2, f"[CoTraining]     Unit {best_unit_id_int} RUL predicted by all peer models "
                          f"({num_sequences} sequences for this unit):")
             for j in contributors:
-                self._log(1, f"[CoTraining]     \tmodel {j}: "
+                self._log(2, f"[CoTraining]     \tmodel {j}: "
                              f"{[round(v, 4) for v in all_preds[j][best_unit_id_int][2].view(-1).tolist()]}")
                 lb_j = all_preds[j][best_unit_id_int][8]
                 if lb_j is not None and not bool((all_preds[j][best_unit_id_int][2].view(-1) >= lb_j.view(-1)).all()):
-                    self._log(1, f"[CoTraining]     \tmodel {j} predicted a wrong RUL for unit "
+                    self._log(2, f"[CoTraining]     \tmodel {j} predicted a wrong RUL for unit "
                                  f"{best_unit_id_int} (prediction below survival lower bound "
                                  f"{[round(v, 4) for v in lb_j.view(-1).tolist()]}).")
 
@@ -2656,7 +2665,7 @@ class CoTrainingEnsemble_v2:
             if self.peer_weighted_pseudo_label
             else f"most confident valid peer, model {most_confident_j}"
         )
-        self._log(1, f"[CoTraining]     Unit {best_unit_id_int} chosen RUL ({num_sequences} sequences for this "
+        self._log(2, f"[CoTraining]     Unit {best_unit_id_int} chosen RUL ({num_sequences} sequences for this "
                      f"unit, from {label_source}): "
                      f"{[round(v, 4) for v in lu_p.view(-1).tolist()]}")
 

@@ -38,6 +38,7 @@ from typing import Any, Callable
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+from crepes.extras import MondrianCategorizer
 from lightning import LightningModule, Trainer
 from lightning.pytorch import callbacks
 from torch.utils.data import DataLoader, TensorDataset
@@ -102,6 +103,59 @@ def _flatten(x: torch.Tensor) -> np.ndarray:
     """Flatten ``(N, seq_len, n_features)`` features to a 2-D ``(N, seq_len*n_features)``
     float32 numpy array, as required by ``crepes`` and its kNN ``DifficultyEstimator``."""
     return x.reshape(x.shape[0], -1).detach().cpu().numpy().astype(np.float32)
+
+
+def mondrian_calibration_diagnostic(mc, de, train_x, calib_x, confidence, use_cps, no_bins):
+    """Describe finite-interval support without changing the active categorizer or RNG."""
+    def supported(n):
+        if use_cps:
+            low = (1-confidence)/2
+            high = confidence + (1-confidence)/2
+            return int(low*(n+1))-1 >= 0 and int(np.ceil(high*(n+1)))-1 < n
+        return int((1-confidence)*(n+1))-1 >= 0
+
+    minimum = max(1, int(np.ceil((2 if use_cps else 1)/(1-confidence)))-1)
+    while not supported(minimum):
+        minimum += 1
+    while minimum > 1 and supported(minimum-1):
+        minimum -= 1
+    def counts_for(categorizer):
+        labels = categorizer.apply(calib_x)
+        return {b: int(np.sum(labels == b))
+                for b in range(len(categorizer.bin_thresholds)-1)}
+
+    state = np.random.get_state()
+    try:
+        counts = counts_for(mc)
+        deficient = {b: n for b, n in counts.items() if not supported(n)}
+        message = (f"{'INSUFFICIENT' if deficient else 'OK'} | confidence={confidence} "
+                   f"cps={use_cps} bins={no_bins} | calibration windows={len(calib_x)} "
+                   f"required per bin={minimum} | counts={counts}")
+        if deficient:
+            message += f" | deficient bins (count, deficit)={ {b: (n, minimum-n) for b,n in deficient.items()} }"
+            recommendation = None
+            for bins in range(no_bins-1, 1, -1):
+                trial = MondrianCategorizer()
+                trial.fit(X=train_x, de=de, no_bins=bins)
+                if all(supported(n) for n in counts_for(trial).values()):
+                    recommendation = bins
+                    break
+            message += (f" | largest verified smaller bin count={recommendation}"
+                        if recommendation is not None else
+                        " | no supported smaller Mondrian bin count >=2 found")
+            message += f" | theoretical minimum total={no_bins*minimum} windows (necessary, not sufficient)"
+            smallest = min(counts.values(), default=0)
+            if smallest:
+                estimate = int(np.ceil(len(calib_x)*minimum/smallest))
+                message += (f" | estimated calibration size={estimate} windows "
+                            f"(+{estimate-len(calib_x)} versus current {len(calib_x)}), "
+                            "assuming unchanged bin proportions")
+            else:
+                message += " | calibration-size estimate unavailable: an empty bin has no observed proportion"
+            message += " | guidance applies only to this model and iteration; settings unchanged"
+        return message
+    finally:
+        np.random.set_state(state)
 
 
 def _monotone_project(
@@ -537,6 +591,10 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
         cps=spec.use_cps,
     )
 
+    diagnostic = (mondrian_calibration_diagnostic(
+        mc, de, _flatten(train_x), _flatten(spec.val_x), spec.confidence,
+        spec.use_cps, spec.mondrian_no_bins) if mc is not None else None)
+
     # Per-unit pseudo-labels + last windows.
     lu_ps: list[torch.Tensor] = []
     last_windows: list[torch.Tensor] = []
@@ -560,7 +618,7 @@ def run_conformal_score_job(spec: ConformalScoreSpec) -> dict[str, Any]:
         # raw_label (lu_p) is kept alongside the (possibly projected) label so the selection
         # step can log predictions before vs after projection.
         units.append((unit_id, label, lower, upper, upper - lower, residual, lu_p))
-    return {"units": units, "elapsed_seconds": time.perf_counter() - job_start}
+    return {"units": units, "diagnostic": diagnostic, "elapsed_seconds": time.perf_counter() - job_start}
 
 
 def _worker_loop(
