@@ -565,7 +565,7 @@ def train_model_v2(
 
     cotraining_ensemble = CoTrainingEnsembleV2(
         models=models,
-        verbose=2,
+        verbose=1,
         confidence=confidence,
     )
 
