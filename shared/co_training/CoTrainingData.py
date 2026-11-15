@@ -19,3 +19,5 @@ class CoTrainingData:
     val_features: torch.Tensor
     val_targets: torch.Tensor
     scania_data_module: ScaniaDataModule | None = field(repr=False, compare=False)
+
+    censored_time_steps: torch.Tensor | None = field(default=None, kw_only=True)

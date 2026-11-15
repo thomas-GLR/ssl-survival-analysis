@@ -119,8 +119,11 @@ def train_model(
     print("Loading datasets with the following parameters :")
     print(dataset_params)
 
+    use_monotone_projection = training_params.get("use_monotone_projection", False)
+
     coprog_dataset: CoTrainingData = _get_coprog_dataset_for_training(
         dataset_version=dataset_version,
+        use_monotone_projection=use_monotone_projection,
         dataset_params=dataset_params,
         dataset_root=dataset_root,
         sub_dataset=sub_dataset,
@@ -161,6 +164,7 @@ def train_model(
         "max_epochs": max_epochs,
         "coprog_iterations": coprog_iterations,
         "coprog_suspension_pool_size": coprog_suspension_pool_size,
+        "use_monotone_projection": use_monotone_projection,
         "rul_target_standardization": rul_target_standardization,
         "target_mean": targets_means,
         "target_std": targets_stds,
@@ -193,6 +197,7 @@ def train_model(
         second_model=second_model_module,
         dataset_version=dataset_version,
         verbose=1,
+        use_monotone_projection=use_monotone_projection,
     )
 
     # Builder-style setup: Coprog rebuilds a fresh module (and its Trainer) for every
@@ -273,6 +278,7 @@ def train_model(
         failure_label=coprog_dataset.targets_uncensored,
         suspension_data=coprog_dataset.features_censored,
         suspension_ids=coprog_dataset.ids_censored,
+        suspension_time_steps=coprog_dataset.censored_time_steps,
         iterations=coprog_iterations,
         suspension_pool_size=coprog_suspension_pool_size,
         val_data=coprog_dataset.val_features,
@@ -418,6 +424,7 @@ def _get_coprog_dataset_for_training(
         sub_dataset: str | None = None,
         percent_of_censored_data: float | None = None,
         percent_of_broken_data: float | None = None,
+        use_monotone_projection: bool = False,
 ) -> CoTrainingData:
     """
     Get the CoTrainingData data for Coprog depending on the dataset version.
@@ -475,12 +482,20 @@ def _get_coprog_dataset_for_training(
         case _:
             raise ValueError(f"{dataset_version} is not a valid dataset version")
 
+    censored_time_steps = None
+    if use_monotone_projection:
+        if dataset_version == DatasetVersion.CMAPSS:
+            _, _, censored_time_steps = train_dataset.get_censored_time_steps()
+        else:
+            _, _, censored_time_steps = scania_data_module.get_censored_time_steps("train")
+
     return CoTrainingData(
         feature_num=feature_num,
         features_uncensored=features_uncensored,
         targets_uncensored=targets_uncensored,
         features_censored=features_censored,
         ids_censored=ids_censored,
+        censored_time_steps=censored_time_steps,
         test_features=features_test,
         test_targets=targets_test,
         val_features=val_features,
@@ -513,8 +528,8 @@ def _extract_model_coprog_params(
         necessary_keys_dataset = necessary_keys_scania
 
     match model_version:
-        case ModelVersion.CNN:
-            necessary_keys = necessary_keys_dataset.NECESSARY_CNN_KEYS
+        case ModelVersion.CNN | ModelVersion.RULCNN | ModelVersion.MLP | ModelVersion.BILSTM_ATTENTION:
+            necessary_keys = necessary_keys_scania.NECESSARY_CNN_KEYS
         case ModelVersion.LSTM:
             necessary_keys = necessary_keys_dataset.NECESSARY_LSTM_KEYS
         case ModelVersion.TRANSFORMER_FEATURES:

@@ -16,6 +16,7 @@ from models.coprog_gpu_pool import (
     run_training_job,
 )
 from shared.enums import DatasetVersion
+from models.cotraining_gpu_pool import _monotone_project, _time_gap_sample_weight
 
 
 class Coprog:
@@ -54,6 +55,7 @@ class Coprog:
             second_model: nn.Module,
             dataset_version: DatasetVersion,
             verbose: int = 0,
+            use_monotone_projection: bool = False,
     ):
         # Keep the originals so external code can still reference them.
         self.first_model = first_model
@@ -64,6 +66,7 @@ class Coprog:
         self.w1 = None
         self.w2 = None
 
+        self.use_monotone_projection = use_monotone_projection
         self.verbose = verbose
 
         # Set through setup_training_legacy()
@@ -269,6 +272,7 @@ class Coprog:
             weight_mode: str = "min",
             metrics_file: str | None = None,
             pretrained_models: list[LightningModule] | None = None,
+            suspension_time_steps: torch.Tensor | None = None,
     ) -> None:
         """
         Full COPROG training procedure (Algorithm 1 in the paper).
@@ -305,6 +309,11 @@ class Coprog:
                                     It enables to have a fair comparison between algorithms
         """
         self._check_if_training_is_possible()
+        if self.use_monotone_projection:
+            if suspension_time_steps is None or suspension_time_steps.numel() != len(suspension_data):
+                raise ValueError("use_monotone_projection requires one suspension_time_steps value per suspension row.")
+        self._suspension_time_steps = suspension_time_steps
+
 
         if (val_data is None) != (val_label is None):
             raise ValueError("val_data and val_label must both be provided or both be None.")
@@ -481,7 +490,7 @@ class Coprog:
                     xu = suspension_data[mask]  # Shape: (N_u, *dims)
 
                     # Line 7 – pseudo-label from current model j
-                    lu_p = self._predict(hj, xu)  # L^P_u
+                    lu_p = self._project_pseudo_labels(self._predict(hj, xu), mask)  # L^P_u
 
                     # Line 8 – train a temporary model h'j from scratch on the augmented set
                     x_aug = torch.cat([xj, xu], dim=0)
@@ -732,7 +741,7 @@ class Coprog:
                     for k, unit_id in enumerate(pool_ids):
                         mask = (suspension_ids == unit_id)
                         xu = suspension_data[mask].detach().cpu()
-                        lu_p = self._predict(h[j], xu).detach().cpu()
+                        lu_p = self._project_pseudo_labels(self._predict(h[j], xu), mask).detach().cpu()
                         gpu_id = subsets[j][k % len(subsets[j])]
                         job_id = pool.submit_candidate(gpu_id, ctx_ids[j], xu, lu_p)
                         candidate_info[j].append(
@@ -1034,6 +1043,20 @@ class Coprog:
             self._log(2, f"[Coprog]     No best model find the model with last epoch is used")
 
         return model
+
+    def _project_pseudo_labels(self, predictions: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Apply time-weighted non-increasing isotonic regression within one unit.
+
+        Suspension rows must be ordered oldest to newest within each unit.
+        Public predictions and candidate scores are not projected.
+        """
+        if not self.use_monotone_projection:
+            return predictions
+        times = self._suspension_time_steps
+        unit_times = times.reshape(-1)[mask.to(times.device)]
+        projected, _ = _monotone_project(
+            predictions, sample_weight=_time_gap_sample_weight(unit_times))
+        return projected.to(device=predictions.device, dtype=predictions.dtype)
 
     def _predict(self, model: LightningModule, x: torch.Tensor) -> torch.Tensor:
         """
