@@ -23,6 +23,7 @@ from models.cotraining_gpu_pool import (
     FineTuneSpec,
     _TorchRegressorAdapter,
     _monotone_project,
+    _time_gap_sample_weight,
     mondrian_calibration_diagnostic,
     run_finetune_job,
 )
@@ -992,7 +993,7 @@ class CoTrainingEnsemble_v2:
                     # _voting_censored_data_selection needs it regardless of projection.
                     lb_us.append(suspension_lower_bounds[mask] if suspension_lower_bounds is not None else None)
                     sw_us.append(
-                        self._time_gap_sample_weight(suspension_time_steps[mask])
+                        _time_gap_sample_weight(suspension_time_steps[mask])
                         if time_weight else None)
                     conf_windows.append(xu if self.use_average_window_confidence else xu[-1:])
 
@@ -1464,38 +1465,6 @@ class CoTrainingEnsemble_v2:
         """
         idx = torch.randint(0, len(x), (len(x),))
         return x[idx], y[idx]
-
-    @staticmethod
-    def _time_gap_sample_weight(time_steps: torch.Tensor) -> np.ndarray:
-        """Per-window isotonic ``sample_weight`` proportional to the local time gap ``Delta t``.
-
-        Uses the *central* local gap: for an interior window ``i`` the weight is
-        ``(t_{i+1} - t_{i-1}) / 2``; the two endpoints use their one-sided gap. A larger gap means
-        the window is more temporally isolated, so it is treated as more independent (weighted up)
-        in the pooled-adjacent-violators fit. Non-positive gaps (duplicate/unordered time steps)
-        are floored to a small positive value so every window keeps a strictly positive weight.
-
-        Args:
-            time_steps: Per-window time steps for a single unit, shape ``(m,)`` or ``(m, 1)``,
-                ordered oldest -> newest.
-
-        Returns:
-            A ``float64`` array of length ``m`` of strictly positive weights.
-        """
-        t = time_steps.detach().cpu().reshape(-1).numpy().astype(np.float64)
-        m = t.shape[0]
-        if m == 1:
-            return np.ones(1, dtype=np.float64)
-        w = np.empty(m, dtype=np.float64)
-        w[0] = t[1] - t[0]
-        w[-1] = t[-1] - t[-2]
-        if m > 2:
-            w[1:-1] = (t[2:] - t[:-2]) / 2.0
-        # Guard against non-positive gaps (duplicate/unordered time steps) with a small floor
-        # relative to the mean absolute gap so no window collapses to zero weight.
-        positive = w[w > 0]
-        floor = (positive.mean() * 1e-6) if positive.size > 0 else 1e-6
-        return np.maximum(w, floor)
 
     # ------------------------------------------------------------------ #
     # Training dispatcher + builder-style spec helpers
