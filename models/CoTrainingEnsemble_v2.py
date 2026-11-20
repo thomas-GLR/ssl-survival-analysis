@@ -71,6 +71,7 @@ class CoTrainingEnsemble_v2:
             mondrian_no_bins: int = 10,
             use_cps: bool = False,
             difficulty_estimator_k: int = 25,
+            normalize_confidence_scores: bool = True,
     ):
         """
         :param models: list[nn.Module]
@@ -97,8 +98,9 @@ class CoTrainingEnsemble_v2:
             the legacy last-window-only behavior. Sequential path only (like every other opt-in
             lever); ``train()`` raises if combined with multi-GPU parallel (``gpu_ids`` with
             ``>= 2`` GPUs).
-        :param confidence_width_threshold: Optional cutoff on median-normalized interval
-            width alone (not the residual-blended score). None disables the cutoff.
+        :param confidence_width_threshold: Optional cutoff on interval
+            width in the scale selected by ``normalize_confidence_scores`` (normalized or raw).
+            Applies to width alone (not the residual-blended score). None disables the cutoff.
             Non-finite raw widths are always excluded before computing medians. Uses mean
             window width when use_average_window_confidence is enabled. Sequential path only.
         :param use_monotone_projection: bool
@@ -240,6 +242,11 @@ class CoTrainingEnsemble_v2:
             compute each instance's normalized difficulty score. ``DifficultyEstimator`` is
             always used (never optional) regardless of the other conformal-calibration flags
             above. Must be a positive integer. Defaults to ``25`` (``crepes``'s own default).
+        :param normalize_confidence_scores: bool
+            When True (default), divide each model's interval widths by its median width
+            and projection residuals by its mean residual. When False, use raw widths and
+            residuals for ranking, peer weighting, and confidence_width_threshold. This
+            does not change conformal calibration or the monotone projection itself.
         """
         if weights is not None and len(models) != len(weights):
             raise ValueError("The number of weights must be the same as the number of models.")
@@ -293,6 +300,7 @@ class CoTrainingEnsemble_v2:
         self._inference_batch_size = inference_batch_size
         self.use_average_window_confidence = use_average_window_confidence
         self.confidence_width_threshold = confidence_width_threshold
+        self.normalize_confidence_scores = normalize_confidence_scores
         self.use_monotone_projection = use_monotone_projection
         self.monotone_residual_weight = monotone_residual_weight
         self.disable_isotonic_regression = disable_isotonic_regression
@@ -2312,7 +2320,7 @@ class CoTrainingEnsemble_v2:
             return torch.cat(outputs, dim=0)
 
     def _filter_width_candidates(self, all_preds: dict[int, OrderedDict]) -> dict[int, dict[int, float]]:
-        """Reject non-finite widths, then filter using fixed finite-pool normalized widths."""
+        """Reject non-finite widths, then filter using fixed finite-pool width scores."""
         for j, preds in all_preds.items():
             for uid, entry in list(preds.items()):
                 if not np.isfinite(entry[5]):
@@ -2325,8 +2333,9 @@ class CoTrainingEnsemble_v2:
                 for uid in list(preds):
                     if widths[j][uid] > self.confidence_width_threshold:
                         self._log(2, f"[CoTraining] Model {j}: unit {uid} excluded: "
-                                     f"raw width={preds[uid][5]}, normalized width={widths[j][uid]}, "
-                                     f"normalized cutoff={self.confidence_width_threshold}")
+                                     f"raw width={preds[uid][5]}, width score={widths[j][uid]}, "
+                                     f"cutoff={self.confidence_width_threshold}, "
+                                     f"normalized={self.normalize_confidence_scores}")
                         del preds[uid]
                         del widths[j][uid]
         return widths
@@ -2335,7 +2344,7 @@ class CoTrainingEnsemble_v2:
             self,
             all_preds: dict[int, OrderedDict],
     ) -> dict[int, dict[int, float]]:
-        r"""Normalize each model's interval widths by that model's median width.
+        r"""Return raw widths or normalize by each model's median width, per configuration.
 
         Each model calibrates its own conformal regressor, so raw widths live on different
         scales and cannot be compared across models directly. Dividing every model's widths by
@@ -2355,6 +2364,9 @@ class CoTrainingEnsemble_v2:
         """
         norm: dict[int, dict[int, float]] = {}
         for j, preds in all_preds.items():
+            if not self.normalize_confidence_scores:
+                norm[j] = {uid: tup[5] for uid, tup in preds.items()}
+                continue
             widths = [tup[5] for tup in preds.values()]
             if not widths:
                 norm[j] = {}
@@ -2391,7 +2403,7 @@ class CoTrainingEnsemble_v2:
                 (the output of :meth:`_selection_scores`).
         """
         self._log(1, "[CoTraining]   Confidence ranking per model (unit_id: selection_score, "
-                     "smaller = more confident):")
+                     f"smaller = more confident, normalized={self.normalize_confidence_scores}):")
         for j in range(self.number_of_models):
             scores_j = selection_scores.get(j, {})
             ranked = sorted(scores_j.items(), key=lambda kv: kv[1])
@@ -2405,6 +2417,8 @@ class CoTrainingEnsemble_v2:
             width_norm: dict[int, dict[int, float]] | None = None,
     ) -> dict[int, dict[int, float]]:
         r"""Per-model, per-unit score used to rank censored units (smaller = better).
+
+        With normalize_confidence_scores=False, both terms below use their raw values.
 
         The base score is the median-normalized conformal interval width
         (:meth:`_normalized_widths`). When monotone projection is enabled *and*
@@ -2447,7 +2461,7 @@ class CoTrainingEnsemble_v2:
             residual_values = [tup[6] for tup in preds.values()]
             mean = float(np.mean(residual_values))
             for uid, tup in preds.items():
-                res_norm = tup[6] / mean if mean > 0 else 0.0
+                res_norm = (tup[6] / mean if mean > 0 else 0.0) if self.normalize_confidence_scores else tup[6]
                 scores[j][uid] = width_norm[j][uid] + self.monotone_residual_weight * res_norm
         return scores
 
@@ -2613,7 +2627,8 @@ class CoTrainingEnsemble_v2:
                                  f"{best_unit_id_int} (raw prediction below survival lower bound "
                                  f"{[round(v, 4) for v in lb_j.view(-1).tolist()]}).")
         else:
-            self._log(2, f"[CoTraining]     Unit {best_unit_id_int} width per peer model (raw / normalized):")
+            self._log(2, f"[CoTraining]     Unit {best_unit_id_int} width per peer model (raw / score, "
+                         f"normalized={self.normalize_confidence_scores}):")
             for j in contributors:
                 self._log(2, f"[CoTraining]     \tmodel {j}: {all_preds[j][best_unit_id_int][5]:.4f} / "
                              f"{norm_width[j][best_unit_id_int]:.4f}")
