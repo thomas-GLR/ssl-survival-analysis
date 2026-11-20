@@ -72,6 +72,7 @@ class CoTrainingEnsemble_v2:
             use_cps: bool = False,
             difficulty_estimator_k: int = 25,
             normalize_confidence_scores: bool = True,
+            temporary_strict_pseudo_label_filter: bool = False,
     ):
         """
         :param models: list[nn.Module]
@@ -242,6 +243,9 @@ class CoTrainingEnsemble_v2:
             compute each instance's normalized difficulty score. ``DifficultyEstimator`` is
             always used (never optional) regardless of the other conformal-calibration flags
             above. Must be a positive integer. Defaults to ``25`` (``crepes``'s own default).
+        :param temporary_strict_pseudo_label_filter: bool
+            Temporary experiment: remove labels below survival lower bounds before scoring
+            and require at least two valid peers per receiver and candidate. Defaults to False.
         :param normalize_confidence_scores: bool
             When True (default), divide each model's interval widths by its median width
             and projection residuals by its mean residual. When False, use raw widths and
@@ -301,6 +305,7 @@ class CoTrainingEnsemble_v2:
         self.use_average_window_confidence = use_average_window_confidence
         self.confidence_width_threshold = confidence_width_threshold
         self.normalize_confidence_scores = normalize_confidence_scores
+        self.temporary_strict_pseudo_label_filter = temporary_strict_pseudo_label_filter
         self.use_monotone_projection = use_monotone_projection
         self.monotone_residual_weight = monotone_residual_weight
         self.disable_isotonic_regression = disable_isotonic_regression
@@ -1399,6 +1404,7 @@ class CoTrainingEnsemble_v2:
                 norm_width=norm_width,
                 model_index_to_exclude=k,
                 width_norm=width_norm,
+                temporary_strict_pseudo_label_filter=self.temporary_strict_pseudo_label_filter,
             )
 
             if picked is None:
@@ -2319,10 +2325,21 @@ class CoTrainingEnsemble_v2:
                 outputs.append(model(chunk).to(x.device))
             return torch.cat(outputs, dim=0)
 
+    @staticmethod
+    def _pseudo_label_is_valid(entry: tuple) -> bool:
+        """Check the injected label against every available survival lower bound."""
+        return entry[8] is None or bool((entry[2].view(-1) >= entry[8].view(-1)).all())
+
     def _filter_width_candidates(self, all_preds: dict[int, OrderedDict]) -> dict[int, dict[int, float]]:
         """Reject non-finite widths, then filter using fixed finite-pool width scores."""
         for j, preds in all_preds.items():
             for uid, entry in list(preds.items()):
+                # Temporary experiment: filter before computing any score normalizers.
+                if self.temporary_strict_pseudo_label_filter and not self._pseudo_label_is_valid(entry):
+                    self._log(2, f"[CoTraining] Model {j}: unit {uid} excluded: "
+                                 "pseudo-label below survival lower bound (temporary filter)")
+                    del preds[uid]
+                    continue
                 if not np.isfinite(entry[5]):
                     self._log(2, f"[CoTraining] Model {j}: unit {uid} excluded: "
                                  f"non-finite raw width={entry[5]}")
@@ -2471,8 +2488,12 @@ class CoTrainingEnsemble_v2:
             norm_width: dict[int, dict[int, float]],
             model_index_to_exclude: int,
             width_norm: dict[int, dict[int, float]] | None = None,
+            temporary_strict_pseudo_label_filter: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None] | None:
         r"""Select the censored unit the *other* models are most confident about.
+
+        Temporary strict filtering requires two valid peers, excluding the receiver.
+        Candidates without that support are skipped before choosing the best score.
 
         For each candidate unit u, the average **normalized** interval width (see
         ``_normalized_widths``) is computed over all models j ≠ k. Normalizing first matters
@@ -2534,7 +2555,13 @@ class CoTrainingEnsemble_v2:
                 norm_width[j][unit_id_int]
                 for j in all_preds
                 if j != model_index_to_exclude and unit_id_int in all_preds[j]
+                and (not temporary_strict_pseudo_label_filter
+                     or self._pseudo_label_is_valid(all_preds[j][unit_id_int]))
             ]
+            if temporary_strict_pseudo_label_filter and len(widths) < 2:
+                self._log(2, f"[CoTraining] Unit {unit_id_int} skipped for model "
+                             f"{model_index_to_exclude}: fewer than two valid peers (temporary filter)")
+                continue
             if not widths:
                 continue
             avg_width = sum(widths) / len(widths)
@@ -2549,6 +2576,8 @@ class CoTrainingEnsemble_v2:
         contributors = [
             j for j in all_preds
             if j != model_index_to_exclude and best_unit_id_int in all_preds[j]
+            and (not temporary_strict_pseudo_label_filter
+                 or self._pseudo_label_is_valid(all_preds[j][best_unit_id_int]))
         ]
 
         def _label_is_valid(j: int) -> bool:
