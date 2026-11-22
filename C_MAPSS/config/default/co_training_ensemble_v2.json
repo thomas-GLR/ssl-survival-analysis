@@ -23,51 +23,54 @@
         {
           "cnn": {
             "model_params": {},
-            "lr": 0.001,
-            "max_epochs": 10,
-            "patience": 50,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 50,
+            "patience": 500,
             "rul_target_standardization": false
           }
         },
         {
           "lstm": {
             "model_params": {
-              "hidden_dim": 64,
-              "lstm_num_layers": 2,
-              "lstm_dropout": 0.2,
-              "fc_layer_dim": 256,
-              "fc_dropout": 0.2
+              "hidden_dim": 128,
+              "lstm_num_layers": 1,
+              "lstm_dropout": 0.3,
+              "fc_layer_dim": 32,
+              "fc_dropout": 0.4
             },
-            "lr": 0.002,
-            "max_epochs": 10,
-            "patience": 50,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 50,
+            "patience": 500,
             "rul_target_standardization": false
           }
         },
         {
           "transformer_features": {
             "model_params": {
-              "transformer_encoder_head_num": 4,
+              "transformer_encoder_head_num": 8,
               "transformer_num_layer": 2,
-              "fc_layer_dim": 256,
-              "fc_dropout": 0.3
+              "fc_layer_dim": 32,
+              "fc_dropout": 0.4
             },
-            "lr": 0.0004,
-            "max_epochs": 10,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 500,
             "patience": 50,
-            "rul_target_standardization": true
+            "rul_target_standardization": false
           }
         }
       ]
     },
     "training_params": {
-      "iterations": 5,
+      "iterations": 10,
       "suspension_pool_size": 0.35,
-      "add_ratio": 0.10,
+      "add_ratio": 0.1,
       "confidence": 0.95,
       "inference_batch_size": 1024,
       "use_average_window_confidence": true,
-      "confidence_width_threshold": null,
+      "confidence_width_threshold": 80,
       "use_monotone_projection": true,
       "monotone_residual_weight": 1.0,
       "disable_isotonic_regression": false,
@@ -78,13 +81,13 @@
       "fine_tune_from_initial_model": false,
       "peer_weighted_pseudo_label": false,
       "bagging_failure_data": false,
-      "keep_best_model_mode": "val_rmse",
+      "keep_best_model_mode": null,
       "isotonic_time_weighting": true,
       "computing_weight_mode": "val_rmse",
       "use_cotraining_ensemble_survival_loss_function": true,
       "cotraining_survival_loss_lambda": 0.7,
       "use_mondrian_categorizer": true,
-      "mondrian_no_bins": 10,
+      "mondrian_no_bins": 2,
       "use_cps": true,
       "difficulty_estimator_k": 25
     }
@@ -113,51 +116,54 @@
         {
           "cnn": {
             "model_params": {},
-            "lr": 0.001,
-            "max_epochs": 10,
-            "patience": 50,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 50,
+            "patience": 500,
             "rul_target_standardization": false
           }
         },
         {
           "lstm": {
             "model_params": {
-              "hidden_dim": 64,
-              "lstm_num_layers": 2,
-              "lstm_dropout": 0.2,
-              "fc_layer_dim": 256,
-              "fc_dropout": 0.2
+              "hidden_dim": 128,
+              "lstm_num_layers": 1,
+              "lstm_dropout": 0.3,
+              "fc_layer_dim": 32,
+              "fc_dropout": 0.4
             },
-            "lr": 0.002,
-            "max_epochs": 10,
-            "patience": 50,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 50,
+            "patience": 500,
             "rul_target_standardization": false
           }
         },
         {
           "transformer_features": {
             "model_params": {
-              "transformer_encoder_head_num": 4,
+              "transformer_encoder_head_num": 8,
               "transformer_num_layer": 2,
-              "fc_layer_dim": 256,
-              "fc_dropout": 0.3
+              "fc_layer_dim": 32,
+              "fc_dropout": 0.4
             },
-            "lr": 0.0004,
-            "max_epochs": 10,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 500,
             "patience": 50,
-            "rul_target_standardization": true
+            "rul_target_standardization": false
           }
         }
       ]
     },
     "training_params": {
-      "iterations": 5,
+      "iterations": 10,
       "suspension_pool_size": 0.35,
-      "add_ratio": 0.10,
+      "add_ratio": 0.1,
       "confidence": 0.95,
       "inference_batch_size": 1024,
       "use_average_window_confidence": true,
-      "confidence_width_threshold": null,
+      "confidence_width_threshold": 80,
       "use_monotone_projection": true,
       "monotone_residual_weight": 1.0,
       "disable_isotonic_regression": false,
@@ -168,13 +174,13 @@
       "fine_tune_from_initial_model": false,
       "peer_weighted_pseudo_label": false,
       "bagging_failure_data": false,
-      "keep_best_model_mode": "val_rmse",
+      "keep_best_model_mode": null,
       "isotonic_time_weighting": true,
       "computing_weight_mode": "val_rmse",
       "use_cotraining_ensemble_survival_loss_function": true,
       "cotraining_survival_loss_lambda": 0.7,
       "use_mondrian_categorizer": true,
-      "mondrian_no_bins": 10,
+      "mondrian_no_bins": 2,
       "use_cps": true,
       "difficulty_estimator_k": 25
     }
@@ -203,51 +209,54 @@
         {
           "cnn": {
             "model_params": {},
-            "lr": 0.001,
-            "max_epochs": 10,
-            "patience": 50,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 50,
+            "patience": 500,
             "rul_target_standardization": false
           }
         },
         {
           "lstm": {
             "model_params": {
-              "hidden_dim": 64,
-              "lstm_num_layers": 2,
-              "lstm_dropout": 0.2,
-              "fc_layer_dim": 256,
-              "fc_dropout": 0.2
+              "hidden_dim": 128,
+              "lstm_num_layers": 1,
+              "lstm_dropout": 0.3,
+              "fc_layer_dim": 32,
+              "fc_dropout": 0.4
             },
-            "lr": 0.002,
-            "max_epochs": 10,
-            "patience": 50,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 50,
+            "patience": 500,
             "rul_target_standardization": false
           }
         },
         {
           "transformer_features": {
             "model_params": {
-              "transformer_encoder_head_num": 4,
+              "transformer_encoder_head_num": 8,
               "transformer_num_layer": 2,
-              "fc_layer_dim": 256,
-              "fc_dropout": 0.3
+              "fc_layer_dim": 32,
+              "fc_dropout": 0.4
             },
-            "lr": 0.0004,
-            "max_epochs": 10,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 500,
             "patience": 50,
-            "rul_target_standardization": true
+            "rul_target_standardization": false
           }
         }
       ]
     },
     "training_params": {
-      "iterations": 5,
+      "iterations": 10,
       "suspension_pool_size": 0.35,
-      "add_ratio": 0.10,
+      "add_ratio": 0.1,
       "confidence": 0.95,
       "inference_batch_size": 1024,
       "use_average_window_confidence": true,
-      "confidence_width_threshold": null,
+      "confidence_width_threshold": 80,
       "use_monotone_projection": true,
       "monotone_residual_weight": 1.0,
       "disable_isotonic_regression": false,
@@ -258,13 +267,13 @@
       "fine_tune_from_initial_model": false,
       "peer_weighted_pseudo_label": false,
       "bagging_failure_data": false,
-      "keep_best_model_mode": "val_rmse",
+      "keep_best_model_mode": null,
       "isotonic_time_weighting": true,
       "computing_weight_mode": "val_rmse",
       "use_cotraining_ensemble_survival_loss_function": true,
       "cotraining_survival_loss_lambda": 0.7,
       "use_mondrian_categorizer": true,
-      "mondrian_no_bins": 10,
+      "mondrian_no_bins": 2,
       "use_cps": true,
       "difficulty_estimator_k": 25
     }
@@ -293,51 +302,54 @@
         {
           "cnn": {
             "model_params": {},
-            "lr": 0.001,
-            "max_epochs": 10,
-            "patience": 50,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 50,
+            "patience": 500,
             "rul_target_standardization": false
           }
         },
         {
           "lstm": {
             "model_params": {
-              "hidden_dim": 64,
-              "lstm_num_layers": 2,
-              "lstm_dropout": 0.2,
-              "fc_layer_dim": 256,
-              "fc_dropout": 0.2
+              "hidden_dim": 128,
+              "lstm_num_layers": 1,
+              "lstm_dropout": 0.3,
+              "fc_layer_dim": 32,
+              "fc_dropout": 0.4
             },
-            "lr": 0.002,
-            "max_epochs": 10,
-            "patience": 50,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 50,
+            "patience": 500,
             "rul_target_standardization": false
           }
         },
         {
           "transformer_features": {
             "model_params": {
-              "transformer_encoder_head_num": 4,
+              "transformer_encoder_head_num": 8,
               "transformer_num_layer": 2,
-              "fc_layer_dim": 256,
-              "fc_dropout": 0.3
+              "fc_layer_dim": 32,
+              "fc_dropout": 0.4
             },
-            "lr": 0.0004,
-            "max_epochs": 10,
+            "lr": 0.0002,
+            "weight_decay": 0,
+            "max_epochs": 500,
             "patience": 50,
-            "rul_target_standardization": true
+            "rul_target_standardization": false
           }
         }
       ]
     },
     "training_params": {
-      "iterations": 5,
+      "iterations": 10,
       "suspension_pool_size": 0.35,
-      "add_ratio": 0.10,
+      "add_ratio": 0.1,
       "confidence": 0.95,
       "inference_batch_size": 1024,
       "use_average_window_confidence": true,
-      "confidence_width_threshold": null,
+      "confidence_width_threshold": 80,
       "use_monotone_projection": true,
       "monotone_residual_weight": 1.0,
       "disable_isotonic_regression": false,
@@ -348,13 +360,13 @@
       "fine_tune_from_initial_model": false,
       "peer_weighted_pseudo_label": false,
       "bagging_failure_data": false,
-      "keep_best_model_mode": "val_rmse",
+      "keep_best_model_mode": null,
       "isotonic_time_weighting": true,
       "computing_weight_mode": "val_rmse",
       "use_cotraining_ensemble_survival_loss_function": true,
       "cotraining_survival_loss_lambda": 0.7,
       "use_mondrian_categorizer": true,
-      "mondrian_no_bins": 10,
+      "mondrian_no_bins": 2,
       "use_cps": true,
       "difficulty_estimator_k": 25
     }
