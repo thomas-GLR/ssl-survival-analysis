@@ -23,26 +23,26 @@
         {
           "cnn": {
             "model_params": {},
-            "lr": 0.0002,
-            "weight_decay": 0,
-            "max_epochs": 50,
-            "patience": 500,
+            "lr": 0.0001,
+            "weight_decay": 0.001,
+            "max_epochs": 200,
+            "patience": 20,
             "rul_target_standardization": false
           }
         },
         {
           "lstm": {
             "model_params": {
-              "hidden_dim": 128,
+              "hidden_dim": 64,
               "lstm_num_layers": 1,
-              "lstm_dropout": 0.3,
+              "lstm_dropout": 0,
               "fc_layer_dim": 32,
-              "fc_dropout": 0.4
+              "fc_dropout": 0.2
             },
-            "lr": 0.0002,
-            "weight_decay": 0,
-            "max_epochs": 50,
-            "patience": 500,
+            "lr": 0.0001,
+            "weight_decay": 0.001,
+            "max_epochs": 200,
+            "patience": 20,
             "rul_target_standardization": false
           }
         },
@@ -54,7 +54,7 @@
               "fc_layer_dim": 32,
               "fc_dropout": 0.4
             },
-            "lr": 0.0002,
+            "lr": 0.0001,
             "weight_decay": 0,
             "max_epochs": 500,
             "patience": 50,
@@ -116,26 +116,26 @@
         {
           "cnn": {
             "model_params": {},
-            "lr": 0.0002,
-            "weight_decay": 0,
-            "max_epochs": 50,
-            "patience": 500,
+            "lr": 0.0001,
+            "weight_decay": 0.001,
+            "max_epochs": 200,
+            "patience": 20,
             "rul_target_standardization": false
           }
         },
         {
           "lstm": {
             "model_params": {
-              "hidden_dim": 128,
+              "hidden_dim": 64,
               "lstm_num_layers": 1,
-              "lstm_dropout": 0.3,
+              "lstm_dropout": 0,
               "fc_layer_dim": 32,
-              "fc_dropout": 0.4
+              "fc_dropout": 0.2
             },
-            "lr": 0.0002,
-            "weight_decay": 0,
-            "max_epochs": 50,
-            "patience": 500,
+            "lr": 0.0001,
+            "weight_decay": 0.001,
+            "max_epochs": 200,
+            "patience": 20,
             "rul_target_standardization": false
           }
         },
@@ -147,7 +147,7 @@
               "fc_layer_dim": 32,
               "fc_dropout": 0.4
             },
-            "lr": 0.0002,
+            "lr": 0.0001,
             "weight_decay": 0,
             "max_epochs": 500,
             "patience": 50,
@@ -209,26 +209,26 @@
         {
           "cnn": {
             "model_params": {},
-            "lr": 0.0002,
-            "weight_decay": 0,
-            "max_epochs": 50,
-            "patience": 500,
+            "lr": 0.0001,
+            "weight_decay": 0.001,
+            "max_epochs": 200,
+            "patience": 20,
             "rul_target_standardization": false
           }
         },
         {
           "lstm": {
             "model_params": {
-              "hidden_dim": 128,
+              "hidden_dim": 64,
               "lstm_num_layers": 1,
-              "lstm_dropout": 0.3,
+              "lstm_dropout": 0,
               "fc_layer_dim": 32,
-              "fc_dropout": 0.4
+              "fc_dropout": 0.2
             },
-            "lr": 0.0002,
-            "weight_decay": 0,
-            "max_epochs": 50,
-            "patience": 500,
+            "lr": 0.0001,
+            "weight_decay": 0.001,
+            "max_epochs": 200,
+            "patience": 20,
             "rul_target_standardization": false
           }
         },
@@ -240,7 +240,7 @@
               "fc_layer_dim": 32,
               "fc_dropout": 0.4
             },
-            "lr": 0.0002,
+            "lr": 0.0001,
             "weight_decay": 0,
             "max_epochs": 500,
             "patience": 50,
@@ -302,26 +302,26 @@
         {
           "cnn": {
             "model_params": {},
-            "lr": 0.0002,
-            "weight_decay": 0,
-            "max_epochs": 50,
-            "patience": 500,
+            "lr": 0.0001,
+            "weight_decay": 0.001,
+            "max_epochs": 200,
+            "patience": 20,
             "rul_target_standardization": false
           }
         },
         {
           "lstm": {
             "model_params": {
-              "hidden_dim": 128,
+              "hidden_dim": 64,
               "lstm_num_layers": 1,
-              "lstm_dropout": 0.3,
+              "lstm_dropout": 0,
               "fc_layer_dim": 32,
-              "fc_dropout": 0.4
+              "fc_dropout": 0.2
             },
-            "lr": 0.0002,
-            "weight_decay": 0,
-            "max_epochs": 50,
-            "patience": 500,
+            "lr": 0.0001,
+            "weight_decay": 0.001,
+            "max_epochs": 200,
+            "patience": 20,
             "rul_target_standardization": false
           }
         },
@@ -333,7 +333,7 @@
               "fc_layer_dim": 32,
               "fc_dropout": 0.4
             },
-            "lr": 0.0002,
+            "lr": 0.0001,
             "weight_decay": 0,
             "max_epochs": 500,
             "patience": 50,

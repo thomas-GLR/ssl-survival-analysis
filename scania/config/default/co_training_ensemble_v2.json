@@ -11,7 +11,7 @@
     "num_workers": 20,
     "pin_memory": true,
     "return_sequence_label": false,
-    "batch_size": 32,
+    "batch_size": 128,
     "shuffle_loader": true,
     "counter_mode": "cumulative",
     "include_histograms": true,
@@ -20,36 +20,44 @@
   "model_params": {
     "models": [
       {
-        "rulcnn": {
+        "cnn": {
           "model_params": {},
           "lr": 0.001,
           "weight_decay": 0,
-          "max_epochs": 100,
-          "patience": 10,
+          "max_epochs": 500,
+          "patience": 100,
           "rul_target_standardization": false
         }
       },
       {
-        "mlp": {
-          "model_params": {},
-          "lr": 0.0004,
-          "weight_decay": 0,
-          "max_epochs": 100,
-          "patience": 10,
-          "rul_target_standardization": false
-        }
-      },
-      {
-        "bilstm_attention": {
+        "lstm": {
           "model_params": {
-            "hidden_dim": 128,
-            "lstm_num_layers": 4
+            "hidden_dim": 64,
+            "lstm_num_layers": 2,
+            "lstm_dropout": 0.2,
+            "fc_layer_dim": 256,
+            "fc_dropout": 0.2
+          },
+          "lr": 0.002,
+          "weight_decay": 0,
+          "max_epochs": 500,
+          "patience": 100,
+          "rul_target_standardization": false
+        }
+      },
+      {
+        "transformer_features": {
+          "model_params": {
+            "transformer_encoder_head_num": 4,
+            "transformer_num_layer": 2,
+            "fc_layer_dim": 256,
+            "fc_dropout": 0.3
           },
           "lr": 0.0004,
           "weight_decay": 0,
-          "max_epochs": 200,
-          "patience": 20,
-          "rul_target_standardization": false
+          "max_epochs": 500,
+          "patience": 100,
+          "rul_target_standardization": true
         }
       }
     ]
@@ -57,7 +65,7 @@
   "training_params": {
     "iterations": 20,
     "suspension_pool_size": 0.35,
-    "add_ratio": 0.05,
+    "add_ratio": 0.1,
     "confidence": 0.95,
     "inference_batch_size": 1024,
     "use_average_window_confidence": true,
@@ -78,7 +86,7 @@
     "use_cotraining_ensemble_survival_loss_function": true,
     "cotraining_survival_loss_lambda": 0.7,
     "use_mondrian_categorizer": true,
-    "mondrian_no_bins": 10,
+    "mondrian_no_bins": 7,
     "use_cps": true,
     "difficulty_estimator_k": 25
   }

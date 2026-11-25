@@ -173,12 +173,14 @@ def reproduce_result(
                 if pretrained_model_dir is not None and is_coprog_or_co_training_ensemble_v2:
                     pretrained_model_dir_for_current_run = pretrained_model_dir
 
-                    sub_dataseet_censored_broken_run_name = f"{sub_dataset}-censored_{censored_percentage}-broken_{broken_percentage}"
+                    sub_dataset_censored_broken_run_name = f"{sub_dataset}-censored_{censored_percentage}-broken_{broken_percentage}"
 
-                    pretrained_model_dir_for_current_run = os.path.join(pretrained_model_dir_for_current_run, sub_dataseet_censored_broken_run_name)
+                    pretrained_model_dir_for_current_run = os.path.join(pretrained_model_dir_for_current_run, sub_dataset_censored_broken_run_name)
                     os.makedirs(pretrained_model_dir_for_current_run, exist_ok=True)
 
                     extra_params["pretrained_model_dir"] = pretrained_model_dir_for_current_run
+                else:
+                    extra_params["pretrained_model_dir"] = None
 
                 print(
                     f"Training model {model_version.value} for the sub dataset : {sub_dataset}, censored percentage : {censored_percentage} and broken percentage : {broken_percentage}")

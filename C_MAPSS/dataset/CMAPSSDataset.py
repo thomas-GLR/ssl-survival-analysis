@@ -434,7 +434,9 @@ class CMAPSSDataset(Dataset):
         if len(norm_params.shape) == 2:
             mean = norm_params[:, 0]
             standard = norm_params[:, 1]
-            standard_safe = np.where(standard == 0, 1.0, standard)
+            # Constant columns can have tiny nonzero std due to rounding.
+            tolerance = 1e-12 * np.maximum(1.0, np.abs(mean))
+            standard_safe = np.where(standard <= tolerance, 1.0, standard)
             df[cols] = (df[cols].to_numpy() - mean) / standard_safe
         elif len(norm_params.shape) == 3:
             op_list = df['op_type'].unique()
@@ -443,7 +445,9 @@ class CMAPSSDataset(Dataset):
                 mask = (df['op_type'] == op).to_numpy()
                 mean = norm_params[op_i, :, 0]
                 standard = norm_params[op_i, :, 1]
-                standard_safe = np.where(standard == 0, 1.0, standard)
+                # Use the same training-scale guard for every split.
+                tolerance = 1e-12 * np.maximum(1.0, np.abs(mean))
+                standard_safe = np.where(standard <= tolerance, 1.0, standard)
                 df.loc[mask, cols] = (df.loc[mask, cols].to_numpy() - mean) / standard_safe
         else:
             raise ValueError('norm_params shape error')
