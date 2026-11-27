@@ -752,3 +752,5 @@ Once finished, feed the values from
 `./outputs/hpo_scania/cnn_best_params.json` into the corresponding
 `scania/config/<benchmark-version>/*.json` config to train the tuned model with
 [`run_train_scania.py`](run_train_scania.py).
+
+CUDA_VISIBLE_DEVICES=7 python run_train_scania.py --model-version coprog --config-path ./scania/config --checkpoints-path ./checkpoints --results-path ./outputs --dataset-root ./data/scania --dataset-cache-dir ./scania_cache --force-load-from-cache --benchmark-version default --run-name coprog_scania_rulcnn_bilstm --pretrained-model-dir ./scania_cache/initials_model
