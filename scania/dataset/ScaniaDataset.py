@@ -634,7 +634,8 @@ class ScaniaDataset(Dataset):
         rows_number = len(df)
 
         # Contiguous group boundaries (rows are grouped by vehicle after sort).
-        starts = np.concatenate(([0], np.flatnonzero(np.diff(vehicules_ids) != 0) + 1))
+        starts = (np.concatenate(([0], np.flatnonzero(np.diff(vehicules_ids) != 0) + 1))
+                  if rows_number else np.empty(0, dtype=np.int64))
         counts = np.diff(np.concatenate((starts, [rows_number])))
 
         start_chunks: list[np.ndarray] = []
@@ -705,12 +706,12 @@ class ScaniaDataset(Dataset):
         self._win_start = np.concatenate(start_chunks, axis=0) if start_chunks else np.empty(0, np.int64)
         self._win_count = np.concatenate(count_chunks, axis=0) if count_chunks else np.empty(0, np.int32)
         self._n_windows = int(len(self._win_start))
-        self.label_array = np.concatenate(label_chunks, axis=0)
-        self.lower_bound_array = np.concatenate(lb_chunks, axis=0)
-        self.time_step_array = np.concatenate(ts_chunks, axis=0)
-        self.id_array = np.concatenate(id_chunks, axis=0)
+        self.label_array = np.concatenate(label_chunks, axis=0) if label_chunks else np.empty((0, seq_len) if self.return_sequence_label else (0,), dtype=np.float32)
+        self.lower_bound_array = np.concatenate(lb_chunks, axis=0) if lb_chunks else np.empty(0, dtype=np.float32)
+        self.time_step_array = np.concatenate(ts_chunks, axis=0) if ts_chunks else np.empty(0, dtype=np.float32)
+        self.id_array = np.concatenate(id_chunks, axis=0) if id_chunks else np.empty(0, dtype=vehicules_ids.dtype)
         # is_censored is constant within a vehicle.
-        self.is_censored_array = np.concatenate(cens_chunks, axis=0).astype(int)
+        self.is_censored_array = np.concatenate(cens_chunks, axis=0).astype(int) if cens_chunks else np.empty(0, dtype=int)
 
     # ------------------------------------------------------------------ #
     # On-demand window materialization
